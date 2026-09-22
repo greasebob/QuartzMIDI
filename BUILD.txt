@@ -1,0 +1,27 @@
+Building QuartzMIDI
+
+1. Install Visual Studio 2022 or later with the "Desktop development with C++" workload.
+2. Open QuartzMIDI.sln.
+3. Build. The configuration is Release x64.
+4. Run build\shell\QuartzMIDI.exe.
+
+Sheets are an add-on, built with the app into build\shell\addons\sheets.
+The app loads only add-ons signed with the key it was built with, so the
+build makes a key on this PC, in build\addon-key, and signs the add-on
+with it: tools\sign-addon.ps1, which the two projects run.
+
+Convert audio to MIDI: double-click tools\mp3-to-midi\setup.cmd, once.
+For the GPU build, which only an NVIDIA card can use: setup.cmd -Nvidia.
+
+It runs setup.ps1 beside it, which fetches python.org's embeddable Python
+3.12, pip, FFmpeg and Deno from their publishers, each checked against the
+SHA256 in pins.psd1, and installs the packages pinned in requirements.txt
+from PyPI. All of it lands in tools\mp3-to-midi, about 1.2 GB. No Python
+has to be installed, and one that is installed is left alone. Nothing comes
+from a QuartzMIDI download, and the script is short enough to read.
+
+It is built and tested with the v143 toolset (Visual Studio 2022).
+A later Visual Studio uses its own toolset unless v143 is installed:
+Individual components, "MSVC v143 - VS 2022 C++ x64/x86 build tools".
+
+From a command prompt: msbuild QuartzMIDI.sln /p:Configuration=Release /p:Platform=x64

@@ -1,0 +1,11 @@
+# CUDA 12.6 builds of torch and torchaudio, replacing the +cpu builds in
+# requirements.txt, for NVIDIA cards older than the RTX 20 series (compute
+# capability below 7.5), which CUDA 13 dropped. setup.ps1 -Nvidia chooses
+# this file or requirements-cu130.txt by the card. The wheels bundle the CUDA
+# runtime.
+--extra-index-url https://download.pytorch.org/whl/cu126
+
+torch==2.14.0+cu126 \
+    --hash=sha256:11a492e40dfd18597fdb8271879a3a09496a23140deb81a6b5a005d9cff7312b
+torchaudio==2.11.0+cu126 \
+    --hash=sha256:ca5b7815c6952c79c65dce9a78eb96be8b73a8b291f82ca473812a910cdc9fbc

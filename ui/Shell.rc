@@ -1,0 +1,5 @@
+#include <windows.h>
+1 ICON "QuartzMIDI.ico"
+101 RCDATA "../third_party/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
+102 RCDATA "../third_party/fonts/ibm-plex-sans/IBMPlexSans-Medium.ttf"
+103 RCDATA "../third_party/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"

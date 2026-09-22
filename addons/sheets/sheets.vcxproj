@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{3b9f6c52-7e1a-4d08-9c35-a2e4d17b6f81}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <!-- Same toolset selection as ui\QuartzMIDI.vcxproj. -->
+  <PropertyGroup Label="Configuration"><ConfigurationType>DynamicLibrary</ConfigurationType><PlatformToolset>v143</PlatformToolset><PlatformToolset Condition="!Exists('$(VCTargetsPath)\Platforms\x64\PlatformToolsets\v143\Toolset.props') And '$(DefaultPlatformToolset)' != ''">$(DefaultPlatformToolset)</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><LinkIncremental>false</LinkIncremental><TargetName>sheets</TargetName><OutDir>$(MSBuildThisFileDirectory)..\..\build\addons\sheets\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\..\build\addons\sheets-obj\</IntDir></PropertyGroup>
+  <ItemDefinitionGroup>
+    <!-- json.hpp comes from engine. Static CRT, matching the app, so no redistributable is needed. -->
+    <ClCompile><AdditionalOptions>/d1trimfile:"$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..'))" %(AdditionalOptions)</AdditionalOptions><WarningLevel>Level4</WarningLevel><LanguageStandard>stdcpp20</LanguageStandard><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\engine;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <Link><SubSystem>Windows</SubSystem><AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions><AdditionalDependencies>user32.lib;gdi32.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup><ClCompile Include="sheets.cpp" /></ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="SheetExport.hpp" />
+    <ClInclude Include="SheetImage.hpp" />
+    <ClInclude Include="SheetPage.hpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- Stage next to the built app and sign with the key embedded by ui\QuartzMIDI.vcxproj. -->
+  <PropertyGroup>
+    <AddonKey Condition="'$(AddonKey)' == ''">$(MSBuildThisFileDirectory)..\..\build\addon-key\key.bin</AddonKey>
+    <AddonStage>$(MSBuildThisFileDirectory)..\..\build\shell\addons\sheets</AddonStage>
+  </PropertyGroup>
+  <Target Name="SignAddon" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(AddonStage)" />
+    <Exec Command="&quot;%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\..\tools\sign-addon.ps1&quot; -MakeKey -Key &quot;$(AddonKey)&quot; -Folder &quot;$(AddonStage)&quot; -Name Sheets -Dll sheets.dll" />
+  </Target>
+</Project>

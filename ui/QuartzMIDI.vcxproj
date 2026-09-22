@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals"><ProjectGuid>{8f2c1a77-3d6e-4a91-b0c2-51d7e9a4f310}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <!-- Prefer v143, the tested toolset. Fall back to the installed Visual Studio's
+       default toolset when v143 is absent, which otherwise fails with MSB8020. -->
+  <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><PlatformToolset Condition="!Exists('$(VCTargetsPath)\Platforms\x64\PlatformToolsets\v143\Toolset.props') And '$(DefaultPlatformToolset)' != ''">$(DefaultPlatformToolset)</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup><TargetName>QuartzMIDI</TargetName><OutDir>$(MSBuildThisFileDirectory)..\build\shell\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\build\shell-obj\</IntDir></PropertyGroup>
+  <ItemDefinitionGroup>
+    <!-- Level3 because the vendored ImGui sources are not warning-clean at Level4. -->
+    <ClCompile><AdditionalOptions>/d1trimfile:"$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))" %(AdditionalOptions)</AdditionalOptions><WarningLevel>Level3</WarningLevel><LanguageStandard>stdcpp20</LanguageStandard><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;__WINDOWS_MM__;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\third_party\imgui;$(MSBuildThisFileDirectory)..\engine;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><MultiProcessorCompilation>true</MultiProcessorCompilation></ClCompile>
+    <Link><SubSystem>Windows</SubSystem><AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;dwmapi.lib;avrt.lib;winmm.lib;ole32.lib;shell32.lib;comdlg32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Manifest><AdditionalManifestFiles>$(MSBuildThisFileDirectory)Shell.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="Shell.cpp" />
+    <ClCompile Include="SkinDraw.cpp" />
+    <ClCompile Include="Fonts.cpp" />
+    <ClCompile Include="Panels.cpp" />
+    <ClCompile Include="TrackModel.cpp" />
+    <ClCompile Include="ShellEngine.cpp" />
+    <ClCompile Include="..\engine\PlaybackCore.cpp" />
+    <ClCompile Include="..\engine\MIDIParser.cpp" />
+    <ClCompile Include="..\engine\ConfigHandler.cpp" />
+    <ClCompile Include="..\engine\TranspositionCore.cpp" />
+    <ClCompile Include="..\engine\InputInjector.cpp" />
+    <ClCompile Include="..\engine\InputLatency.cpp" />
+    <ClCompile Include="..\engine\KernelStreamingInput.cpp" />
+    <ClCompile Include="..\engine\MidiInput.cpp" />
+    <ClCompile Include="..\engine\MidiOutput.cpp" />
+    <ClCompile Include="..\engine\MIDI2Key.cpp" />
+    <ClCompile Include="..\engine\MIDIConnect.cpp" />
+    <ClCompile Include="..\engine\WootingAnalog.cpp" />
+    <ClCompile Include="..\engine\RtMidi.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_draw.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_tables.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="..\third_party\imgui\backends\imgui_impl_dx11.cpp" />
+    <ClCompile Include="..\third_party\imgui\backends\imgui_impl_win32.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="SkinDraw.hpp" />
+    <ClInclude Include="Fonts.hpp" />
+    <ClInclude Include="Panels.hpp" />
+    <ClInclude Include="TrackModel.hpp" />
+    <ClInclude Include="ShellEngine.hpp" />
+    <ClInclude Include="AutoVolume.hpp" />
+    <ClInclude Include="VelocityModel.hpp" />
+    <ClInclude Include="HotkeyNames.hpp" />
+    <ClInclude Include="ThemeModel.hpp" />
+    <ClInclude Include="HelpModel.hpp" />
+    <ClInclude Include="AddonKey.hpp" />
+    <ClInclude Include="Bundle.hpp" />
+    <ClInclude Include="..\engine\Skin.hpp" />
+  </ItemGroup>
+  <ItemGroup><ResourceCompile Include="Shell.rc" /></ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!-- The app trusts a single add-on signing key. Generate one if none exists and
+       write its public half to build\addon-key\AddonKey.hpp. Override with
+       /p:AddonKey=<file>; addons\sheets\sheets.vcxproj signs with the same key. -->
+  <PropertyGroup><AddonKey Condition="'$(AddonKey)' == ''">$(MSBuildThisFileDirectory)..\build\addon-key\key.bin</AddonKey></PropertyGroup>
+  <Target Name="AddonKeyHeader" BeforeTargets="ClCompile">
+    <Exec Command="&quot;%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\tools\sign-addon.ps1&quot; -MakeKey -Key &quot;$(AddonKey)&quot; -Header &quot;$(MSBuildThisFileDirectory)..\build\addon-key\AddonKey.hpp&quot;" />
+  </Target>
+  <Target Name="CopyShellDefaults" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\x64\Release\config.json" DestinationFiles="$(OutDir)config.json" Condition="!Exists('$(OutDir)config.json')" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\third_party\fonts\ibm-plex-sans\LICENSE.txt" DestinationFiles="$(OutDir)IBM-Plex-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\third_party\imgui\LICENSE.txt" DestinationFiles="$(OutDir)ImGui-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\third_party\midi-converter\LICENSE" DestinationFiles="$(OutDir)midi-converter-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\third_party\lucide\LICENSE" DestinationFiles="$(OutDir)Lucide-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\third_party\rtmidi\LICENSE" DestinationFiles="$(OutDir)RtMidi-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\third_party\nlohmann-json\LICENSE.MIT" DestinationFiles="$(OutDir)nlohmann-json-LICENSE.txt" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\LICENSE" DestinationFiles="$(OutDir)LICENSE" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

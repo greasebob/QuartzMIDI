@@ -1,0 +1,11 @@
+# CUDA 13.0 builds of torch and torchaudio, replacing the +cpu builds in
+# requirements.txt, for NVIDIA cards from the RTX 20 series on (compute
+# capability 7.5 and up), the RTX 50 series included, with a driver of 580 or
+# later. setup.ps1 -Nvidia chooses this file or requirements-cu126.txt by the
+# card. The wheels bundle the CUDA runtime.
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+torch==2.14.0+cu130 \
+    --hash=sha256:6a20371bf5af2af933a6149e5ec13f7ea7ad506276137dae9386f98d236c02ff
+torchaudio==2.11.0+cu130 \
+    --hash=sha256:f74949f9ace1e4a6cf9468bdb3211b9cfa0af6ea348125471ac71c8621d6c77d

@@ -1,0 +1,9 @@
+# What setup.ps1 makes here, and the YouTube session signin.py leaves.
+/python/
+/ffmpeg/
+/deno/
+/downloads/
+/runtime/
+/setup.partial
+/browser/
+/cookies.txt
