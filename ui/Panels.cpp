@@ -3132,7 +3132,7 @@ void Panels::DrawLog(HWND hwnd, const Fonts& fonts, const skin::Skin& design, fl
     const ImVec2 limit(std::max(320 * dpi, viewport->WorkSize.x - 32 * dpi),
                        std::max(160 * dpi, viewport->WorkSize.y - 32 * dpi));
     ImGui::SetNextWindowSizeConstraints(ImVec2(320 * dpi, 160 * dpi), limit);
-    ImGui::SetNextWindowSize(ImVec2(std::min(600 * dpi, limit.x), std::min(320 * dpi, limit.y)), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(std::min(900 * dpi, limit.x), std::min(480 * dpi, limit.y)), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x / 2,
                                   viewport->WorkPos.y + viewport->WorkSize.y / 2), ImGuiCond_Appearing, ImVec2(.5f, .5f));
     // Dragged outside the main window, the log becomes an OS window of its own and
@@ -3149,9 +3149,48 @@ void Panels::DrawLog(HWND hwnd, const Fonts& fonts, const skin::Skin& design, fl
         if (IconButton("##clear-log", Icon::Clear, "Clear Log", s, dpi)) engine.Send({ShellEngine::Action::ClearLog});
         ImGui::SameLine();
         if (IconButton("##copy-log", Icon::Copy, "Copy Log", s, dpi)) CopyUtf8ToClipboard(hwnd, *state->log);
-        ImGui::BeginChild("##log-output", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+        // Lines wrap to the panel: a long line (a Python warning, a path) would
+        // otherwise run off the right edge.
+        ImGui::BeginChild("##log-output", ImVec2(0, 0), ImGuiChildFlags_Borders);
         const bool atBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4 * dpi;
-        if (!state->log->empty()) ImGui::TextUnformatted(state->log->data(), state->log->data() + state->log->size());
+        const std::string& text = *state->log;
+        const float width = std::max(ImGui::GetContentRegionAvail().x, 40 * dpi), size = ImGui::GetFontSize();
+        // A wrapped line's later rows are indented, so they don't read as new lines.
+        const float indent = 2 * size;
+        const auto continues = [&](size_t row) { return row > 0 && text[row - 1] != '\n'; };
+        if (logWrappedText != state->log || logWrappedWidth != width || logWrappedFont != size) {
+            logWrappedText = state->log; logWrappedWidth = width; logWrappedFont = size;
+            logRows.clear();
+            const char* const begin = text.data();
+            for (size_t start = 0; start < text.size();) {
+                size_t end = text.find('\n', start);
+                const size_t next = end == std::string::npos ? text.size() : end + 1;
+                if (end == std::string::npos) end = text.size();
+                if (end > start && text[end - 1] == '\r') --end;
+                const char* p = begin + start;
+                const char* const lineEnd = begin + end;
+                if (p == lineEnd) logRows.emplace_back(start, start);
+                while (p < lineEnd) {
+                    const char* cut = ImGui::GetFont()->CalcWordWrapPosition(size, p, lineEnd,
+                                                                             p == begin + start ? width : width - indent);
+                    if (cut <= p) { // one glyph wider than the panel still takes a row
+                        cut = p + 1;
+                        while (cut < lineEnd && (static_cast<unsigned char>(*cut) & 0xc0) == 0x80) ++cut;
+                    }
+                    logRows.emplace_back(p - begin, cut - begin);
+                    p = cut;
+                    while (p < lineEnd && *p == ' ') ++p;
+                }
+                start = next;
+            }
+        }
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(logRows.size()), ImGui::GetTextLineHeightWithSpacing());
+        while (clipper.Step())
+            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                if (continues(logRows[i].first)) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
+                ImGui::TextUnformatted(text.data() + logRows[i].first, text.data() + logRows[i].second);
+            }
         if (atBottom) ImGui::SetScrollHereY(1.f);
         ImGui::EndChild();
     }

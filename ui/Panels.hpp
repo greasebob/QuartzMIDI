@@ -100,6 +100,11 @@ public:
     bool miniAutoplay = false;
     bool autoVolumeOpen = false;
     bool logOpen = false;
+    // The log's rows wrapped to the panel, rebuilt when the log text, the width
+    // or the font size changes, so a full log isn't re-measured every frame.
+    std::shared_ptr<const std::string> logWrappedText;
+    float logWrappedWidth = 0, logWrappedFont = 0;
+    std::vector<std::pair<size_t, size_t>> logRows;
     // One-frame request to open the Convert audio popover, set by the Files
     // header button or a render test; Draw clears it.
     bool openConvert = false;

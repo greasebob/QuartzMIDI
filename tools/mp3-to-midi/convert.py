@@ -285,6 +285,9 @@ def main():
     if not is_link(args.source):
         args.source = os.path.abspath(args.source)
     os.chdir(here)
+    # Transkun's libraries warn about their own deprecations on every run; in
+    # the app's log they read as errors, so the transcription runs without them.
+    os.environ["PYTHONWARNINGS"] = "ignore"
     for tool in ("ffmpeg", "deno"):
         bundled = os.path.join(here, tool)
         if os.path.isdir(bundled):
