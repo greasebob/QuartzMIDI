@@ -207,7 +207,6 @@ struct EngineSnapshot {
     int sustainCutoff = 64;
     std::string velocityModifier = "alt";
     std::vector<std::string> velocityModifierConflicts;
-    velocity_telemetry::Snapshot playedVelocities;
     double wootingTriggerThreshold = 0.25;
     int wootingShiftAmount = 1;
     double wootingVelocityScale = 2.0;
@@ -222,6 +221,10 @@ struct EngineSnapshot {
     bool youtubeSignedIn = false;
     bool converterInstalled = false;
     bool converterCanSetUp = false;
+    // Installed on PyTorch's CUDA build, and able to be set up again as the other.
+    bool converterGpu = false;
+    bool converterCanSwitch = false;
+    bool nvidiaCard = false;
     bool settingUp = false;
     std::string ActiveVelocityName() const {
         return comparingCurve ? previousPreset.name + (VelocityEdited(previousCurve) ? " (edited)" : "") : VelocityName(curves, curve);
@@ -241,6 +244,9 @@ public:
                         // under the sheets folder.
                         SaveSheetFiles,
                         CurveSelect, CurveAdjust, CurveEdit, CurveUndo, CurveRedo, CurveCompare, CurveNew,
+                        // track is the index of one of the user's own curves;
+                        // the built-ins are never deleted.
+                        CurveDelete,
                         CurveDuplicate, CurveRename, SustainCutoff, VelocityModifier,
                         WootingTriggerThreshold, WootingShiftAmount, WootingVelocityScale, EightyEightKeys,
                         AutoVolumeScan, AutoVolumeCalibrate, AutoVolumeOff, AutoVolumeCancel, ClearLog,
@@ -249,6 +255,9 @@ public:
                         // value is the setting. Saves the config key and
                         // reloads the open file so the track list matches.
                         DetectDrums, AutoTranspose,
+                        // value is the panel's Solo Piano on load, for the loads
+                        // the engine starts itself (Previous, Next, shuffle, reloads).
+                        AutoSolo,
                         // SheetsFolder/SheetStylePage: path, empty to clear.
                         // SheetFiles: key names the output (image, text, page),
                         // value enables it. SaveLibrarySheets exports the whole
@@ -285,6 +294,12 @@ public:
         std::wstring device;
         std::vector<VelocityPoint> anchors;
         GameWindow window;
+        // Scan: what the folder watcher's own walk found, so the worker does not walk again.
+        std::shared_ptr<std::vector<MidiEntry>> files;
+        // A reopen a device scan sends for a device that came back. It runs
+        // whenever a device comes or goes, so it cancels no calibration, and
+        // when it fails the song plays on and the device stays saved.
+        bool automatic = false;
     };
     explicit ShellEngine(std::filesystem::path config, std::shared_ptr<AutoVolumeHost> volumeHost = {},
                          bool requireTypingAcknowledgement = false, ConnectFactory connectFactory = {});

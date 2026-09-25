@@ -5,6 +5,8 @@
 #include "InputLatency.hpp"
 #include "VelocityTelemetry.hpp"
 #include "WootingAnalog.hpp"
+#include <mutex>
+#include <utility>
 
 #pragma comment(lib, "avrt.lib")
 
@@ -394,11 +396,18 @@ void MIDI2Key::OpenDevice(const std::wstring& deviceId) {
         [this](uint64_t timestampQpc, const uint8_t* data, size_t length) {
             this->ProcessMidiMessage(timestampQpc, data, length);
         });
+    // A device that keeps failing, tried again at each device scan, is logged
+    // once until it opens.
+    static std::mutex failedMutex;
+    static std::wstring lastFailed;
+    std::lock_guard failedLock(failedMutex);
     if (!opened) {
-        std::wcerr << L"Failed to open MIDI device: " << deviceId << std::endl;
+        if (std::exchange(lastFailed, deviceId) != deviceId)
+            std::wcerr << L"Failed to open MIDI device: " << deviceId << std::endl;
         m_input.reset();
         return;
     }
+    if (lastFailed == deviceId) lastFailed.clear();
     m_selectedDevice = deviceId;
 }
 
@@ -430,6 +439,10 @@ bool MIDI2Key::IsActive() const {
 }
 
 void MIDI2Key::SetActive(bool active) {
+    // Callers sweep the held keys next, and a transport's close does not
+    // always wait for a callback already past the active check, so wait for
+    // it here or its key-down lands after the sweep.
+    if (!active) { Quiesce(); return; }
     // Re-arming rebuilds the tables callbacks read and resets scancode
     // ownership, so drain the callbacks and release held keys with the old
     // tables first.

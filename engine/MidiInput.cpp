@@ -20,7 +20,9 @@
 #include "WootingAnalog.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <mutex>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -105,26 +107,39 @@ public:
         }
         if (!m_port) return false;
 
-        m_callback = std::move(callback);
+        auto delivery = std::make_shared<Delivery>();
+        delivery->callback = std::move(callback);
+        m_delivery = delivery;
+        // The handler holds what it reads, so one still running after close
+        // returns touches nothing close has freed, and delivers nothing.
         m_token = m_port.MessageReceived(
-            [this](winrt::Windows::Devices::Midi::MidiInPort const&,
-                   winrt::Windows::Devices::Midi::MidiMessageReceivedEventArgs const& args) {
+            [delivery](winrt::Windows::Devices::Midi::MidiInPort const&,
+                       winrt::Windows::Devices::Midi::MidiMessageReceivedEventArgs const& args) {
                 const uint64_t t0 = nowQpc();
-                auto raw = args.Message().RawData();
-                if (!raw || raw.Length() == 0 || !m_callback) return;
-                m_callback(t0, raw.data(), static_cast<size_t>(raw.Length()));
+                delivery->inFlight.fetch_add(1, std::memory_order_seq_cst);
+                if (delivery->open.load(std::memory_order_seq_cst)) {
+                    auto raw = args.Message().RawData();
+                    if (raw && raw.Length() > 0) delivery->callback(t0, raw.data(), static_cast<size_t>(raw.Length()));
+                }
+                delivery->inFlight.fetch_sub(1, std::memory_order_release);
             });
         m_openedId = deviceId;
         return true;
     }
 
+    // Returns once no message is being delivered, as the other transports do:
+    // the caller sweeps held keys next, and a late key-down would land after it.
     void close() override {
+        if (m_delivery) m_delivery->open.store(false, std::memory_order_seq_cst);
         if (m_port) {
             m_port.MessageReceived(m_token);
             m_port.Close();
             m_port = nullptr;
         }
-        m_callback = nullptr;
+        if (m_delivery) {
+            while (m_delivery->inFlight.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+            m_delivery.reset();
+        }
         m_openedId.clear();
     }
 
@@ -132,9 +147,14 @@ public:
     const std::wstring& openedDeviceId() const noexcept override { return m_openedId; }
 
 private:
+    struct Delivery {
+        MidiInputCallback callback;
+        std::atomic<bool> open{true};
+        std::atomic<int> inFlight{0};
+    };
     winrt::Windows::Devices::Midi::MidiInPort m_port{ nullptr };
     winrt::event_token m_token{};
-    MidiInputCallback m_callback;
+    std::shared_ptr<Delivery> m_delivery;
     std::wstring m_openedId;
 };
 
@@ -208,8 +228,11 @@ public:
     void close() override {
         if (m_in) {
             try {
-                m_in->cancelCallback();
+                // Port first: RtMidi clears the callback pointer before the
+                // flag its input thread checks, so a note arriving between
+                // the two would call through a null pointer.
                 m_in->closePort();
+                m_in->cancelCallback();
             }
             catch (RtMidiError const&) {
             }
@@ -244,10 +267,23 @@ private:
 
 namespace {
 MidiInputFactory g_factory;
+// Held while a report runs, so removing the handler waits for one in flight.
+std::mutex g_lostMutex;
+MidiInputLostHandler g_lost;
 }
 
 void SetMidiInputFactory(MidiInputFactory factory) {
     g_factory = std::move(factory);
+}
+
+void SetMidiInputLostHandler(MidiInputLostHandler handler) {
+    std::lock_guard lock(g_lostMutex);
+    g_lost = std::move(handler);
+}
+
+void ReportMidiInputLost(const std::wstring& deviceId) {
+    std::lock_guard lock(g_lostMutex);
+    if (g_lost) g_lost(deviceId);
 }
 
 std::unique_ptr<IMidiInput> CreateMidiInput(MidiBackend backend) {
@@ -260,7 +296,14 @@ std::unique_ptr<IMidiInput> CreateMidiInput(MidiBackend backend) {
     return std::make_unique<WinRTMidiInput>();
 }
 
+static MidiInputEnumerator g_enumerator;
+
+void SetMidiInputEnumerator(MidiInputEnumerator enumerator) {
+    g_enumerator = std::move(enumerator);
+}
+
 std::vector<MidiInputDevice> EnumerateMidiInputs() {
+    if (g_enumerator) return g_enumerator();
     WinRTMidiInput winrtInput;
     auto devices = winrtInput.enumerate();
 

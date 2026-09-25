@@ -18,7 +18,7 @@ By BobGrease. Based on [MIDI++](https://github.com/Zephkek/MIDIPlusPlus) by Zeph
 
 ## Add-ons
 
-`QuartzMIDI-v1.0.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.0.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.0-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
+`QuartzMIDI-v1.0.1.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.0.1.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.0.1-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
 
 - `sheets.zip`: a song as a sheet, copied, saved or opened in the sheet editor.
 - `converter.zip`: audio to MIDI, from a file or a link.

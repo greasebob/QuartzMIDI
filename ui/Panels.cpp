@@ -30,38 +30,119 @@ ImU32 OpaqueTint(skin::Argb tint, skin::Argb surface) {
         ((surface >> shift) & 255) * (255 - alpha) + 127) / 255; };
     return IM_COL32(channel(16), channel(8), channel(0), 255);
 }
+// An ImGui colour (IM_COL32 order) as the skin's 0xAARRGGBB.
+skin::Argb ToArgb(ImU32 c) { return (c & 0xFF00FF00u) | ((c & 0xFF) << 16) | ((c >> 16) & 0xFF); }
+skin::Argb StyleArgb(ImGuiCol idx) { return ToArgb(ImGui::ColorConvertFloat4ToU32(ImGui::GetStyleColorVec4(idx))); }
+
+// Control state changes (hover, on and off, selection, open) ease out over
+// 160 ms. Only the drawing eases: state, hit areas and presses change at once.
+// Set while an eased value is still moving, so the on-demand renderer keeps
+// drawing until it settles.
+bool g_motion = false;
+// Frame on which every eased value takes its target (SettleMotion).
+int g_settleFrame = -1;
+
+// Eases toward `target` by an exponential approach that is within 1% of it
+// after 155 ms at any frame rate, and snaps there. A value that wasn't drawn
+// last frame (a popup reopened, a row scrolled in) starts at its target. The
+// keys are hashed from `id`, so they never meet ImGui's own entries in the
+// window's storage.
+float Ease(ImGuiID id, float target) {
+    ImGuiStorage* storage = ImGui::GetStateStorage();
+    const ImGuiID valueKey = ImHashStr("motion", 0, id), frameKey = ImHashStr("motion-frame", 0, id);
+    const int frame = ImGui::GetFrameCount(), stamp = storage->GetInt(frameKey, -2);
+    float value = storage->GetFloat(valueKey, target);
+    if (stamp == frame) return value;
+    if (stamp < frame - 1 || frame == g_settleFrame) value = target;
+    else {
+        value += (target - value) * (1 - std::exp(-30.f * ImGui::GetIO().DeltaTime));
+        if (std::abs(target - value) < .01f) value = target;
+        else g_motion = true;
+    }
+    storage->SetFloat(valueKey, value);
+    storage->SetInt(frameKey, frame);
+    return value;
+}
+
+// A fill that ImGui draws is chosen before its item exists, so it eases toward
+// whether the item was hovered last frame, as NoteHover recorded after it.
+float EaseHover(ImGuiID key) {
+    const bool was = ImGui::GetStateStorage()->GetInt(ImHashStr("hovered", 0, key), -2) == ImGui::GetFrameCount() - 1;
+    return Ease(ImHashStr("hot", 0, key), was ? 1.f : 0.f);
+}
+void NoteHover(ImGuiID key) {
+    if (ImGui::IsItemHovered()) ImGui::GetStateStorage()->SetInt(ImHashStr("hovered", 0, key), ImGui::GetFrameCount());
+}
+
+// Blends in premultiplied alpha, so a transparent end only fades the other
+// colour instead of darkening it. The ends come back exactly, so a settled
+// control draws as it would without motion.
+skin::Argb Mix(skin::Argb a, skin::Argb b, float t) {
+    if (t <= 0) return a;
+    if (t >= 1) return b;
+    const float from = (a >> 24) / 255.f, to = (b >> 24) / 255.f, alpha = from + (to - from) * t;
+    if (alpha <= 0) return 0;
+    const auto channel = [&](int shift) {
+        const float mixed = (((a >> shift) & 255) * from * (1 - t) + ((b >> shift) & 255) * to * t) / alpha;
+        return static_cast<skin::Argb>(mixed + .5f) << shift;
+    };
+    return (static_cast<skin::Argb>(alpha * 255 + .5f) << 24) | channel(16) | channel(8) | channel(0);
+}
+
+// Scales the alpha of everything drawn into `draw` since vertex `first`, to fade
+// drawing that has no single colour, such as a shadowed shape.
+void FadeVertices(ImDrawList* draw, int first, float alpha) {
+    for (int i = first; i < draw->VtxBuffer.Size; ++i) {
+        ImU32& colour = draw->VtxBuffer[i].col;
+        const auto faded = static_cast<ImU32>(((colour >> IM_COL32_A_SHIFT) & 0xFF) * alpha);
+        colour = (colour & ~IM_COL32_A_MASK) | (faded << IM_COL32_A_SHIFT);
+    }
+}
+
 // Browser CSS sizes use the font em; stb_truetype uses ascent minus descent.
 // The shipped IBM Plex hhea/head ratio is 1300/1000.
 float SpecFontScale(const skin::Skin&) { return 1.3f; }
 enum class Icon { Folder, Open, Refresh, Settings, Sun, Moon, Play, Pause, Back, Forward,
                   Minus, Plus, Left, Right, Down, Up, Close, Keyboard, Speaker, Muted, Solo, Piano,
                   Mini, Expand, Copy, Rename, Check, SortDown, SortUp, Undo, Redo, Anchor, Clear,
+                  Draw, Delete,
                   Hold, Tap, Audio, Discord, Roblox, Help };
 
 // Icons are Lucide, flattened to polylines by tools/gen-icons.py into
 // ui/IconData.hpp. Vector rather than a raster atlas so they stay crisp at
-// 150% and 200%.
-void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 min, float side, ImU32 ink, float dpi) {
+// 150% and 200%. `turn` rotates the icon clockwise about its centre, in radians.
+void DrawIcon(ImDrawList* dl, Icon icon, ImVec2 min, float side, ImU32 ink, float dpi, float turn = 0) {
     const auto& glyph = icon_data::kGlyphs[static_cast<int>(icon)];
     const float scale = side / (icon_data::kGrid * icon_data::kUnit);
     // Lucide strokes at width 2 on a 24-unit grid. Clamp to one pixel; thinner
     // strokes render as a grey smear.
     const float thickness = std::max(1.f, side * icon_data::kStrokeWidth / icon_data::kGrid);
+    const float cosine = std::cos(turn), sine = std::sin(turn), half = side / 2;
+    const auto point = [&](const short* xy) {
+        const ImVec2 at(min.x + xy[0] * scale, min.y + xy[1] * scale);
+        if (turn == 0) return at;
+        const float dx = at.x - min.x - half, dy = at.y - min.y - half;
+        return ImVec2(min.x + half + dx * cosine - dy * sine, min.y + half + dx * sine + dy * cosine);
+    };
     for (unsigned short p = 0; p < glyph.count; ++p) {
         const auto& path = icon_data::kPaths[glyph.first + p];
         // Lucide dots flatten to a single point, and a one-point stroke draws nothing,
         // so draw them as filled circles.
         if (path.count == 1) {
-            const short* xy = &icon_data::kPoints[2 * path.first];
-            dl->AddCircleFilled(ImVec2(min.x + xy[0] * scale, min.y + xy[1] * scale), thickness * .6f, ink);
+            dl->AddCircleFilled(point(&icon_data::kPoints[2 * path.first]), thickness * .6f, ink);
             continue;
         }
-        for (unsigned short i = 0; i < path.count; ++i) {
-            const short* xy = &icon_data::kPoints[2 * (path.first + i)];
-            dl->PathLineTo(ImVec2(min.x + xy[0] * scale, min.y + xy[1] * scale));
-        }
+        for (unsigned short i = 0; i < path.count; ++i)
+            dl->PathLineTo(point(&icon_data::kPoints[2 * (path.first + i)]));
         dl->PathStroke(ink, path.closed ? ImDrawFlags_Closed : 0, thickness);
     }
+}
+
+// Disclosure chevron: Right turns a quarter clockwise to Down as `open` goes
+// from 0 to 1. The ends draw the glyphs themselves.
+void DrawChevron(ImDrawList* dl, ImVec2 min, float side, ImU32 ink, float dpi, float open) {
+    if (open <= 0 || open >= 1) DrawIcon(dl, open >= 1 ? Icon::Down : Icon::Right, min, side, ink, dpi);
+    else DrawIcon(dl, Icon::Right, min, side, ink, dpi, open * 1.5707963f);
 }
 
 // Brand marks are filled in the brand's colour: the first path is filled and
@@ -113,20 +194,26 @@ void DrawMark(ImDrawList* dl, Icon icon, ImVec2 min, float side, ImU32 fill) {
 bool IconButton(const char* id, Icon icon, const char* tip, const skin::Skin& s, float dpi, bool active = false) {
     const float height = s.metric.controlHeight;
     const ImVec2 min = ImGui::GetCursorScreenPos();
-    if (active) ImGui::PushStyleColor(ImGuiCol_Button, Colour(s.accent.accentSoft));
+    const ImGuiID key = ImGui::GetID(id);
+    const float on = Ease(ImHashStr("on", 0, key), active ? 1.f : 0.f);
+    // Hover and on ease; ButtonActive is left alone so a press shows at once.
+    const ImU32 fill = Colour(Mix(Mix(StyleArgb(ImGuiCol_Button), s.accent.accentSoft, on), StyleArgb(ImGuiCol_ButtonHovered), EaseHover(key)));
+    ImGui::PushStyleColor(ImGuiCol_Button, fill);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fill);
     const bool clicked = ImGui::Button(id, ImVec2(height, height));
-    if (active) ImGui::PopStyleColor();
+    ImGui::PopStyleColor(2);
+    NoteHover(key);
     // The icon is custom-drawn, so fade it by hand for a disabled button.
-    const ImU32 ink = Colour(active ? s.accent.accent : s.ink.secondary);
+    const ImU32 ink = Colour(Mix(s.ink.secondary, s.accent.accent, on));
     const ImU32 alpha = static_cast<ImU32>((ink >> IM_COL32_A_SHIFT & 0xFF) * ImGui::GetStyle().Alpha);
     DrawIcon(ImGui::GetWindowDrawList(), icon, ImVec2(min.x + (height - 16.f * dpi) / 2,
              min.y + (height - 16.f * dpi) / 2), 16.f * dpi,
              (ink & ~IM_COL32_A_MASK) | (alpha << IM_COL32_A_SHIFT), dpi);
     // An active toggle gets an outline, so its state isn't carried by colour alone;
     // this matches the selected segment of the mini Live/Autoplay control.
-    if (active)
+    if (on > 0)
         ImGui::GetWindowDrawList()->AddRect(min, ImVec2(min.x + height, min.y + height),
-                                            Colour(s.accent.accent), s.radius.control, 0, dpi);
+                                            Faded(Mix(s.accent.accent & 0xFFFFFFu, s.accent.accent, on)), s.radius.control, 0, dpi);
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", tip);
     return clicked;
 }
@@ -147,32 +234,40 @@ bool TransportBody(const char* id, const Icon* icon, const char* label,
     const float width = 2 * pad + lead + reserved;
     const float frameX = min.x;
     min.x += std::floor((reserved - labelWidth) / 2);
-    if (active) ImGui::PushStyleColor(ImGuiCol_Button, Colour(s.accent.accentSoft));
+    const ImGuiID key = ImGui::GetID(id);
+    const float on = Ease(ImHashStr("on", 0, key), active ? 1.f : 0.f), hot = EaseHover(key);
     // The primary button is filled with the accent, with ink chosen from white or
     // near-black to contrast with it.
     const auto shade = [&](float by) {
-        const auto channel = [&](int shift) { return static_cast<int>(std::clamp(((s.accent.accent >> shift) & 255) * by, 0.f, 255.f)); };
-        return IM_COL32(channel(16), channel(8), channel(0), 255);
+        const auto channel = [&](int shift) { return static_cast<skin::Argb>(std::clamp(((s.accent.accent >> shift) & 255) * by, 0.f, 255.f)); };
+        return 0xFF000000u | channel(16) << 16 | channel(8) << 8 | channel(0);
     };
+    // Hover and on ease; ButtonActive is left alone so a press shows at once.
+    const ImU32 fill = Colour(primary ? Mix(shade(1.f), shade(1.1f), hot)
+        : Mix(Mix(StyleArgb(ImGuiCol_Button), s.accent.accentSoft, on), StyleArgb(ImGuiCol_ButtonHovered), hot));
+    ImGui::PushStyleColor(ImGuiCol_Button, fill);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fill);
     if (primary) {
-        ImGui::PushStyleColor(ImGuiCol_Button, shade(1.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, shade(1.1f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, shade(.9f));
-        ImGui::PushStyleColor(ImGuiCol_Border, shade(1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, Colour(shade(.9f)));
+        ImGui::PushStyleColor(ImGuiCol_Border, Colour(shade(1.f)));
     }
     const bool clicked = ImGui::Button(id, ImVec2(width, s.metric.controlHeight));
-    if (primary) ImGui::PopStyleColor(4);
-    if (active) ImGui::PopStyleColor();
+    ImGui::PopStyleColor(primary ? 4 : 2);
+    NoteHover(key);
     auto* draw = ImGui::GetWindowDrawList();
-    const float luminance = (.299f * ((s.accent.accent >> 16) & 255) + .587f * ((s.accent.accent >> 8) & 255) +
-                             .114f * (s.accent.accent & 255)) / 255.f;
-    const ImU32 onAccent = ImGui::GetColorU32(luminance > .6f ? IM_COL32(16, 18, 24, 255) : IM_COL32(255, 255, 255, 255));
-    const ImU32 ink = primary ? onAccent : active ? Colour(s.accent.accent) : ImGui::GetColorU32(ImGuiCol_Text);
+    // By contrast ratio against the accent (WCAG relative luminance): the (16, 18,
+    // 24) ink wins once the accent's luminance passes about 0.19.
+    const auto linear = [&](int shift) { return static_cast<float>(theme_detail::ToLinear(((s.accent.accent >> shift) & 255) / 255.0)); };
+    const float luminance = .2126f * linear(16) + .7152f * linear(8) + .0722f * linear(0);
+    const bool darkInk = (luminance + .05f) / .0561f > 1.05f / (luminance + .05f);
+    const ImU32 onAccent = ImGui::GetColorU32(darkInk ? IM_COL32(16, 18, 24, 255) : IM_COL32(255, 255, 255, 255));
+    const ImU32 ink = primary ? onAccent : on > 0 ? Faded(Mix(StyleArgb(ImGuiCol_Text), s.accent.accent, on)) : ImGui::GetColorU32(ImGuiCol_Text);
     if (icon)
         DrawIcon(draw, *icon, ImVec2(min.x + pad, min.y + (s.metric.controlHeight - side) / 2), side, ink, dpi);
     draw->AddText(ImVec2(min.x + pad + lead, min.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2), ink, label);
-    if (active)
-        draw->AddRect(ImVec2(frameX, min.y), ImVec2(frameX + width, min.y + s.metric.controlHeight), Colour(s.accent.accent), s.radius.control, 0, dpi);
+    if (on > 0)
+        draw->AddRect(ImVec2(frameX, min.y), ImVec2(frameX + width, min.y + s.metric.controlHeight),
+                      Faded(Mix(s.accent.accent & 0xFFFFFFu, s.accent.accent, on)), s.radius.control, 0, dpi);
     return clicked;
 }
 
@@ -186,7 +281,7 @@ bool TransportButton(const char* id, Icon icon, const char* label, const skin::S
 // hovered. `count`, when given, follows the name in the quiet ink.
 bool DisclosureHeading(const char* id, bool open, const char* label, const std::string& count,
                        const Fonts& fonts, const skin::Skin& design, const skin::Skin& s, float dpi) {
-    FontScope font(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
+    FontScope font(fonts, design, design.type.heading * SpecFontScale(design), Weight::Semibold);
     const ImVec2 min = ImGui::GetCursorScreenPos();
     const float side = 16 * dpi, height = s.metric.controlHeight;
     const float labelWidth = ImGui::CalcTextSize(label).x;
@@ -198,11 +293,16 @@ bool DisclosureHeading(const char* id, bool open, const char* label, const std::
         ImGui::PushStyleColor(colour, IM_COL32(0, 0, 0, 0));
     const bool clicked = ImGui::Button(id, ImVec2(width, height));
     ImGui::PopStyleColor(5);
-    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+    // A mouse click also takes focus; only the keyboard's shows.
+    const bool keyboardFocus = ImGui::IsItemFocused() && GImGui->NavCursorVisible;
+    const bool hot = ImGui::IsItemHovered() || keyboardFocus;
+    const ImGuiID key = ImGui::GetID(id);
+    const float spin = Ease(ImHashStr("chevron", 0, key), open ? 1.f : 0.f);
+    const float lit = Ease(ImHashStr("hover", 0, key), hot ? 1.f : 0.f);
     auto* draw = ImGui::GetWindowDrawList();
     const float textY = min.y + (height - ImGui::GetTextLineHeight()) / 2;
-    DrawIcon(draw, open ? Icon::Down : Icon::Right, ImVec2(min.x, min.y + (height - side) / 2), side,
-             ImGui::GetColorU32(Colour(hot ? s.ink.primary : s.ink.secondary)), dpi);
+    DrawChevron(draw, ImVec2(min.x, min.y + (height - side) / 2), side,
+                ImGui::GetColorU32(Colour(Mix(s.ink.secondary, s.ink.primary, lit))), dpi, spin);
     draw->AddText(ImVec2(min.x + side + s.spacing.s1, textY), ImGui::GetColorU32(ImGuiCol_Text), label);
     if (!count.empty())
         draw->AddText(ImVec2(min.x + side + s.spacing.s1 + labelWidth + s.spacing.s2, textY),
@@ -266,12 +366,31 @@ bool ChevronCombo(const char* id, const char* preview) {
     return open;
 }
 
+// ImGui::Button whose hover fill eases in and out over the caller's resting fill;
+// a press still shows at once. Keyed by position, since some labels change with
+// their state.
+bool EasedButton(const char* label, ImVec2 size = ImVec2(0, 0)) {
+    const ImGuiID key = ImGui::GetCurrentWindow()->GetIDFromPos(ImGui::GetCursorScreenPos());
+    const ImU32 fill = Colour(Mix(StyleArgb(ImGuiCol_Button), StyleArgb(ImGuiCol_ButtonHovered), EaseHover(key)));
+    ImGui::PushStyleColor(ImGuiCol_Button, fill);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fill);
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(2);
+    NoteHover(key);
+    return clicked;
+}
+
 // Clickable readout: left click steps down, right steps up, middle resets to
 // the default. Returns true when the value should change.
 bool ReadoutClick(const char* id, ImVec2 size, double step, double rest, double* value) {
-    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
+    const ImGuiID key = ImGui::GetID(id);
+    // Transparent at rest; the hover fill fades in over it.
+    const ImU32 fill = Colour(Mix(0, StyleArgb(ImGuiCol_ButtonHovered), EaseHover(key)));
+    ImGui::PushStyleColor(ImGuiCol_Button, fill);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fill);
     const bool left = ImGui::Button(id, size);
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(2);
+    NoteHover(key);
     if (left) { *value -= step; return true; }
     if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) { *value += step; return true; }
     if (ImGui::IsItemClicked(ImGuiMouseButton_Middle)) { *value = rest; return true; }
@@ -279,35 +398,42 @@ bool ReadoutClick(const char* id, ImVec2 size, double step, double rest, double*
 }
 
 // Six-pixel groove with a full-size mouse/keyboard hit target. ImGui handles
-// drag, focus, navigation and clamping; only the frame is drawn here.
+// drag, focus, navigation and clamping; only the frame is drawn here. With a
+// `rest`, a middle click puts the value back to it, as on the readouts.
 bool Groove(const char* id, float* value, float low, float high, float width, float height,
-            const skin::Skin& s, float dpi, bool thumb) {
+            const skin::Skin& s, float dpi, bool thumb, std::optional<float> rest = {}) {
     const auto min = ImGui::GetCursorScreenPos();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, (height - ImGui::GetTextLineHeight()) / 2));
     ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 0);
     for (const auto colour : {ImGuiCol_FrameBg, ImGuiCol_FrameBgHovered, ImGuiCol_FrameBgActive, ImGuiCol_SliderGrab, ImGuiCol_SliderGrabActive, ImGuiCol_Border})
         ImGui::PushStyleColor(colour, IM_COL32(0, 0, 0, 0));
     ImGui::SetNextItemWidth(width);
-    const bool changed = ImGui::SliderFloat(id, value, low, high, "", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput);
+    bool changed = ImGui::SliderFloat(id, value, low, high, "", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_NoInput);
     ImGui::PopStyleColor(6); ImGui::PopStyleVar(2);
+    if (rest && ImGui::IsItemClicked(ImGuiMouseButton_Middle) && *value != *rest) { *value = *rest; changed = true; }
     auto* draw = ImGui::GetWindowDrawList();
     const ImVec2 track(min.x, min.y + (height - 6 * dpi) / 2);
     skin::RecessedRect(draw, track, ImVec2(track.x + width, track.y + 6 * dpi), 3 * dpi, s);
     const float fill = high > low ? std::clamp((*value - low) / (high - low), 0.f, 1.f) * width : 0;
     if (fill > 0) draw->AddRectFilled(track, ImVec2(track.x + fill, track.y + 6 * dpi), Faded(s.accent.accent), 3 * dpi);
-    if (thumb || ImGui::IsItemActive() || ImGui::IsItemHovered()) {
+    // A groove without a resting handle fades it in on hover and out on leave.
+    const float show = thumb ? 1.f : Ease(ImHashStr("thumb", 0, ImGui::GetItemID()), ImGui::IsItemActive() || ImGui::IsItemHovered() ? 1.f : 0.f);
+    if (show > 0) {
         const float x = std::clamp(track.x + fill, track.x + 6 * dpi, track.x + width - 6 * dpi);
+        const int first = draw->VtxBuffer.Size;
         skin::RaisedRect(draw, ImVec2(x - 6 * dpi, track.y - 4 * dpi), ImVec2(x + 6 * dpi, track.y + 10 * dpi),
                          3 * dpi, s, Faded(s.surface.elevated));
+        if (show < 1) FadeVertices(draw, first, show);
     }
     return changed;
 }
 
 // Integer setting row: name, value on the right, and the same groove as the
 // transpose and sustain controls. `shown` replaces the formatted number when
-// the step isn't the displayed unit, such as a speed in twentieths.
+// the step isn't the displayed unit, such as a speed in twentieths. `rest` is
+// the default a middle click restores.
 bool SettingSlider(const char* label, const char* id, int* value, int low, int high, const char* format,
-                   const skin::Skin& s, float dpi, const char* shown = nullptr) {
+                   const skin::Skin& s, float dpi, const char* shown = nullptr, std::optional<int> rest = {}) {
     char text[32]; snprintf(text, sizeof(text), format, *value);
     if (shown) snprintf(text, sizeof(text), "%s", shown);
     const float width = ImGui::GetContentRegionAvail().x;
@@ -318,7 +444,8 @@ bool SettingSlider(const char* label, const char* id, int* value, int low, int h
     ImGui::TextUnformatted(text);
     ImGui::PopStyleColor();
     float position = static_cast<float>(*value);
-    Groove(id, &position, static_cast<float>(low), static_cast<float>(high), width, 22 * dpi, s, dpi, true);
+    Groove(id, &position, static_cast<float>(low), static_cast<float>(high), width, 22 * dpi, s, dpi, true,
+           rest ? std::optional<float>(static_cast<float>(*rest)) : std::nullopt);
     const int next = std::clamp(static_cast<int>(std::lround(position)), low, high);
     if (next == *value) return false;
     *value = next;
@@ -327,7 +454,7 @@ bool SettingSlider(const char* label, const char* id, int* value, int low, int h
 
 // Slider seeded with an estimate. The estimate stays as a tick labelled
 // Estimated once the user moves the handle. A negative `value` means "use the
-// estimate"; double-click resets to it.
+// estimate"; double-click or middle click resets to it.
 bool EstimatedSlider(const char* label, const char* id, float* value, float estimate, float low, float high,
                      const char* text, const Fonts& fonts, const skin::Skin& design, const skin::Skin& s, float dpi) {
     const float width = ImGui::GetContentRegionAvail().x;
@@ -341,7 +468,9 @@ bool EstimatedSlider(const char* label, const char* id, float* value, float esti
     const float grooveHeight = 22 * dpi;
     float position = *value < low ? estimate : *value;
     bool changed = Groove(id, &position, low, high, width, grooveHeight, s, dpi, true);
-    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { *value = low - 1; changed = true; }
+    if ((ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) || ImGui::IsItemClicked(ImGuiMouseButton_Middle)) {
+        *value = low - 1; changed = true;
+    }
     else if (changed) *value = position;
     {
         FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
@@ -364,6 +493,20 @@ bool EstimatedSlider(const char* label, const char* id, float* value, float esti
 // Returns the clicked index, or -1. gapAfter separates segments up to that
 // index from the rest with a hairline. `icons`, one per label, draws an icon
 // before each word.
+// A segment's hairline, left out where the sliding thumb covers it: drawn under
+// the thumb it would cross it mid-glide.
+void SegmentHairline(ImDrawList* draw, ImVec2 a, ImVec2 b, float thumbLeft, float thumbRight, ImU32 hairline, float radius, float dpi) {
+    const float border = ImGui::GetStyle().FrameBorderSize;
+    if (border <= 0 || !(hairline & IM_COL32_A_MASK)) return;
+    if (thumbRight <= thumbLeft) { draw->AddRect(a, b, hairline, radius, 0, border); return; }
+    for (const auto& [left, right] : {std::pair{a.x - dpi, thumbLeft}, std::pair{thumbRight, b.x + dpi}}) {
+        if (right <= left) continue;
+        draw->PushClipRect(ImVec2(left, a.y - dpi), ImVec2(right, b.y + dpi), true);
+        draw->AddRect(a, b, hairline, radius, 0, border);
+        draw->PopClipRect();
+    }
+}
+
 int Segments(const char* id, const std::vector<const char*>& labels, int selected, const skin::Skin& s, float dpi,
              int gapAfter = -1, const std::vector<Icon>& icons = {}) {
     const float height = s.metric.controlHeight, inset = 4 * dpi;
@@ -378,17 +521,34 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
     auto* draw = ImGui::GetWindowDrawList();
     skin::RecessedRect(draw, well, ImVec2(well.x + width, well.y + height), s.radius.control, s);
     ImGui::PushID(id);
+    const auto xOf = [&](int i) { return well.x + inset + i * (segment + inset) + (i > gapAfter ? divide : 0); };
+    // The selection is one raised thumb that slides between segments; the buttons
+    // over it are transparent.
+    const bool thumb = selected >= 0 && selected < static_cast<int>(labels.size());
+    float thumbX = 0;
+    if (thumb) {
+        const float at = Ease(ImGui::GetID("##thumb"), static_cast<float>(selected));
+        const int from = static_cast<int>(std::floor(at)), to = std::min(from + 1, static_cast<int>(labels.size()) - 1);
+        thumbX = xOf(from) + (xOf(to) - xOf(from)) * (at - from);
+        draw->AddRectFilled(ImVec2(thumbX, well.y + inset), ImVec2(thumbX + segment, well.y + inset + (height - 2 * inset)),
+                            Faded(s.surface.elevated), s.radius.element);
+    }
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, s.radius.element);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+    const ImU32 hairline = ImGui::GetColorU32(ImGuiCol_Border);
+    ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
     int clicked = -1, index = 0;
     for (const char* label : labels) {
         const bool chosen = index == selected;
-        const float x = well.x + inset + index * (segment + inset) + (index > gapAfter ? divide : 0);
+        const float x = xOf(index);
         if (gapAfter >= 0 && index == gapAfter + 1)
             draw->AddLine(ImVec2(x - (divide + inset) / 2, well.y + 2 * inset), ImVec2(x - (divide + inset) / 2, well.y + height - 2 * inset),
-                          Colour(s.ink.tertiary), dpi);
+                          Faded(s.ink.tertiary), dpi);
         ImGui::SetCursorScreenPos(ImVec2(x, well.y + inset));
-        ImGui::PushStyleColor(ImGuiCol_Button, chosen ? Colour(s.surface.elevated) : IM_COL32(0, 0, 0, 0));
+        const ImGuiID key = ImGui::GetID(index);
+        const ImU32 fill = Colour(Mix(0, StyleArgb(ImGuiCol_ButtonHovered), EaseHover(key)));
+        ImGui::PushStyleColor(ImGuiCol_Button, fill);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fill);
         if (icons.size()) {
             // The button is blank; icon and label are drawn over it, centred as one.
             ImGui::PushID(index);
@@ -401,10 +561,17 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
             DrawIcon(draw, *(icons.begin() + index), ImVec2(left, (min.y + max.y - iconSide) / 2), iconSide, ink, dpi);
             draw->AddText(ImVec2(left + iconSide + iconGap, (min.y + max.y - text.y) / 2), ink, label);
         } else if (ImGui::Button(label, ImVec2(segment, height - 2 * inset)) && !chosen) clicked = index;
-        ImGui::PopStyleColor();
-        if (chosen) draw->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), Colour(s.accent.accent), s.radius.element, 0, dpi);
+        NoteHover(key);
+        ImGui::PopStyleColor(2);
+        SegmentHairline(draw, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), thumb ? thumbX : 0.f, thumb ? thumbX + segment : 0.f,
+                        hairline, s.radius.element, dpi);
         ++index;
     }
+    ImGui::PopStyleColor();
+    // Outlined after the buttons so their hairlines don't cover it.
+    if (thumb)
+        draw->AddRect(ImVec2(thumbX, well.y + inset), ImVec2(thumbX + segment, well.y + inset + (height - 2 * inset)),
+                      Faded(s.accent.accent), s.radius.element, 0, dpi);
     ImGui::PopStyleVar(2);
     ImGui::PopID();
     ImGui::SetCursorScreenPos(well);
@@ -474,13 +641,20 @@ bool SettingSection(const char* label, const skin::Skin& s, float dpi) {
     if (ImGui::InvisibleButton("##section", size)) { open = !open; storage->SetBool(key, open); }
     ImGui::PopID();
     auto* draw = ImGui::GetWindowDrawList();
-    // One step wider than the row, like the switches' fill.
+    // One step wider than the row, like the switches' fill, and in their colours.
+    // A mouse click also takes focus; only the keyboard's shows.
     const float bleed = std::min(8 * dpi, ImGui::GetStyle().WindowPadding.x / 2);
-    if (ImGui::IsItemHovered() || ImGui::IsItemFocused())
-        draw->AddRectFilled(ImVec2(min.x - bleed, min.y), ImVec2(min.x + size.x + bleed, min.y + size.y), Colour(s.surface.recessed), s.radius.control);
+    const bool keyboardFocus = ImGui::IsItemFocused() && GImGui->NavCursorVisible;
+    const bool hovered = ImGui::IsItemHovered() || keyboardFocus;
+    const float hot = Ease(ImHashStr("hover", 0, key), hovered ? 1.f : 0.f);
+    const float spin = Ease(ImHashStr("chevron", 0, key), open ? 1.f : 0.f);
+    if (hovered && ImGui::IsItemActive())
+        draw->AddRectFilled(ImVec2(min.x - bleed, min.y), ImVec2(min.x + size.x + bleed, min.y + size.y), ImGui::GetColorU32(ImGuiCol_ButtonActive), s.radius.control);
+    else if (hot > 0)
+        draw->AddRectFilled(ImVec2(min.x - bleed, min.y), ImVec2(min.x + size.x + bleed, min.y + size.y), ImGui::GetColorU32(ImGuiCol_ButtonHovered, hot), s.radius.control);
     const float side = 16 * dpi;
     const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
-    DrawIcon(draw, open ? Icon::Down : Icon::Right, ImVec2(min.x + 4 * dpi, min.y + (size.y - side) / 2), side, ink, dpi);
+    DrawChevron(draw, ImVec2(min.x + 4 * dpi, min.y + (size.y - side) / 2), side, ink, dpi, spin);
     draw->AddText(ImVec2(min.x + 4 * dpi + side + s.spacing.s2, min.y + (size.y - ImGui::GetTextLineHeight()) / 2), ink, label);
     return open;
 }
@@ -532,7 +706,10 @@ bool StatePill(const char* label, bool on, const Fonts& fonts, const skin::Skin&
     const auto min = ImGui::GetCursorScreenPos();
     const ImVec2 text = ImGui::CalcTextSize(label);
     const ImVec2 size(std::max(widest, text.x) + 2 * padding + 2 * dpi, s.metric.controlHeight);
-    if (on) s.border.hairline = s.accent.okBorder;
+    // Keyed by position: the 88/61 Keys pill changes its label with its state.
+    const ImGuiID key = ImGui::GetCurrentWindow()->GetIDFromPos(min);
+    const float onT = Ease(ImHashStr("on", 0, key), on ? 1.f : 0.f);
+    s.border.hairline = Mix(s.border.hairline, s.accent.okBorder, onT);
 
     // One drawing path for every pill, interactive or not, so labels share a
     // baseline.
@@ -545,18 +722,20 @@ bool StatePill(const char* label, bool on, const Fonts& fonts, const skin::Skin&
     ImGui::PopID();
     const bool hovered = enabled && ImGui::IsItemHovered();
     const bool held = enabled && ImGui::IsItemActive();
+    const float hot = Ease(ImHashStr("hover", 0, key), hovered ? 1.f : 0.f);
 
-    ImU32 fill = on ? OpaqueTint(s.accent.okSoft, s.surface.structure) : Colour(s.surface.elevated);
-    if (held) fill = Colour(s.surface.recessed);
-    else if (hovered) fill = Colour(on ? s.accent.okSoft : s.surface.elevatedHot);
-    // CSS clips the outside shadow at the control edge. Composite the tint first
-    // so the stacked shadow can't darken the translucent on surface.
+    // CSS clips the outside shadow at the control edge. Composite the tint first,
+    // at rest and on hover, so the stacked shadow can't darken the translucent on
+    // surface.
+    const skin::Argb rest = Mix(s.surface.elevated, ToArgb(OpaqueTint(s.accent.okSoft, s.surface.structure)), onT);
+    const skin::Argb lifted = Mix(s.surface.elevatedHot, ToArgb(OpaqueTint(s.accent.okSoft, s.surface.elevatedHot)), onT);
+    const ImU32 fill = held ? Colour(s.surface.recessed) : Colour(Mix(rest, lifted, hot));
     auto* dl = ImGui::GetWindowDrawList();
     skin::RaisedRect(dl, min, ImVec2(min.x + size.x, min.y + size.y), s.radius.control, s, fill);
     // A pill that can't be pressed uses the tertiary ink so it doesn't look like
     // an off pill.
     dl->AddText(ImVec2(min.x + (size.x - text.x) / 2, min.y + (size.y - text.y) / 2),
-                Colour(on ? s.accent.okInk : enabled ? s.ink.primary : s.ink.tertiary), label);
+                Colour(Mix(enabled ? s.ink.primary : s.ink.tertiary, s.accent.okInk, onT)), label);
 
     // On state isn't carried by colour alone: an on pill is semibold, an off pill
     // regular.
@@ -566,9 +745,20 @@ bool StatePill(const char* label, bool on, const Fonts& fonts, const skin::Skin&
     return clicked;
 }
 
-bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine, bool compact) {
+// With a row width, the pills' padding stretches or shrinks so the row ends
+// exactly there, since text widths don't scale exactly with DPI or theme; 0
+// keeps each pill's natural width.
+bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine, float rowWidth) {
     const auto state = engine.Snapshot();
-    const float pad = 8.f * dpi;
+    float pad = 8.f * dpi;
+    if (rowWidth > 0) {
+        // Measured as StatePill sizes each one: the label in the on weight, plus 2 dp.
+        float labels = 0;
+        { FontScope bold(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
+          for (const char* label : {"Midi2Key", "Velocity", "Sustain", state->eightyEightKeys ? "88 Keys" : "61 Keys", "MidiConnect", "AutoVol"})
+              labels += ImGui::CalcTextSize(label).x + 2 * dpi; }
+        pad = std::max(4 * dpi, (rowWidth - 5 * ImGui::GetStyle().ItemSpacing.x - labels) / 12);
+    }
     if (StatePill("Midi2Key", state->liveActive, fonts, design, dpi, pad,
                   !state->liveDevice.empty(), nullptr))
         engine.Send({ShellEngine::Action::LiveActive, {}, 0, 0, !state->liveActive});
@@ -603,11 +793,14 @@ bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEn
 bool DevicePill(const std::string& name, float maxWidth, const skin::Skin& s, float dpi) {
     const auto min = ImGui::GetCursorScreenPos();
     const float width = std::min(maxWidth, ImGui::CalcTextSize(name.c_str()).x + 26 * dpi);
+    // The button comes first so the fill can lift on hover and press in while held.
+    const bool clicked = ImGui::InvisibleButton("##device-pill", ImVec2(width, s.metric.controlHeight));
+    const float hot = Ease(ImHashStr("hover", 0, ImGui::GetItemID()), ImGui::IsItemHovered() ? 1.f : 0.f);
+    const ImU32 fill = ImGui::IsItemActive() ? Colour(s.surface.recessed) : Colour(Mix(s.surface.card, s.surface.elevatedHot, hot));
     skin::RaisedRect(ImGui::GetWindowDrawList(), min, ImVec2(min.x + width, min.y + s.metric.controlHeight),
-                     s.radius.control, s, Colour(s.surface.card));
+                     s.radius.control, s, fill);
     DrawEllipsis(name, width - 24 * dpi, ImVec2(min.x + 12 * dpi,
         min.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2));
-    const bool clicked = ImGui::InvisibleButton("##device-pill", ImVec2(width, s.metric.controlHeight));
     // Full name, for when the pill truncates it. A click opens Settings at the input.
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", name.c_str());
     return clicked;
@@ -630,16 +823,24 @@ bool SettingSwitch(const char* label, bool& value, const char* description,
     ImGui::PopStyleColor(4);
     if (clicked) value = !value;
     auto* draw = ImGui::GetWindowDrawList();
-    if (ImGui::IsItemHovered() || ImGui::IsItemFocused()) {
+    // A mouse click also takes focus; only the keyboard's shows. The hover fill
+    // fades; a press shows at once.
+    const bool keyboardFocus = ImGui::IsItemFocused() && GImGui->NavCursorVisible;
+    const bool hovered = ImGui::IsItemHovered() || keyboardFocus;
+    const float hot = Ease(ImGui::GetID("##hover"), hovered ? 1.f : 0.f);
+    if ((hovered && ImGui::IsItemActive()) || hot > 0) {
         const float bleed = std::min(8 * dpi, ImGui::GetStyle().WindowPadding.x / 2);
         draw->AddRectFilled(ImVec2(min.x - bleed, min.y), ImVec2(min.x + width + bleed, min.y + s.metric.controlHeight),
-                            ImGui::GetColorU32(ImGui::IsItemActive() ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered), s.radius.control);
+                            hovered && ImGui::IsItemActive() ? ImGui::GetColorU32(ImGuiCol_ButtonActive) : ImGui::GetColorU32(ImGuiCol_ButtonHovered, hot),
+                            s.radius.control);
     }
     DrawEllipsis(label, width - 44 * dpi, ImVec2(min.x, min.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2));
+    // The knob slides and the rail recolours as the value flips.
+    const float on = Ease(ImGui::GetID("##knob"), value ? 1.f : 0.f);
     const ImVec2 rail(min.x + width - 32 * dpi, min.y + (s.metric.controlHeight - 16 * dpi) / 2);
-    draw->AddRectFilled(rail, ImVec2(rail.x + 32 * dpi, rail.y + 16 * dpi), Faded(value ? s.accent.okSoft : s.surface.recessed), 8 * dpi);
-    draw->AddRect(rail, ImVec2(rail.x + 32 * dpi, rail.y + 16 * dpi), Faded(value ? s.accent.okBorder : s.border.strong), 8 * dpi, 0, dpi);
-    draw->AddCircleFilled(ImVec2(rail.x + (value ? 24 : 8) * dpi, rail.y + 8 * dpi), 5 * dpi, Faded(value ? s.accent.okInk : s.ink.secondary));
+    draw->AddRectFilled(rail, ImVec2(rail.x + 32 * dpi, rail.y + 16 * dpi), Faded(Mix(s.surface.recessed, s.accent.okSoft, on)), 8 * dpi);
+    draw->AddRect(rail, ImVec2(rail.x + 32 * dpi, rail.y + 16 * dpi), Faded(Mix(s.border.strong, s.accent.okBorder, on)), 8 * dpi, 0, dpi);
+    draw->AddCircleFilled(ImVec2(rail.x + (8 + 16 * on) * dpi, rail.y + 8 * dpi), 5 * dpi, Faded(Mix(s.ink.secondary, s.accent.okInk, on)));
     ImGui::PopID();
     // Switches whose label says enough pass no description and take one row.
     if (description && *description) {
@@ -669,14 +870,17 @@ bool SettingRadio(const char* label, bool selected, const skin::Skin& design, fl
     const bool clicked = ImGui::Button("##radio", ImVec2(diameter + 8 * dpi + labelSize.x, height));
     const bool hovered = ImGui::IsItemHovered();
     ImGui::PopStyleColor(4);
+    // The dot grows from the centre as the ring turns green.
+    const float chosen = Ease(ImGui::GetID("##selected"), selected ? 1.f : 0.f);
+    const float hot = Ease(ImGui::GetID("##hover"), hovered ? 1.f : 0.f);
     ImGui::PopID();
     auto* draw = ImGui::GetWindowDrawList();
     const ImDrawListFlags flags = draw->Flags;
     draw->Flags |= ImDrawListFlags_AntiAliasedFill | ImDrawListFlags_AntiAliasedLines;
     const ImVec2 centre(min.x + diameter / 2, min.y + height / 2);
-    draw->AddCircleFilled(centre, diameter / 2, Faded(selected ? s.accent.okSoft : hovered ? s.surface.elevatedHot : s.surface.recessed));
-    draw->AddCircle(centre, diameter / 2, Faded(selected ? s.accent.okBorder : s.border.strong), 0, dpi);
-    if (selected) draw->AddCircleFilled(centre, 4 * dpi, Faded(s.accent.okInk));
+    draw->AddCircleFilled(centre, diameter / 2, Faded(Mix(Mix(s.surface.recessed, s.surface.elevatedHot, hot), s.accent.okSoft, chosen)));
+    draw->AddCircle(centre, diameter / 2, Faded(Mix(s.border.strong, s.accent.okBorder, chosen)), 0, dpi);
+    if (chosen > 0) draw->AddCircleFilled(centre, 4 * dpi * chosen, Faded(s.accent.okInk));
     draw->Flags = flags;
     draw->AddText(ImVec2(min.x + diameter + 8 * dpi, min.y + (height - labelSize.y) / 2), Faded(s.ink.primary), label);
     return clicked && !selected;
@@ -701,7 +905,7 @@ std::filesystem::path PickFile(HWND hwnd, PickKind kind = PickKind::Midi) {
     DWORD options = 0;
     dialog->GetOptions(&options);
     dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR);
-    const COMDLG_FILTERSPEC midi[]{{L"MIDI files", L"*.mid;*.midi"}, {L"All files", L"*.*"}};
+    const COMDLG_FILTERSPEC midi[]{{L"MIDI files", L"*.mid;*.midi;*.kar"}, {L"All files", L"*.*"}};
     const COMDLG_FILTERSPEC sound[]{{L"Audio files", L"*.mp3;*.wav;*.flac;*.ogg;*.oga;*.opus;*.m4a;*.aac"}, {L"All files", L"*.*"}};
     const COMDLG_FILTERSPEC page[]{{L"Saved sheet pages", L"*.html;*.htm"}, {L"All files", L"*.*"}};
     dialog->SetFileTypes(2, kind == PickKind::Audio ? sound : kind == PickKind::Page ? page : midi);
@@ -801,6 +1005,9 @@ std::string Time(double seconds) {
 }
 }
 
+bool MotionPending() { return g_motion; }
+void SettleMotion() { g_settleFrame = ImGui::GetFrameCount(); }
+
 void Panels::LoadPreferences(const std::filesystem::path& path) {
     // Tracks starts closed on first run and is restored after that. Set before
     // looking for the file, since a first run has none.
@@ -820,16 +1027,29 @@ void Panels::LoadPreferences(const std::filesystem::path& path) {
         preferences.mediaKeys = json.value("mediaKeys", true);
         preferences.opacity = std::clamp(json.value("opacity", 100), 40, 100);
         preferences.converterCpu = std::clamp(json.value("converterCpu", 75), 25, 100);
+        convertPlaylist_ = json.value("convertPlaylist", false);
+        timingSource_ = std::clamp(json.value("timingSource", 0), 0, 1);
         preferences.folders = json.value("folders", true);
         browse_ = json.value("openFolder", std::string());
         preferences.startMini = json.value("mini", false);
+        miniAutoplay = json.value("miniAutoplay", false);
         tracksExpanded = json.value("tracksOpen", false);
         velocityExpanded = json.value("velocityOpen", false);
+        curveTool_ = std::clamp(json.value("curveTool", 0), 0, 1);
         preferences.windowX = json.value("windowX", 0);
         preferences.windowY = json.value("windowY", 0);
         preferences.windowWidth = json.value("windowWidth", 0);
+        // Bounded so an edited file can't overflow the window size; the work area
+        // clamps it further.
+        preferences.windowExtra = std::clamp(json.value("windowExtra", 0.f), 0.f, 16384.f);
+        preferences.maximized = json.value("maximized", false);
+        preferences.miniX = json.value("miniX", 0);
+        preferences.miniY = json.value("miniY", 0);
+        preferences.miniSaved = json.value("miniSaved", false);
         const auto folder = json.value("midiFolder", std::string());
         preferences.folder = std::filesystem::path(std::u8string(folder.begin(), folder.end()));
+        const auto song = json.value("song", std::string());
+        preferences.lastSong = std::filesystem::path(std::u8string(song.begin(), song.end()));
         // A settings file without the tour key predates the tour, so it hasn't been seen.
         preferences.tourSeen = json.value("tourSeen", false);
         preferences.helpBuild = json.value("helpBuild", std::string());
@@ -842,10 +1062,16 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
     if (exiting) SaveThemes();
     nlohmann::json json{{"theme", preferences.theme}, {"dark", preferences.dark}, {"autoSoloPiano", preferences.autoSolo},
                         {"midiFolder", Utf8(preferences.folder)},
+                        {"song", Utf8(preferences.lastSong)},
                         {"alwaysOnTop", preferences.alwaysOnTop}, {"mediaKeys", preferences.mediaKeys},
                         {"opacity", preferences.opacity}, {"converterCpu", preferences.converterCpu},
+                        {"convertPlaylist", convertPlaylist_}, {"timingSource", timingSource_},
                         {"folders", preferences.folders}, {"openFolder", browse_}, {"mini", miniMode},
+                        {"miniAutoplay", miniAutoplay},
                         {"tracksOpen", tracksExpanded}, {"velocityOpen", velocityExpanded},
+                        {"curveTool", curveTool_},
+                        {"windowExtra", preferences.windowExtra}, {"maximized", preferences.maximized},
+                        {"miniX", preferences.miniX}, {"miniY", preferences.miniY}, {"miniSaved", preferences.miniSaved},
                         {"tourSeen", preferences.tourSeen}, {"helpBuild", preferences.helpBuild},
                         {"windowX", preferences.windowX}, {"windowY", preferences.windowY}, {"windowWidth", preferences.windowWidth}};
     const auto text = json.dump(2);
@@ -853,17 +1079,43 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
     // Write to a temporary file and rename over, so an interrupted write can't
     // leave a truncated file that the next start reads as no settings.
     auto temporary = path; temporary += L".tmp";
-    { std::ofstream stream(temporary); stream << text << '\n'; if (!stream) return; }
+    // A failed write is retried on every call, so it is reported once per change.
+    const auto failed = [&] {
+        if (text != unsavedPreferences_) ReportError("Could not save the settings.", "Could not write " + Utf8(path.filename()) + ".");
+        unsavedPreferences_ = text;
+    };
+    // Closed before the check: the text fits the stream's buffer, so the write
+    // itself happens at close.
+    { std::ofstream stream(temporary); stream << text << '\n'; stream.close(); if (stream.fail()) { failed(); return; } }
     std::error_code error;
     std::filesystem::rename(temporary, path, error);
     if (!error) savedPreferences_ = text;
+    else failed();
 }
 
 // Saves only when there are user themes, or a file to update after the last
 // one was deleted.
 void Panels::SaveThemes() const {
     if (themesPath_.empty()) return;
-    if (themes.All().size() > 2 || std::filesystem::exists(themesPath_)) themes.Save(themesPath_);
+    if ((themes.All().size() > 2 || std::filesystem::exists(themesPath_)) && !themes.Save(themesPath_))
+        ReportError("Could not save the themes.", "Could not write " + Utf8(themesPath_.filename()) + ".");
+}
+
+void Panels::ReportError(const std::string& result, const std::string& detail) const {
+    panelError_ = result;
+    ShellLog::Instance().Append("[error] " + (detail.empty() ? result : detail) + "\n");
+}
+
+void Panels::OpenFolder(const std::filesystem::path& path, ShellEngine& engine) {
+    // During playback the engine refuses the scan and says so; the list keeps
+    // the folder it shows.
+    if (!engine.Snapshot()->playing) { preferences.folder = path; browse_.clear(); }
+    engine.Send({ShellEngine::Action::Scan, path});
+}
+
+void Panels::ImportTheme(const std::filesystem::path& path) {
+    if (const Theme* imported = themes.Import(path)) { preferences.theme = imported->id; SaveThemes(); }
+    else ReportError("Could not import the theme.", Utf8(path.filename()) + " is not a QuartzMIDI theme.");
 }
 
 void Panels::DrawKeyMapping(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine) {
@@ -885,7 +1137,8 @@ void Panels::DrawKeyMapping(const Fonts& fonts, const skin::Skin& design, float 
         ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleVar(2);
     if (!visible) { ImGui::End(); return; }
-    if (platform) dpi = ImGui::GetWindowViewport()->DpiScale;
+    // The monitor's scale times the theme's Size, as UiScale gives the rest of the app.
+    if (platform) dpi = ImGui::GetWindowViewport()->DpiScale * design.scale;
     mappingDpi_ = dpi;
     const ImGuiStyle previousStyle = ImGui::GetStyle();
     skin::ApplyStyle(design, dpi);
@@ -901,8 +1154,10 @@ void Panels::DrawKeyMapping(const Fonts& fonts, const skin::Skin& design, float 
     auto* draw = ImGui::GetWindowDrawList();
     const float title = 44 * dpi, width = 840 * dpi, pad = s.spacing.panelPad;
     const auto at = [&](float x, float y) { return ImVec2(origin.x + x, origin.y + y); };
-    draw->AddRectFilled(origin, at(width, height * dpi), Colour(s.surface.canvas), s.radius.window);
-    draw->AddRectFilled(origin, at(width, title), Colour(s.surface.structure), s.radius.window, ImDrawFlags_RoundCornersTop);
+    // An OS window of its own is square, so only the in-viewport window rounds its corners.
+    const float corner = platform ? 0.f : s.radius.window;
+    draw->AddRectFilled(origin, at(width, height * dpi), Colour(s.surface.canvas), corner);
+    draw->AddRectFilled(origin, at(width, title), Colour(s.surface.structure), corner, ImDrawFlags_RoundCornersTop);
     draw->AddLine(at(0, title), at(width, title), Colour(s.border.hairline), dpi);
     draw->AddText(at(pad, (title - ImGui::GetTextLineHeight()) / 2), Colour(s.ink.primary), "Key Mapping");
     ImGui::SetCursorScreenPos(at(width - 8 * dpi - s.metric.controlHeight, (title - s.metric.controlHeight) / 2));
@@ -1032,7 +1287,7 @@ void Panels::DrawKeyMapping(const Fonts& fonts, const skin::Skin& design, float 
         }
     } else if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) mappingArmed_ = false;
     const float statusY = frameY + 114 * dpi + pad;
-    draw->AddRectFilled(at(0, statusY), at(width, height * dpi), Colour(s.surface.structure));
+    draw->AddRectFilled(at(0, statusY), at(width, height * dpi), Colour(s.surface.structure), corner, ImDrawFlags_RoundCornersBottom);
     draw->AddLine(at(0, statusY), at(width, statusY), Colour(s.border.hairline), dpi);
     ImGui::SetCursorScreenPos(at(pad, statusY + 8 * dpi));
     { FontScope font(fonts, design, design.type.meta * SpecFontScale(design));
@@ -1076,7 +1331,9 @@ bool ThemeSwatch(const char* label, skin::Argb& colour, bool alpha, const skin::
     ImGui::PushID(label);
     // The name is part of the button, giving it the larger hit target.
     const bool clicked = ImGui::InvisibleButton("##swatch", ImVec2(side + gap + labelWidth, side));
-    const bool hot = ImGui::IsItemHovered() || ImGui::IsItemFocused() || ImGui::IsPopupOpen("##picker");
+    // A mouse click also takes focus; only the keyboard's shows.
+    const bool keyboardFocus = ImGui::IsItemFocused() && GImGui->NavCursorVisible;
+    const bool hot = ImGui::IsItemHovered() || keyboardFocus || ImGui::IsPopupOpen("##picker");
     const ImVec2 max(min.x + side, min.y + side);
     // Paint the card surface first so a translucent colour shows as it will on a card.
     draw->AddRectFilled(min, max, Colour(s.surface.card), s.radius.control);
@@ -1198,7 +1455,17 @@ bool ThemeSwatch(const char* label, skin::Argb& colour, bool alpha, const skin::
 void Panels::DrawThemeEditor(const Fonts& fonts, const skin::Skin& design, float dpi) {
     Theme* theme = themes.Find(preferences.theme);
     if (!themeEditorOpen || !theme || theme->builtin) {
-        if (themeEditorWasOpen_) SaveThemes();
+        if (themeEditorWasOpen_) {
+            // A copy Customise made and nothing changed is dropped, and its built-in
+            // is chosen again if the copy still was.
+            const Theme* copy = customisedFrom_.empty() ? nullptr : themes.Find(customisedCopy_.id);
+            if (copy && ThemeStore::ThemeJson(*copy) == ThemeStore::ThemeJson(customisedCopy_)) {
+                if (preferences.theme == customisedCopy_.id) preferences.theme = customisedFrom_;
+                themes.Remove(customisedCopy_.id);
+            }
+            customisedFrom_.clear();
+            SaveThemes();
+        }
         themeEditorWasOpen_ = themeEditorOpen = false;
         return;
     }
@@ -1232,6 +1499,8 @@ void Panels::DrawThemeEditor(const Fonts& fonts, const skin::Skin& design, float
         // would be dropped with its theme at the next start.
         if (ImGui::InputText("##theme-name", themeName_, sizeof(themeName_)))
             if (const auto typed = ThemeNameFrom(themeName_); !typed.empty()) theme->name = typed;
+        // Out of the field, it shows the name as kept: trimmed, cut to length, or the last one accepted.
+        if (!ImGui::IsItemActive() && theme->name != themeName_) snprintf(themeName_, sizeof(themeName_), "%s", theme->name.c_str());
 
         bool paired = theme->paired;
         if (SettingSwitch("Light and dark", paired, nullptr, fonts, design, dpi)) {
@@ -1407,7 +1676,7 @@ void Panels::DrawAutoVolume(const Fonts& fonts, const skin::Skin& design, float 
         if (IconButton("##volume-refresh", Icon::Refresh, "Refresh game windows", s, dpi)) engine.Send({A::AutoVolumeScan});
         ImGui::Spacing();
         ImGui::BeginDisabled(!selected);
-        if (ImGui::Button("Focus game and calibrate", ImVec2(-1, s.metric.controlHeight))) {
+        if (EasedButton("Focus game and calibrate", ImVec2(-1, s.metric.controlHeight))) {
             ShellEngine::Command command{A::AutoVolumeCalibrate, {}, state->generation};
             command.window = volumeWindow_;
             engine.Send(std::move(command));
@@ -1415,9 +1684,9 @@ void Panels::DrawAutoVolume(const Fonts& fonts, const skin::Skin& design, float 
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         if (pending) {
-            if (ImGui::Button("Cancel calibration", ImVec2(-1, s.metric.controlHeight))) engine.Send({A::AutoVolumeCancel});
+            if (EasedButton("Cancel calibration", ImVec2(-1, s.metric.controlHeight))) engine.Send({A::AutoVolumeCancel});
         } else if (state->autoVolume || state->autoVolumeNeedsCalibration) {
-            if (ImGui::Button("Turn AutoVol off", ImVec2(-1, s.metric.controlHeight))) engine.Send({A::AutoVolumeOff});
+            if (EasedButton("Turn AutoVol off", ImVec2(-1, s.metric.controlHeight))) engine.Send({A::AutoVolumeOff});
         }
         if (!state->error.empty()) ImGui::TextWrapped("%s", state->error.c_str());
     }
@@ -1444,10 +1713,11 @@ LayoutGrowth GrowthOf(const skin::Skin& design) {
 }
 
 // Files column floor (240 for built-ins): two panel edges, the heading and the
-// three buttons beside it.
+// three buttons beside it. The heading grows with the body text or with its own
+// size (14 for built-ins), whichever is larger.
 float LeftColumnFloor(const skin::Skin& design) {
     const auto grow = GrowthOf(design);
-    return 240.f + 2 * grow.panel + 3 * std::max(0.f, grow.control) + 8 * std::max(0.f, grow.text);
+    return 240.f + 2 * grow.panel + 3 * std::max(0.f, grow.control) + 8 * std::max(0.f, std::max(grow.text, design.type.heading - 14.f));
 }
 
 // Right column floor (600 for built-ins): two panel edges, plus the six
@@ -1455,6 +1725,15 @@ float LeftColumnFloor(const skin::Skin& design) {
 float RightColumnFloor(const skin::Skin& design) {
     const auto grow = GrowthOf(design);
     return 600.f + 2 * grow.panel + 6 * std::max(0.f, grow.control) + 24 * std::max(0.f, grow.text);
+}
+
+namespace {
+// Settings, Help and MIDI devices popover width (344 for built-ins): two window
+// edges and the text of Settings' longest switch label.
+float PopoverWidth(const skin::Skin& design) {
+    const auto grow = GrowthOf(design);
+    return 344.f + 2 * std::max(0.f, grow.window) + 17 * std::max(0.f, grow.text);
+}
 }
 
 ImVec2 Panels::DesiredSize() const {
@@ -1601,24 +1880,38 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
     float cutoffLabelWidth = 0;
     { FontScope meta(fonts, design, design.type.meta * SpecFontScale(design)); cutoffLabelWidth = ImGui::CalcTextSize("Sustain cutoff").x; }
     const float cutoffValueWidth = ImGui::CalcTextSize("127").x;
-    const float cutoffX = std::max(comboEnd + s.spacing.s3, start.x + width - 248 * dpi);
-    const float grooveWidth = std::clamp(start.x + width - cutoffX - cutoffLabelWidth - cutoffValueWidth - 2 * ImGui::GetStyle().ItemSpacing.x,
-                                         40 * dpi, 120 * dpi);
+    // The group ends at the panel's right edge, the value right-aligned in its slot.
+    const float cutoffFixed = cutoffLabelWidth + cutoffValueWidth + 2 * ImGui::GetStyle().ItemSpacing.x;
+    const float grooveWidth = std::clamp(start.x + width - (comboEnd + s.spacing.s3) - cutoffFixed, 40 * dpi, 120 * dpi);
+    const float cutoffX = std::max(comboEnd + s.spacing.s3, start.x + width - cutoffFixed - grooveWidth);
     ImGui::SetCursorScreenPos(ImVec2(cutoffX, start.y));
-    { FontScope meta(fonts, design, design.type.meta * SpecFontScale(design)); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Sustain cutoff"); }
+    // Centred on the row in the quiet ink, like the Playback row's labels.
+    { FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
+      const auto pos = ImGui::GetCursorScreenPos();
+      ImGui::GetWindowDrawList()->AddText(ImVec2(pos.x, pos.y + (control - ImGui::GetTextLineHeight()) / 2),
+                                          Colour(s.ink.secondary), "Sustain cutoff");
+      ImGui::Dummy(ImVec2(cutoffLabelWidth, control)); }
     ImGui::SameLine();
     // Commit on release, like the macro sliders.
-    float cutoff = cutoffEditing_ ? cutoffPreview_ : static_cast<float>(state->sustainCutoff);
-    if (Groove("##sustain-cutoff", &cutoff, 0, 127, grooveWidth, control, s, dpi, true)) {
-        if (!ImGui::IsItemActive() || ImGui::IsItemDeactivatedAfterEdit())
+    if (cutoffPending_ && (state->sustainCutoff == static_cast<int>(std::lround(cutoffPreview_)) || state->error != cutoffPendingError_))
+        cutoffPending_ = false;
+    float cutoff = (cutoffEditing_ || cutoffPending_) ? cutoffPreview_ : static_cast<float>(state->sustainCutoff);
+    if (Groove("##sustain-cutoff", &cutoff, 0, 127, grooveWidth, control, s, dpi, true, 64.f)) {
+        if (!ImGui::IsItemActive() || ImGui::IsItemDeactivatedAfterEdit()) {
             engine.Send({ShellEngine::Action::SustainCutoff, {}, 0, 0, false, std::round(cutoff)});
-        cutoffPreview_ = cutoff; cutoffEditing_ = true;
+            cutoffPending_ = true; cutoffPendingError_ = state->error;
+        }
+        // A middle click resets the value without activating the slider, so only
+        // a drag holds the preview; the pending hold covers the rest.
+        cutoffPreview_ = cutoff; cutoffEditing_ = ImGui::IsItemActive();
     }
     if (cutoffEditing_ && ImGui::IsItemDeactivatedAfterEdit()) {
         engine.Send({ShellEngine::Action::SustainCutoff, {}, 0, 0, false, std::round(cutoffPreview_)});
-        cutoffEditing_ = false;
+        cutoffEditing_ = false; cutoffPending_ = true; cutoffPendingError_ = state->error;
     }
-    ImGui::SameLine(); ImGui::AlignTextToFramePadding(); ImGui::Text("%.0f", cutoff);
+    char cutoffText[8]; snprintf(cutoffText, sizeof(cutoffText), "%.0f", cutoff);
+    ImGui::SameLine(); ImGui::SetCursorPosX(ImGui::GetCursorPosX() + cutoffValueWidth - ImGui::CalcTextSize(cutoffText).x);
+    ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(cutoffText);
     if (!expanded || state->curves.empty()) { ImGui::PopStyleVar(); ImGui::PopFont(); ImGui::EndChild(); return; }
     if (editorRevision_ != state->curveRevision || (!state->error.empty() && state->error != editorError_)) {
         editor_ = state->curve; editorRevision_ = state->curveRevision;
@@ -1626,10 +1919,11 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
         // The curve was replaced mid-gesture; continuing would commit the dragged
         // point against an empty anchor list.
         curveGesture_ = false; activeAnchor_ = -1; freeDraw_.clear();
+        if (state->curve.preset != namePreset_) nameOperation_ = 0;
     }
     editorError_ = state->error;
     const auto openName = [&](int operation) {
-        nameOperation_ = operation; focusCurveName_ = true; nameRevision_ = state->curveRevision;
+        nameOperation_ = operation; focusCurveName_ = true; namePreset_ = state->curve.preset;
         auto name = operation == 1 ? "New Curve" : state->curves[state->curve.preset].name;
         if (operation == 2 || (operation == 3 && state->curve.preset < midi::kBuiltinVelocityCurves)) name += " Copy";
         snprintf(curveName_, sizeof(curveName_), "%s", name.c_str());
@@ -1639,20 +1933,31 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
     // curve; a built-in can't be overwritten, so saving one prompts for a name.
     const bool changed = !state->comparingCurve && (!editor_.anchors.empty() || editor_.sensitivity != 0 || editor_.contrast != 0);
     const float saveWidth = changed ? ImGui::CalcTextSize("Save").x + 32 * dpi + 8 * dpi : 0.f;
-    Ellipsis(state->ActiveVelocityName(), width - 3 * control - 24 * dpi - saveWidth);
+    ImGui::AlignTextToFramePadding();
+    Ellipsis(state->ActiveVelocityName(), width - 4 * control - 32 * dpi - saveWidth);
     if (changed) {
-        ImGui::SetCursorScreenPos(ImVec2(start.x + width - 3 * control - 16 * dpi - saveWidth, start.y + control + 12 * dpi));
+        ImGui::SetCursorScreenPos(ImVec2(start.x + width - 4 * control - 24 * dpi - saveWidth, start.y + control + 12 * dpi));
         if (TransportButton("##save-curve", "Save", s, dpi, true)) {
             if (state->curve.preset < midi::kBuiltinVelocityCurves) openName(3);
             else engine.Send({ShellEngine::Action::CurveRename, {}, 0, 0, false, 0, state->curves[state->curve.preset].name});
         }
     }
-    ImGui::SetCursorScreenPos(ImVec2(start.x + width - 3 * control - 16 * dpi, start.y + control + 12 * dpi));
+    ImGui::SetCursorScreenPos(ImVec2(start.x + width - 4 * control - 24 * dpi, start.y + control + 12 * dpi));
+    // The name row acts on the edited curve, which is hidden while comparing.
+    ImGui::BeginDisabled(state->comparingCurve);
     if (IconButton("##duplicate-curve", Icon::Copy, "Duplicate curve", s, dpi)) openName(2);
     ImGui::SameLine();
     if (IconButton("##rename-curve", Icon::Rename, "Rename curve", s, dpi)) openName(3);
     ImGui::SameLine();
+    ImGui::BeginDisabled(state->curve.preset < midi::kBuiltinVelocityCurves);
+    if (IconButton("##delete-curve", Icon::Delete, "Delete curve", s, dpi)) {
+        engine.Send({ShellEngine::Action::CurveDelete, {}, 0, state->curve.preset}); nameOperation_ = 0;
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
     if (IconButton("##new-curve", Icon::Plus, "New curve", s, dpi)) openName(1);
+    ImGui::EndDisabled();
+    if (state->comparingCurve) nameOperation_ = 0;
     float workspaceY = start.y + 2 * control + 24 * dpi;
     if (nameOperation_) {
         ImGui::SetCursorScreenPos(ImVec2(start.x, workspaceY));
@@ -1665,14 +1970,23 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
         const bool save = IconButton("##save-curve-name", Icon::Check, "Save curve name", s, dpi);
         ImGui::SameLine();
         if (IconButton("##cancel-curve-name", Icon::Close, "Cancel curve name", s, dpi) || cancel) nameOperation_ = 0;
-        if ((enter || save) && nameOperation_ && curveName_[0] && nameRevision_ == state->curveRevision) {
+        if ((enter || save) && nameOperation_ && curveName_[0] && namePreset_ == state->curve.preset) {
             const auto action = nameOperation_ == 1 ? ShellEngine::Action::CurveNew :
                 nameOperation_ == 2 ? ShellEngine::Action::CurveDuplicate : ShellEngine::Action::CurveRename;
             engine.Send({action, {}, 0, 0, false, 0, curveName_}); nameOperation_ = 0;
         }
         workspaceY += control + 12 * dpi;
     }
-    const float presetsWidth = std::min(236 * dpi, width * .36f), mainWidth = width - presetsWidth - 12 * dpi;
+    // Wide enough that no built-in name is cut short: the list's two 4px insets,
+    // the 48 before a name, the check's 18 and its gap, the scrollbar a custom
+    // curve brings, and 2 for the list's whole-pixel width.
+    float longestPreset = 0;
+    for (size_t i = 0; i < std::min(state->curves.size(), midi::kBuiltinVelocityCurves); ++i)
+        longestPreset = std::max(longestPreset, ImGui::CalcTextSize(state->curves[i].name.c_str()).x);
+    const float presetScrollbar = state->curves.size() > midi::kBuiltinVelocityCurves ? ImGui::GetStyle().ScrollbarSize : 0.f;
+    // The cap limits only the proportional share, so a larger theme's type still fits.
+    const float presetsWidth = std::max(std::min(236 * dpi, width * .36f), longestPreset + 76 * dpi + s.spacing.s2 + presetScrollbar),
+                mainWidth = width - presetsWidth - 12 * dpi;
     const float graphHeight = 208 * dpi;
     const auto& shown = state->comparingCurve ? state->previousCurve : editor_;
     const auto& preset = state->comparingCurve ? state->previousPreset : state->curves[shown.preset];
@@ -1686,7 +2000,7 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
     ImGui::BeginDisabled(state->comparingCurve);
     if (IconButton("##anchor-tool", Icon::Anchor, "Edit anchors", s, dpi, curveTool_ == 0)) curveTool_ = 0;
     ImGui::SameLine();
-    if (IconButton("##draw-tool", Icon::Rename, "Free draw", s, dpi, curveTool_ == 1)) curveTool_ = 1;
+    if (IconButton("##draw-tool", Icon::Draw, "Free draw", s, dpi, curveTool_ == 1)) curveTool_ = 1;
     ImGui::SameLine(0, 14 * dpi);
     ImGui::BeginDisabled(!state->canUndoCurve);
     if (IconButton("##curve-undo", Icon::Undo, "Undo curve edit", s, dpi)) engine.Send({ShellEngine::Action::CurveUndo});
@@ -1704,13 +2018,15 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
         else if (ImGui::IsKeyPressed(ImGuiKey_Y)) engine.Send({ShellEngine::Action::CurveRedo});
     }
 
-    if (histogramRevision_ != state->playedVelocities.revision) {
-        histogramRevision_ = state->playedVelocities.revision;
-        const auto largest = *std::max_element(state->playedVelocities.buckets.begin(),
-                                               state->playedVelocities.buckets.end());
-        histogramVisible_ = state->playedVelocities.total != 0 && largest != 0;
+    // Read here, not from the snapshot: each live note changes it, and only
+    // this open graph draws it.
+    const auto played = velocity_telemetry::snapshot();
+    if (histogramRevision_ != played.revision) {
+        histogramRevision_ = played.revision;
+        const auto largest = *std::max_element(played.buckets.begin(), played.buckets.end());
+        histogramVisible_ = played.total != 0 && largest != 0;
         for (size_t i = 0; i < histogramHeights_.size(); ++i)
-            histogramHeights_[i] = largest ? static_cast<float>(state->playedVelocities.buckets[i]) / largest : 0.f;
+            histogramHeights_[i] = largest ? static_cast<float>(played.buckets[i]) / largest : 0.f;
     }
     if (histogramVisible_) {
         const float barWidth = (plotMax.x - plotMin.x) / histogramHeights_.size();
@@ -1734,7 +2050,7 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
 
     // Most-played velocities, which anchors snap to. Drawn only while an anchor is
     // being dragged (below) to keep the graph uncluttered.
-    const auto snapTargets = PlayedVelocityTargets(state->playedVelocities);
+    const auto snapTargets = PlayedVelocityTargets(played);
 
     ImGui::SetCursorScreenPos(plotMin);
     ImGui::BeginDisabled(state->comparingCurve);
@@ -1861,8 +2177,8 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
         draw->PathStroke(Colour(s.accent.accent), 0, 2.5f * dpi);
     }
     { FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
-      if (state->playedVelocities.last != 0) {
-          const int input = state->playedVelocities.last;
+      if (played.last != 0) {
+          const int input = played.last;
           const int output = VelocityBucket(thresholds, input);
           char readout[64]; snprintf(readout, sizeof(readout), "%d played > step %d", input, output + 1);
           draw->AddText(ImVec2(graphMax.x - 12 * dpi - ImGui::CalcTextSize(readout).x, graphMin.y + 8 * dpi), Colour(s.ink.primary), readout);
@@ -1892,7 +2208,7 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
         ImGui::SetCursorScreenPos(ImVec2(x + 12 * dpi, macroY + 48 * dpi));
         float* target = i ? &editor_.contrast : &editor_.sensitivity;
         const bool changed = Groove(i ? "##contrast" : "##sensitivity", target, i ? 0.f : -50.f, i ? 100.f : 50.f,
-            macroWidth - 24 * dpi, 24 * dpi, s, dpi, true);
+            macroWidth - 24 * dpi, 24 * dpi, s, dpi, true, 0.f);
         if (changed) editor_.anchors.clear();
         if (ImGui::IsItemDeactivatedAfterEdit() || (changed && !ImGui::IsItemActive()))
             engine.Send({ShellEngine::Action::CurveAdjust, {}, 0, 0, false, *target, i ? "contrast" : "sensitivity"});
@@ -1920,7 +2236,10 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
         VelocityEdit plain; plain.preset = i;
         DrawCurveLine(listDraw, state->curves[i], plain, ImVec2(row.x + 4 * dpi, row.y + 8 * dpi),
             ImVec2(row.x + 40 * dpi, row.y + 32 * dpi), Colour(selected ? s.accent.accent : s.ink.tertiary), 1.5f * dpi);
-        DrawEllipsis(state->curves[i].name, rowWidth - 64 * dpi, ImVec2(row.x + 48 * dpi, row.y + (rowHeight - ImGui::GetTextLineHeight()) / 2));
+        // Every row keeps the check's room and a gap, so a name truncates the
+        // same whether or not its row is selected.
+        DrawEllipsis(state->curves[i].name, rowWidth - 48 * dpi - 18 * dpi - s.spacing.s2,
+                     ImVec2(row.x + 48 * dpi, row.y + (rowHeight - ImGui::GetTextLineHeight()) / 2));
         if (selected) DrawIcon(listDraw, Icon::Check, ImVec2(row.x + rowWidth - 18 * dpi, row.y + 12 * dpi), 16 * dpi, Colour(s.accent.accent), dpi);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s%s", state->curves[i].name.c_str(), i >= midi::kBuiltinVelocityCurves ? " (custom)" : "");
         if (selected && listRevision_ != state->curveRevision) ImGui::SetScrollHereY(.5f);
@@ -2055,7 +2374,7 @@ void Panels::DrawMidiDevices(const Fonts& fonts, const skin::Skin& design, float
             if (wootingPending_[i] && closeEnough(current[i], wootingPreview_[i])) wootingPending_[i] = false;
             if (!wootingEditing_[i] && !wootingPending_[i]) wootingPreview_[i] = current[i];
         }
-        const auto setting = [&](size_t index, const char* label, const char* id, float low, float high, float step,
+        const auto setting = [&](size_t index, const char* label, const char* id, float low, float high, float step, float rest,
                                  ShellEngine::Action action, const char* format) {
             ImGui::TextUnformatted(label);
             ImGui::SameLine();
@@ -2065,7 +2384,7 @@ void Panels::DrawMidiDevices(const Fonts& fonts, const skin::Skin& design, float
             ImGui::TextUnformatted(text);
             float value = wootingPreview_[index];
             const bool changed = Groove(id, &value, low, high, ImGui::GetContentRegionAvail().x,
-                                        22 * dpi, s, dpi, true);
+                                        22 * dpi, s, dpi, true, rest);
             value = std::clamp(std::round(value / step) * step, low, high);
             if (changed) {
                 wootingPreview_[index] = value;
@@ -2082,11 +2401,11 @@ void Panels::DrawMidiDevices(const Fonts& fonts, const skin::Skin& design, float
                 wootingPending_[index] = true;
             }
         };
-        setting(0, "Note trigger threshold", "##wooting-trigger", .01f, 1.f, .01f,
+        setting(0, "Note trigger threshold", "##wooting-trigger", .01f, 1.f, .01f, .25f,
                 ShellEngine::Action::WootingTriggerThreshold, "%.2f");
-        setting(1, "Shift amount", "##wooting-shift", -127.f, 127.f, 1.f,
+        setting(1, "Shift amount", "##wooting-shift", -127.f, 127.f, 1.f, 1.f,
                 ShellEngine::Action::WootingShiftAmount, "%+.0f semitones");
-        setting(2, "Velocity scale", "##wooting-velocity", .1f, 20.f, .1f,
+        setting(2, "Velocity scale", "##wooting-velocity", .1f, 20.f, .1f, 2.f,
                 ShellEngine::Action::WootingVelocityScale, "%.1f");
         ImGui::Separator();
     } else {
@@ -2133,7 +2452,11 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     if (!measuring_ && input_latency::hookError()) ImGui::Text("Hook error %lu", input_latency::hookError());
     ImGui::SetNextItemWidth(-1);
     const char* sourceLabels[]{"Live input", "Autoplay"};
-    if (ImGui::Combo("##timing-source", &timingSource_, sourceLabels, 2)) { timingSummary_ = {}; nextTimingPoll_ = 0; }
+    if (ChevronCombo("##timing-source", sourceLabels[timingSource_])) {
+        for (int i = 0; i < 2; ++i)
+            if (ImGui::Selectable(sourceLabels[i], timingSource_ == i) && timingSource_ != i) { timingSource_ = i; timingSummary_ = {}; nextTimingPoll_ = 0; }
+        ImGui::EndCombo();
+    }
     if (measuring_) {
         const auto& t = timingSummary_;
         if (t.callbackToHookMs.count) {
@@ -2163,10 +2486,10 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         engine.Send({ShellEngine::Action::OutRange, {}, 0, 0, outRange});
     ImGui::EndDisabled();
     int playbackDelay = state->playbackDelay;
-    if (SettingSlider("Play button countdown", "##playback-delay", &playbackDelay, 0, 10, "%d seconds", s, dpi))
+    if (SettingSlider("Play button countdown", "##playback-delay", &playbackDelay, 0, 10, "%d seconds", s, dpi, nullptr, 3))
         engine.Send({ShellEngine::Action::PlaybackDelay, {}, 0, 0, false, static_cast<double>(playbackDelay)});
     int seekStep = state->seekStep;
-    if (SettingSlider("Skip step", "##seek-step", &seekStep, 1, 60, "%d seconds", s, dpi))
+    if (SettingSlider("Skip step", "##seek-step", &seekStep, 1, 60, "%d seconds", s, dpi, nullptr, 10))
         engine.Send({ShellEngine::Action::SeekStep, {}, 0, 0, false, static_cast<double>(seekStep)});
     // Speed slider range in 0.05 steps. It always spans 1 so the reset-to-1 button
     // stays in range.
@@ -2174,15 +2497,16 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         int steps = static_cast<int>(std::lround((top ? state->speedMax : state->speedMin) * 20));
         char shown[16]; snprintf(shown, sizeof(shown), "%.2f\xc3\x97", steps / 20.0);
         if (SettingSlider(top ? "Maximum speed" : "Minimum speed", top ? "##speed-max" : "##speed-min", &steps,
-                          top ? 20 : 1, top ? 160 : 20, "%d", s, dpi, shown))
+                          top ? 20 : 1, top ? 160 : 20, "%d", s, dpi, shown, top ? 40 : 5))
             engine.Send({top ? ShellEngine::Action::SpeedMax : ShellEngine::Action::SpeedMin, {}, 0, 0, false, steps / 20.0});
     }
     // The pill already shows on/off; only calibration pending needs a suffix.
-    if (ImGui::Button(state->autoVolumeNeedsCalibration ? "AutoVol: calibrate" : "AutoVol", ImVec2(-1, s.metric.controlHeight))) {
+    if (EasedButton(state->autoVolumeNeedsCalibration ? "AutoVol: calibrate" : "AutoVol", ImVec2(-1, s.metric.controlHeight))) {
         autoVolumeOpen = true;
         ImGui::CloseCurrentPopup();
     }
-    SettingSwitch("Solo piano tracks on load", preferences.autoSolo, nullptr, fonts, design, dpi);
+    if (SettingSwitch("Solo piano tracks on load", preferences.autoSolo, nullptr, fonts, design, dpi))
+        engine.Send({ShellEngine::Action::AutoSolo, {}, 0, 0, preferences.autoSolo});
     if (revealSettingsSwitches) ImGui::SetScrollHereY(0.f);
     // Performer switch and section, only when the add-on is present.
     const auto& performer = state->performer;
@@ -2306,7 +2630,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     }
     ImGui::BeginDisabled(!state->hasPreviousCurve);
     if (SettingSection("Curve comparison", s, dpi)) {
-        if (ImGui::Button(state->comparingCurve ? "Return to edited curve" : "Hear previous curve",
+        if (EasedButton(state->comparingCurve ? "Return to edited curve" : "Hear previous curve",
                           ImVec2(-1, s.metric.controlHeight)))
             engine.Send({ShellEngine::Action::CurveCompare});
     }
@@ -2336,7 +2660,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             // Draw the key name separately rather than as the button label: a key named
             // "#" would make the label "###cap", which ImGui treats as empty.
             const std::string cap = armed ? std::string() : HotkeyLabel(state->hotkeys[i]);
-            if (ImGui::Button("##cap", ImVec2(capWidth, height))) hotkeyCapture = armed ? -1 : static_cast<int>(i);
+            if (EasedButton("##cap", ImVec2(capWidth, height))) hotkeyCapture = armed ? -1 : static_cast<int>(i);
             if (!cap.empty()) {
                 const ImVec2 capMin = ImGui::GetItemRectMin(), size = ImGui::CalcTextSize(cap.c_str(), nullptr, false);
                 draw->AddText(ImVec2(capMin.x + (capWidth - size.x) / 2, capMin.y + (height - size.y) / 2),
@@ -2383,7 +2707,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
                 const float width = armed ? 56 * dpi : 2 * capPad + ImGui::CalcTextSize(name.c_str()).x + s.spacing.s1 + cross;
                 place(width);
                 const ImVec2 min = ImGui::GetCursorScreenPos();
-                const bool pressed = ImGui::Button("##cap", ImVec2(width, height));
+                const bool pressed = EasedButton("##cap", ImVec2(width, height));
                 const bool overCross = !armed && ImGui::IsItemHovered() && ImGui::GetMousePos().x >= min.x + width - capPad - cross - s.spacing.s1;
                 if (armed) draw->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), Colour(s.accent.accent), s.radius.control, 0, 2 * dpi);
                 else {
@@ -2412,7 +2736,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     }
     ImGui::Separator();
     section("Appearance");
-    SettingSlider("Window opacity", "##window-opacity", &preferences.opacity, 40, 100, "%d%%", s, dpi);
+    SettingSlider("Window opacity", "##window-opacity", &preferences.opacity, 40, 100, "%d%%", s, dpi, nullptr, 100);
     // All themes by name, built-ins first. Customise opens the editor on the chosen
     // theme, or on a copy of a built-in.
     {
@@ -2430,8 +2754,13 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             ImGui::EndCombo();
         }
         ImGui::SameLine(0, gap);
-        if (ImGui::Button("Customise", ImVec2(button, s.metric.controlHeight))) {
-            if (active.builtin) preferences.theme = themes.Add(active, NewThemeName(themes, active.name)).id;
+        if (EasedButton("Customise", ImVec2(button, s.metric.controlHeight))) {
+            // Add can reallocate the list `active` points into, so its id is read first.
+            if (active.builtin) {
+                customisedFrom_ = active.id;
+                customisedCopy_ = themes.Add(active, NewThemeName(themes, active.name));
+                preferences.theme = customisedCopy_.id;
+            }
             themeEditorOpen = true;
             ImGui::CloseCurrentPopup();
         }
@@ -2440,9 +2769,9 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             if (IconButton("##delete-theme", Icon::Clear, "Delete theme", s, dpi)) ImGui::OpenPopup("##confirm-delete-theme");
             if (ImGui::BeginPopup("##confirm-delete-theme")) {
                 ImGui::Text("Delete %s?", active.name.c_str());
-                bool remove = ImGui::Button("Delete", ImVec2(96 * dpi, s.metric.controlHeight));
+                bool remove = EasedButton("Delete", ImVec2(96 * dpi, s.metric.controlHeight));
                 ImGui::SameLine(0, gap);
-                if (ImGui::Button("Cancel", ImVec2(96 * dpi, s.metric.controlHeight))) ImGui::CloseCurrentPopup();
+                if (EasedButton("Cancel", ImVec2(96 * dpi, s.metric.controlHeight))) ImGui::CloseCurrentPopup();
                 if (remove) {
                     ImGui::CloseCurrentPopup();
                     themes.Remove(preferences.theme);
@@ -2457,19 +2786,16 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         // measures, clamped to range on load), so importing one runs nothing.
         const HWND owner = static_cast<HWND>(ImGui::GetMainViewport()->PlatformHandleRaw);
         const float half = (ImGui::GetContentRegionAvail().x - gap) / 2;
-        if (ImGui::Button("Import", ImVec2(half, s.metric.controlHeight))) {
+        if (EasedButton("Import", ImVec2(half, s.metric.controlHeight))) {
             const auto path = PickThemeFile(owner, false, {});
-            if (!path.empty()) {
-                if (const Theme* imported = themes.Import(path)) { preferences.theme = imported->id; SaveThemes(); }
-                else ShellLog::Instance().Append("[error] " + Utf8(path.filename()) + " is not a QuartzMIDI theme.\n");
-            }
+            if (!path.empty()) ImportTheme(path);
         }
         ImGui::SameLine(0, gap);
-        if (ImGui::Button("Export", ImVec2(half, s.metric.controlHeight))) {
+        if (EasedButton("Export", ImVec2(half, s.metric.controlHeight))) {
             const Theme& chosen = themes.Active(preferences.theme);
             const auto path = PickThemeFile(owner, true, chosen.name);
             if (!path.empty() && !ThemeStore::Export(chosen, path))
-                ShellLog::Instance().Append("[error] Could not write " + Utf8(path.filename()) + ".\n");
+                ReportError("Could not export the theme.", "Could not write " + Utf8(path.filename()) + ".");
         }
     }
     // Sync About's open state with the render hook so later scenarios are unaffected.
@@ -2513,6 +2839,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
 void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float dpi,
                              ShellEngine& engine, ImVec2 popupPosition, float popupMaxHeight) {
     const auto s = skin::ScaleGeometry(design, dpi);
+    const float popupWidth = PopoverWidth(design) * dpi;
     // Show the button as active while its popover is open.
     if (IconButton("##settings", Icon::Settings, "Settings", s, dpi, ImGui::IsPopupOpen("Settings")))
         ImGui::OpenPopup("Settings");
@@ -2521,24 +2848,30 @@ void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float
     // here: in mini mode at the bottom edge, its own window would open off the monitor.
     for (const auto& monitor : ImGui::GetPlatformIO().Monitors) {
         const ImVec2 min = monitor.WorkPos, max(monitor.WorkPos.x + monitor.WorkSize.x, monitor.WorkPos.y + monitor.WorkSize.y);
-        if (popupPosition.x < min.x - 344 * dpi || popupPosition.x >= max.x || popupPosition.y < min.y || popupPosition.y >= max.y) continue;
+        if (popupPosition.x < min.x - popupWidth || popupPosition.x >= max.x || popupPosition.y < min.y || popupPosition.y >= max.y) continue;
         popupMaxHeight = std::min(popupMaxHeight, max.y - min.y);
         popupPosition.y = std::max(min.y, std::min(popupPosition.y, max.y - popupMaxHeight));
-        popupPosition.x = std::clamp(popupPosition.x, min.x, std::max(min.x, max.x - 344 * dpi));
+        popupPosition.x = std::clamp(popupPosition.x, min.x, std::max(min.x, max.x - popupWidth));
         break;
     }
     // The device popup takes Settings' position and height. Anchored at the pill
     // it overflowed the window, and a popup that leaves the window becomes its own
     // OS window.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(344 * dpi, 0), ImVec2(344 * dpi, popupMaxHeight));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(popupWidth, 0), ImVec2(popupWidth, popupMaxHeight));
     ImGui::SetNextWindowPos(popupPosition);
     if (ImGui::BeginPopup("MIDI devices")) {
+        // Not every port that appears changes the device tree, so opening the
+        // popup rescans the lists the first frame scanned.
+        if (ImGui::IsWindowAppearing() && scannedLive_) {
+            engine.Send({ShellEngine::Action::LiveScan});
+            engine.Send({ShellEngine::Action::OutputScan});
+        }
         DrawMidiDevices(fonts, design, dpi, engine);
         ImGui::EndPopup();
     }
     // Set right before the popup they apply to: a closed BeginPopup discards them,
     // so with the device popup in between, Settings would open unplaced and full height.
-    ImGui::SetNextWindowSizeConstraints(ImVec2(344 * dpi, 0), ImVec2(344 * dpi, popupMaxHeight));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(popupWidth, 0), ImVec2(popupWidth, popupMaxHeight));
     ImGui::SetNextWindowPos(popupPosition);
     if (ImGui::BeginPopup("Settings")) {
         DrawSettings(fonts, design, dpi, engine);
@@ -2574,13 +2907,14 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     // same width at the same edge. The width fits the widest label either shows,
     // so nothing moves when Convert becomes Cancel.
     float actionWidth = 0;
-    for (const char* label : {"Convert", "Cancel", "Close", "Sign in", "Sign in again", "Install"})
+    for (const char* label : {"Convert", "Cancel", "Close", "Sign in", "Sign in again", "Install", "Use CPU", "Use GPU"})
         actionWidth = std::max(actionWidth, ImGui::CalcTextSize(label).x + 2 * 12 * dpi);
     const float rowStart = ImGui::GetCursorPosX();
     // Progress: an indeterminate bar while running, then the converter's last line,
     // styled as an error when the run failed.
     const auto progress = [&] {
         if (busy && !state->signingIn) {
+            convertBarDrawn_ = true;
             const ImVec2 min = ImGui::GetCursorScreenPos();
             const float height = 4 * dpi;
             auto* draw = ImGui::GetWindowDrawList();
@@ -2594,7 +2928,7 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
         if (!state->conversionStatus.empty()) {
             const auto line = (state->conversionFailed ? "Failed: " : "") + state->conversionStatus;
             ImGui::PushStyleColor(ImGuiCol_Text, Colour(state->conversionFailed ? s.accent.bad : s.ink.primary));
-            ImGui::PushTextWrapPos(width);
+            ImGui::PushTextWrapPos(rowStart + width);
             ImGui::TextUnformatted(line.c_str());
             ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
@@ -2603,8 +2937,8 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     // Add-on present but not installed: show the install rows on the same grid;
     // the popover becomes the converter once it's installed.
     if (!state->converterInstalled && (state->converterCanSetUp || state->settingUp)) {
-        // Two installs, one row each: CPU, and GPU (PyTorch's CUDA build, NVIDIA only).
-        // While one runs, only its row stays, with Cancel.
+        // Two installs, one row each: CPU, and GPU (PyTorch's CUDA build) when an
+        // NVIDIA driver is there. While one runs, only its row stays, with Cancel.
         const auto row = [&](const char* label, bool nvidia) {
             ImGui::PushID(label);
             ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
@@ -2613,7 +2947,7 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
             ImGui::PopStyleColor();
             ImGui::SameLine();
             ImGui::SetCursorPosX(rowStart + width - actionWidth);
-            if (ImGui::Button(busy ? "Cancel" : "Install", ImVec2(actionWidth, s.metric.controlHeight))) {
+            if (EasedButton(busy ? "Cancel" : "Install", ImVec2(actionWidth, s.metric.controlHeight))) {
                 if (busy) engine.Send({ShellEngine::Action::ConvertCancel});
                 else {
                     installNvidia_ = nvidia;
@@ -2623,7 +2957,7 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
             ImGui::PopID();
         };
         if (!busy || !installNvidia_) row("CPU, 1.2 GB", false);
-        if (!busy || installNvidia_) row("GPU (NVIDIA only), 4.6 GB", true);
+        if (busy ? installNvidia_ : state->nvidiaCard) row("GPU, 3.7 GB", true);
         progress();
         ImGui::PopStyleVar(2);
         return;
@@ -2640,11 +2974,11 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (busy) {
-        if (ImGui::Button(state->signingIn ? "Close" : "Cancel", ImVec2(actionWidth, s.metric.controlHeight)))
+        if (EasedButton(state->signingIn ? "Close" : "Cancel", ImVec2(actionWidth, s.metric.controlHeight)))
             engine.Send({ShellEngine::Action::ConvertCancel});
     } else {
         ImGui::BeginDisabled(!ready || !convertLink_[0]);
-        if (ImGui::Button("Convert", ImVec2(actionWidth, s.metric.controlHeight)))
+        if (EasedButton("Convert", ImVec2(actionWidth, s.metric.controlHeight)))
             engine.Send({ShellEngine::Action::ConvertAudio, {}, 0, 0, playlistLink && convertPlaylist_,
                          static_cast<double>(preferences.converterCpu), convertLink_});
         ImGui::EndDisabled();
@@ -2674,6 +3008,23 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
             preferences.converterCpu = kShares[picked];
     }
 
+    // The build the converter runs on, and a setup that swaps it; a CPU install
+    // offers the GPU only when an NVIDIA driver is there.
+    if (state->converterCanSwitch && (state->converterGpu || state->nvidiaCard)) {
+        ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(state->converterGpu ? "Runs on the GPU" : "Runs on the CPU");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(rowStart + width - actionWidth);
+        ImGui::BeginDisabled(busy);
+        if (EasedButton(state->converterGpu ? "Use CPU" : "Use GPU", ImVec2(actionWidth, s.metric.controlHeight))) {
+            installNvidia_ = !state->converterGpu;
+            engine.Send({ShellEngine::Action::ConverterSetUp, {}, 0, 0, installNvidia_});
+        }
+        ImGui::EndDisabled();
+    }
+
     // Account status, in quieter ink than the button beside it.
     ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
     ImGui::AlignTextToFramePadding();
@@ -2682,7 +3033,7 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     ImGui::SameLine();
     ImGui::SetCursorPosX(rowStart + width - actionWidth);
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button(state->youtubeSignedIn ? "Sign in again" : "Sign in", ImVec2(actionWidth, s.metric.controlHeight)))
+    if (EasedButton(state->youtubeSignedIn ? "Sign in again" : "Sign in", ImVec2(actionWidth, s.metric.controlHeight)))
         engine.Send({ShellEngine::Action::YouTubeSignIn});
     ImGui::EndDisabled();
 
@@ -2700,7 +3051,9 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
     FontScope font(fonts, design, design.type.meta * SpecFontScale(design));
     const ImVec2 text(min.x + s.spacing.windowPad, min.y + (height - ImGui::GetTextLineHeight()) / 2);
     std::vector<std::string> fields;
-    if (!state.error.empty()) fields.push_back(state.error);
+    // A failure on the panel side is the newest result while it lasts; Draw clears it.
+    if (!panelError_.empty()) fields.push_back(panelError_);
+    else if (!state.error.empty()) fields.push_back(state.error);
     else if (state.busy) fields.push_back("Loading...");
     else {
         // The sheet export result comes first while there is one; mini has no Export.
@@ -2730,13 +3083,18 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
         if (!summary.empty()) summary += "\n";
         summary += field;
         if (x >= end) continue;
-        if (x > text.x) {
+        // A field with no room for its ellipsis is left out with its separator,
+        // rather than a hairline with nothing after it or a cut glyph. It stays
+        // in the tooltip.
+        const float gap = x > text.x ? 24 * dpi : 0.f;
+        const float fieldWidth = ImGui::CalcTextSize(field.c_str()).x;
+        if (fieldWidth > end - (x + gap) && end - (x + gap) <= ImGui::CalcTextSize("...").x) { x = end; continue; }
+        if (gap > 0)
             draw->AddLine(ImVec2(x + 12 * dpi, text.y + 2 * dpi),
                           ImVec2(x + 12 * dpi, text.y + ImGui::GetTextLineHeight() - 2 * dpi), Colour(s.border.hairline), dpi);
-            x += 24 * dpi;
-        }
-        if (x < end) DrawEllipsis(field, end - x, ImVec2(x, text.y));
-        x += ImGui::CalcTextSize(field.c_str()).x;
+        x += gap;
+        DrawEllipsis(field, end - x, ImVec2(x, text.y));
+        x += fieldWidth;
     }
     if (!miniMode) draw->AddText(ImVec2(min.x + width - s.spacing.windowPad - logWidth - 8 * dpi - ImGui::CalcTextSize(tracks.c_str()).x, text.y), Colour(s.ink.secondary), tracks.c_str());
     draw->PopClipRect();
@@ -2745,7 +3103,21 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", summary.c_str());
     ImGui::SetCursorScreenPos(ImVec2(min.x + width - s.spacing.windowPad - logWidth, min.y + 2 * dpi));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-    if (ImGui::Button("Log", ImVec2(logWidth, height - 4 * dpi))) logOpen = !logOpen;
+    // Styled as an active IconButton while the log is open, easing like one. Under
+    // the log window, as in mini, that styling would only show at its corner.
+    const ImRect logButton(min.x + width - s.spacing.windowPad - logWidth, min.y + 2 * dpi,
+                           min.x + width - s.spacing.windowPad, min.y + height - 2 * dpi);
+    const ImGuiWindow* logWindow = ImGui::FindWindowByName("Log");
+    const bool logShown = logOpen && !(logWindow && logWindow->WasActive && logWindow->Rect().Overlaps(logButton));
+    const float on = Ease(ImHashStr("on", 0, ImGui::GetID("##log-on")), logShown ? 1.f : 0.f);
+    ImGui::PushStyleColor(ImGuiCol_Button, Colour(Mix(StyleArgb(ImGuiCol_Button), s.accent.accentSoft, on)));
+    ImGui::PushStyleColor(ImGuiCol_Text, Colour(Mix(StyleArgb(ImGuiCol_Text), s.accent.accent, on)));
+    const bool clicked = EasedButton("Log", ImVec2(logWidth, height - 4 * dpi));
+    ImGui::PopStyleColor(2);
+    if (on > 0)
+        draw->AddRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), Faded(Mix(s.accent.accent & 0xFFFFFFu, s.accent.accent, on)),
+                      s.radius.control, 0, dpi);
+    if (clicked) logOpen = !logOpen;
     ImGui::PopStyleVar();
 }
 
@@ -2760,9 +3132,16 @@ void Panels::DrawLog(HWND hwnd, const Fonts& fonts, const skin::Skin& design, fl
     ImGui::SetNextWindowSize(ImVec2(std::min(600 * dpi, limit.x), std::min(320 * dpi, limit.y)), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x / 2,
                                   viewport->WorkPos.y + viewport->WorkSize.y / 2), ImGuiCond_Appearing, ImVec2(.5f, .5f));
+    // Dragged outside the main window, the log becomes an OS window of its own and
+    // needs TopMost with always-on-top, or it opens behind the main window. No
+    // NoAutoMerge, so it still opens inside the main window.
+    ImGuiWindowClass logClass;
+    logClass.ViewportFlagsOverrideSet = preferences.alwaysOnTop ? ImGuiViewportFlags_TopMost : 0;
+    ImGui::SetNextWindowClass(&logClass);
     // No collapse arrow: ImGui's title-bar triangle isn't from the icon set, and
-    // the log has no use for a collapsed state.
-    if (ImGui::Begin("Log", &logOpen, ImGuiWindowFlags_NoCollapse)) {
+    // the log has no use for a collapsed state. No docking: dropped on the app, it
+    // would dock into the whole shell.
+    if (ImGui::Begin("Log", &logOpen, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoDocking)) {
         const auto state = engine.Snapshot();
         if (IconButton("##clear-log", Icon::Clear, "Clear Log", s, dpi)) engine.Send({ShellEngine::Action::ClearLog});
         ImGui::SameLine();
@@ -2863,17 +3242,22 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         skin::RecessedRect(draw, well, ImVec2(well.x + segmentWidth, well.y + control), s.radius.control, s);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, s.radius.element);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
+        // One raised thumb slides between the modes under transparent buttons, and
+        // is outlined after them so their hairlines don't cover it.
+        const float at = Ease(ImGui::GetID("##mini-mode-thumb"), miniAutoplay ? 1.f : 0.f);
+        const ImVec2 thumbMin(well.x + 4 * dpi + at * 80 * dpi, well.y + 4 * dpi);
+        const ImVec2 thumbMax(thumbMin.x + 76 * dpi, thumbMin.y + (control - 8 * dpi));
+        draw->AddRectFilled(thumbMin, thumbMax, Colour(s.surface.elevated), s.radius.element);
+        const ImU32 hairline = ImGui::GetColorU32(ImGuiCol_Border);
         for (int mode = 0; mode < 2; ++mode) {
-            const bool selected = miniAutoplay == (mode == 1);
             ImGui::SetCursorScreenPos(ImVec2(well.x + 4 * dpi + mode * 80 * dpi, well.y + 4 * dpi));
-            ImGui::PushStyleColor(ImGuiCol_Button, selected ? Colour(s.surface.elevated) : IM_COL32(0, 0, 0, 0));
-            if (ImGui::Button(mode ? "Autoplay" : "Live", ImVec2(76 * dpi, control - 8 * dpi))) miniAutoplay = mode == 1;
-            ImGui::PopStyleColor();
-            if (selected) {
-                const auto a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-                draw->AddRect(a, b, Colour(s.accent.accent), s.radius.element, 0, dpi);
-            }
+            ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
+            ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
+            if (EasedButton(mode ? "Autoplay" : "Live", ImVec2(76 * dpi, control - 8 * dpi))) miniAutoplay = mode == 1;
+            ImGui::PopStyleColor(2);
+            SegmentHairline(draw, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), thumbMin.x, thumbMax.x, hairline, s.radius.element, dpi);
         }
+        draw->AddRect(thumbMin, thumbMax, Colour(s.accent.accent), s.radius.element, 0, dpi);
         ImGui::PopStyleVar(2);
         ImGui::SetCursorScreenPos(ImVec2(well.x + segmentWidth + 8 * dpi, well.y));
     }
@@ -2885,9 +3269,9 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
     ImGui::EndDisabled();
     ImGui::SameLine();
     SettingsControl(fonts, design, dpi, engine,
-                    ImVec2(origin.x + size.x - 344 * dpi - s.spacing.windowPad, origin.y + stripPad + control + 4 * dpi), 544 * dpi);
+                    ImVec2(origin.x + size.x - PopoverWidth(design) * dpi - s.spacing.windowPad, origin.y + stripPad + control + 4 * dpi), 544 * dpi);
     ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, origin.y + 2 * stripPad + control));
-    if (StatePills(fonts, design, dpi, engine, true)) autoVolumeOpen = true;
+    if (StatePills(fonts, design, dpi, engine, size.x - 2 * pad)) autoVolumeOpen = true;
     const float row = origin.y + strip + gap;
     ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, row));
     const auto number = [&](ShellEngine::Action action, double value) { engine.Send({action, {}, state->generation, 0, false, value}); };
@@ -2926,14 +3310,22 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         if (fileOpen) {
             // Only the visible rows, as in the full window's list, so large libraries
             // don't cost a row per file every frame.
+            // It opens at the loaded song: on the first frame the clipper also submits
+            // that row, whose default focus scrolls the list to it.
+            int loadedIndex = -1;
+            if (ImGui::IsWindowAppearing())
+                for (size_t i = 0; i < state->files->size(); ++i)
+                    if ((*state->files)[i].path == state->loaded) { loadedIndex = static_cast<int>(i); break; }
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(state->files->size()));
+            if (loadedIndex >= 0) clipper.IncludeItemByIndex(loadedIndex);
             while (clipper.Step())
                 for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                     const auto& file = (*state->files)[static_cast<size_t>(i)];
                     ImGui::PushID(i);
                     if (ImGui::Selectable(file.name.c_str(), file.path == state->loaded))
                         engine.Send({ShellEngine::Action::Load, file.path, 0, 0, preferences.autoSolo});
+                    if (i == loadedIndex) ImGui::SetItemDefaultFocus();
                     ImGui::PopID();
                 }
             ImGui::EndCombo();
@@ -2953,12 +3345,12 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             }
             ImGui::EndPopup();
         }
-        ImGui::SameLine(); ImGui::BeginDisabled(state->rows.empty());
+        ImGui::SameLine(); ImGui::BeginDisabled(state->rows.empty() || state->busy || AllPiano(state->rows));
         { const bool applied = SoloPianoApplied(state->rows);
           if (IconButton("##mini-solo-piano", Icon::Piano, applied ? "Unmute all" : "Solo Piano", s, dpi, applied))
               engine.Send({applied ? ShellEngine::Action::UnmuteAll : ShellEngine::Action::SoloPiano, {}, state->generation}); }
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(state->loaded.empty() || state->busy);
+        ImGui::BeginDisabled(state->loaded.empty() || state->rows.empty() || state->busy);
         const float seekHeight = 22 * dpi, transportY = row + control + 2 * gap + seekHeight;
         ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, row + control + gap));
         if (!seeking_ || seekGeneration_ != state->generation) { seekPosition_ = static_cast<float>(state->position); seeking_ = false; }
@@ -2967,6 +3359,14 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         if (ImGui::IsItemActivated()) { seeking_ = true; seekGeneration_ = state->generation; }
         if (seeking_ && ImGui::IsItemDeactivatedAfterEdit()) { number(ShellEngine::Action::Seek, seekPosition_); seeking_ = false; }
         else if (changed && !ImGui::IsItemActive()) number(ShellEngine::Action::Seek, seekPosition_);
+        // As in the full window: the dragged time, else the time a click under the
+        // pointer seeks to, mapped as the slider maps it (2 px in from each end).
+        if (seeking_) ImGui::SetTooltip("%s", Time(seekPosition_).c_str());
+        else if (ImGui::IsItemHovered()) {
+            const auto barMin = ImGui::GetItemRectMin(), barMax = ImGui::GetItemRectMax();
+            const float at = std::clamp((ImGui::GetIO().MousePos.x - barMin.x - 2) / std::max(1.f, barMax.x - barMin.x - 4), 0.f, 1.f);
+            ImGui::SetTooltip("%s", Time(at * state->duration).c_str());
+        }
         ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, transportY));
         if (PlayButton("##mini-play", state->playing, state->playbackCountdown, s, dpi))
             engine.Send({ShellEngine::Action::PlayCountdown, {}, state->generation});
@@ -2993,7 +3393,7 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         if (TransportButton("##mini-forward10", SeekLabel(state->seekStep, true).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Forward10, {}, state->generation});
         under(2);
         ImGui::EndDisabled();
-        ImGui::SameLine(); ImGui::BeginDisabled(state->files->empty());
+        ImGui::SameLine(); ImGui::BeginDisabled(state->files->empty() || state->busy);
         if (IconButton("##mini-prev", Icon::Left, tipped("Previous MIDI file", 4).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Previous, {}, state->generation});
         ImGui::SameLine();
         if (IconButton("##mini-next", Icon::Right, tipped("Next MIDI file", 5).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Next, {}, state->generation});
@@ -3102,11 +3502,13 @@ void Panels::StartTour(int stop) {
     tourStop = std::clamp(stop, 0, static_cast<int>(TourStop::Count) - 1);
     tourDrawn_ = -1;
     tourGlide_ = 1;
+    tourClosing_ = false;
 }
 
 void Panels::EndTour() {
     tourStop = tourDrawn_ = -1;
     tourGlide_ = 1;
+    tourClosing_ = false;
     preferences.tourSeen = true;
     // The tour covers the whole app, so it also counts as seeing this build's additions.
     preferences.helpBuild = kHelpBuild;
@@ -3144,25 +3546,28 @@ void Panels::DrawTour(const Fonts& fonts, const skin::Skin& design, float dpi, I
         tourFrom_ = first ? target : tourShown_;
         tourCardFrom_ = first ? cardTarget : tourCardShown_;
         tourHeightFrom_ = first ? height : tourHeightShown_;
-        tourPrevious_ = first ? tourStop : tourDrawn_;
+        if (first) { tourTextStop_ = tourStop; tourText_ = 1; }
         tourGlide_ = first ? 1.f : 0.f;
         if (first) tourFade_ = 0;
         tourDrawn_ = tourStop;
     }
-    // Capped so the first frame after an idle wait still animates.
-    const float step = std::min(ImGui::GetIO().DeltaTime, 1.f / 30);
+    // The shell caps the first frame after an idle wait, so this still animates.
+    const float step = ImGui::GetIO().DeltaTime;
     tourGlide_ = std::min(1.f, tourGlide_ + step / .28f);
-    tourFade_ = std::min(1.f, tourFade_ + step / .2f);
+    // In over 200 ms when the tour starts, out over 160 ms when it ends.
+    tourFade_ = tourClosing_ ? std::max(0.f, tourFade_ - step / .16f) : std::min(1.f, tourFade_ + step / .2f);
     // The highlight and the card glide together, each between its own start and
     // end, so the card never re-picks its side mid-glide.
     tourShown_ = TourBetween(tourFrom_, target, tourGlide_);
     tourCardShown_ = TourBetween(tourCardFrom_, cardTarget, tourGlide_);
     tourHeightShown_ = tourHeightFrom_ + (height - tourHeightFrom_) * TourEase(tourGlide_);
     const float fade = TourEase(tourFade_);
-    // The text crossfades: the previous stop's out over the first half, this one's in over the second.
-    const bool crossing = tourPrevious_ != tourStop && tourGlide_ < 1;
-    const int shownStop = crossing && tourGlide_ < .5f ? tourPrevious_ : tourStop;
-    const float textAlpha = crossing ? TourEase(std::abs(2 * tourGlide_ - 1)) : 1.f;
+    // The text crossfades in the glide's time: the text on screen out over its
+    // first half, this stop's in over the second.
+    TourTextStep(tourStop, step / .14f, tourTextStop_, tourText_);
+    const bool crossing = tourTextStop_ != tourStop || tourText_ < 1;
+    const int shownStop = tourTextStop_;
+    const float textAlpha = TourEase(tourText_);
 
     // Save the style's own dim alpha (the one read at render time) and zero it;
     // EndTour restores it.
@@ -3171,11 +3576,16 @@ void Panels::DrawTour(const Fonts& fonts, const skin::Skin& design, float dpi, I
     ImGui::SetNextWindowPos(ImVec2(tourCardShown_.x0, tourCardShown_.y0));
     ImGui::SetNextWindowSize(ImVec2(width, tourHeightShown_));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+    // No keyboard navigation: the card reads its own keys, and nav would also
+    // press whichever button it had focused.
     const bool open = ImGui::BeginPopupModal("##tour", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoNav);
     ImGui::PopStyleVar();
     if (!open) return;
+    // Keys are ignored on the first frame, where the Enter that pressed Help's
+    // Tour button still reads as pressed, and while the tour fades out.
+    const bool keys = !ImGui::IsWindowAppearing() && !tourClosing_;
     auto* draw = ImGui::GetWindowDrawList();
     const int firstVertex = draw->VtxBuffer.Size;
     const ImU32 dim = IM_COL32(0, 0, 0, 150);
@@ -3191,13 +3601,8 @@ void Panels::DrawTour(const Fonts& fonts, const skin::Skin& design, float dpi, I
     const ImVec2 cardMin = ImGui::GetWindowPos(), cardSize = ImGui::GetWindowSize();
     skin::RaisedRect(draw, cardMin, ImVec2(cardMin.x + cardSize.x, cardMin.y + cardSize.y), s.radius.card, s, Colour(s.surface.elevated));
     draw->PopClipRect();
-    // Fade the dim, ring and card in when the tour starts.
-    if (fade < 1)
-        for (int i = firstVertex; i < draw->VtxBuffer.Size; ++i) {
-            ImU32& colour = draw->VtxBuffer[i].col;
-            const auto alpha = static_cast<ImU32>(((colour >> IM_COL32_A_SHIFT) & 0xFF) * fade);
-            colour = (colour & ~IM_COL32_A_MASK) | (alpha << IM_COL32_A_SHIFT);
-        }
+    // Fade the dim, ring and card in when the tour starts and out when it ends.
+    if (fade < 1) FadeVertices(draw, firstVertex, fade);
 
     bool skip = false, back = false, next = false, last = false;
     { // The font must be popped before the popup ends.
@@ -3224,26 +3629,33 @@ void Panels::DrawTour(const Fonts& fonts, const skin::Skin& design, float dpi, I
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, fade);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * dpi, (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2));
     last = tourStop + 1 == stops;
-    skip = TransportBody("##tour-skip", nullptr, "Skip", s, dpi, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    skip = TransportBody("##tour-skip", nullptr, "Skip", s, dpi, false) || (keys && ImGui::IsKeyPressed(ImGuiKey_Escape, false));
     // Next keeps its position on the last stop, where it reads Done.
     const float nextWidth = 2 * 16 * dpi + std::max(ImGui::CalcTextSize("Next").x, ImGui::CalcTextSize("Done").x);
     const float backWidth = 2 * 12 * dpi + ImGui::CalcTextSize("Back").x;
     ImGui::SameLine(ImGui::GetWindowWidth() - pad - nextWidth - s.spacing.s2 - backWidth);
     ImGui::BeginDisabled(tourStop == 0);
-    back = TransportBody("##tour-back", nullptr, "Back", s, dpi, false) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false);
+    back = TransportBody("##tour-back", nullptr, "Back", s, dpi, false) || (keys && ImGui::IsKeyPressed(ImGuiKey_LeftArrow, false));
     ImGui::EndDisabled();
     ImGui::SameLine(0, s.spacing.s2);
     next = TransportBody("##tour-next", nullptr, last ? "Done" : "Next", s, dpi, true, false, {"Next", "Done"}) ||
-        ImGui::IsKeyPressed(ImGuiKey_RightArrow, false) || ImGui::IsKeyPressed(ImGuiKey_Enter, false);
+        (keys && (ImGui::IsKeyPressed(ImGuiKey_RightArrow, false) || ImGui::IsKeyPressed(ImGuiKey_Enter, false)));
     ImGui::PopStyleVar(2);
     }
-    if (back && tourStop > 0) --tourStop;
-    else if (next && !last) ++tourStop;
-    if (skip || (next && last)) { EndTour(); ImGui::CloseCurrentPopup(); }
+    // While the tour fades out, the card stays as it was and its buttons do nothing.
+    if (!tourClosing_) {
+        if (back && tourStop > 0) --tourStop;
+        else if (next && !last) ++tourStop;
+        tourClosing_ = skip || (next && last);
+    }
+    if (tourClosing_ && tourFade_ <= 0) { EndTour(); ImGui::CloseCurrentPopup(); }
     ImGui::EndPopup();
 }
 
 void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine) {
+    // Set again by any transition still moving this frame.
+    g_motion = false;
+    convertBarDrawn_ = false;
     const auto s = skin::ScaleGeometry(design, dpi);
     auto state = engine.Snapshot();
     SyncLayout(*state);
@@ -3271,6 +3683,10 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     // sheet, shown in the status bar, so clear the "Writing..." line.
     else if (sheetPending_ && !state->error.empty()) { sheetStatus_.clear(); sheetPending_ = false; }
     else if (!state->sheetReady && !sheetPending_) sheetStatus_.clear();
+    // A panel failure lasts until the next click or a newer engine error. Cleared
+    // before anything below can report one this frame.
+    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left) || (!state->error.empty() && state->error != errorSeen_)) panelError_.clear();
+    errorSeen_ = state->error;
     if (!scannedLive_ && hwnd) { engine.Send({ShellEngine::Action::LiveScan}); scannedLive_ = true; }
     if (!scannedOutput_ && hwnd) { engine.Send({ShellEngine::Action::OutputScan}); scannedOutput_ = true; }
     if (measuring_ && ImGui::GetTime() >= nextTimingPoll_) {
@@ -3308,7 +3724,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         tourRects_[static_cast<size_t>(stop)] = {min.x, min.y, max.x, max.y};
     };
     ImGui::SetCursorScreenPos(ImVec2(origin.x + s.spacing.windowPad, origin.y + stripPad));
-    if (StatePills(fonts, design, dpi, engine, false)) autoVolumeOpen = true;
+    if (StatePills(fonts, design, dpi, engine, 0)) autoVolumeOpen = true;
     tourRect(TourStop::Pills, ImVec2(origin.x + s.spacing.windowPad, origin.y + stripPad), ImGui::GetItemRectMax());
     ImGui::SameLine(0, s.spacing.s3);
     // Right-aligned against the utility buttons, next to the Settings button it
@@ -3332,9 +3748,13 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         preferences.dark = !preferences.dark;
     ImGui::EndDisabled();
     ImGui::SameLine();
-    const ImVec2 popupPosition(origin.x + size.x - 344 * dpi - s.spacing.windowPad, origin.y + 48 * dpi);
+    // Popovers open one step below the strip's buttons, at any theme shape, and
+    // end one step above the status bar.
+    const float popupTop = stripPad + s.metric.controlHeight + s.spacing.s1;
+    const float popupWidth = PopoverWidth(design) * dpi, popupMaxHeight = size.y - popupTop - s.spacing.s1 - status;
+    const ImVec2 popupPosition(origin.x + size.x - popupWidth - s.spacing.windowPad, origin.y + popupTop);
     const ImVec2 settingsMin = ImGui::GetCursorScreenPos();
-    SettingsControl(fonts, design, dpi, engine, popupPosition, size.y - 52 * dpi);
+    SettingsControl(fonts, design, dpi, engine, popupPosition, popupMaxHeight);
     // Help, last in the strip. Its popup takes Settings' position, as the device
     // popup does.
     ImGui::SetCursorScreenPos(ImVec2(settingsMin.x + s.metric.controlHeight + s.spacing.s2, settingsMin.y));
@@ -3352,7 +3772,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         }
     }
     if (openHelp) { ImGui::OpenPopup("Help"); openHelp = false; }
-    ImGui::SetNextWindowSizeConstraints(ImVec2(344 * dpi, 0), ImVec2(344 * dpi, size.y - 52 * dpi));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(popupWidth, 0), ImVec2(popupWidth, popupMaxHeight));
     ImGui::SetNextWindowPos(popupPosition);
     if (ImGui::BeginPopup("Help")) {
         DrawHelp(fonts, design, dpi, *state);
@@ -3372,14 +3792,18 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     BeginPanel("Files", leftMin, leftMax, s);
     ImGui::PushFont(fonts.Get(design), design.type.body * SpecFontScale(design));
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * dpi, (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2));
-    { FontScope font(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
-      ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("MIDI Files"); }
+    { FontScope font(fonts, design, design.type.heading * SpecFontScale(design), Weight::Semibold);
+      // Centred on the control height, so a heading larger than the body text keeps the row's height.
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * dpi, (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2));
+      ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("MIDI Files");
+      ImGui::PopStyleVar(); }
     ImGui::SameLine(ImGui::GetWindowWidth() - 3 * s.metric.controlHeight - 2 * s.spacing.s2);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8 * dpi, ImGui::GetStyle().FramePadding.y));
     // Convert audio button, alongside the panel's other buttons. Shown active
     // while a conversion runs, since the popover may be closed and this is where
     // to reopen it. Uses a waveform icon; the speaker icon is Mute's in Tracks.
     if (IconButton("##convert-audio", Icon::Audio, "Convert audio to MIDI", s, dpi, state->converting)) openConvert = true;
+    const ImVec2 convertMin = ImGui::GetItemRectMin(), convertMax = ImGui::GetItemRectMax();
     ImGui::SameLine();
     if (IconButton("##sort-files", descendingFiles_ ? Icon::SortUp : Icon::SortDown, "Sort files", s, dpi))
         ImGui::OpenPopup("File sort");
@@ -3411,7 +3835,9 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     // The hint names the search scope: the open folder and its sub-folders.
     const std::string searchHint = browse_.empty() ? std::string("Search MIDI files")
         : "Search in " + browse_.substr(ParentFolder(browse_).size(), browse_.size() - ParentFolder(browse_).size() - 1);
-    ImGui::InputTextWithHint("##search", searchHint.c_str(), search_, sizeof(search_));
+    // Enter opens the top result, loaded below once the list has this frame's text.
+    const bool openTopResult = ImGui::InputTextWithHint("##search", searchHint.c_str(), search_, sizeof(search_),
+                                                        ImGuiInputTextFlags_EnterReturnsTrue);
     ImGui::SameLine();
     // One button for both ways of opening files.
     if (IconButton("##add-files", Icon::Plus, "Add MIDI files", s, dpi))
@@ -3429,6 +3855,9 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     }
     if (convertRequested) ImGui::OpenPopup("Convert audio");
     ImGui::SetNextWindowSizeConstraints(ImVec2(400 * dpi, 0), ImVec2(400 * dpi, 10000 * dpi));
+    // Under its button, as the sort and add menus open under theirs.
+    if (ImGui::IsPopupOpen("Convert audio"))
+        ImGui::SetNextWindowPos(ImVec2(convertMin.x, convertMax.y + s.spacing.s1), ImGuiCond_Appearing);
     if (ImGui::BeginPopup("Convert audio")) {
         DrawConvert(hwnd, fonts, design, dpi, engine);
         ImGui::EndPopup();
@@ -3480,11 +3909,16 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             } else {
                 fileFilter_ = SearchFolder(*state->files, browse_, query);
             }
-            std::stable_sort(fileFilter_.begin(), fileFilter_.end(), [&](size_t a, size_t b) {
-                return FileBefore((*state->files)[a], (*state->files)[b], fileSort_, descendingFiles_);
-            });
             filteredFiles_ = state->files;
             filteredQuery_ = query;
+        }
+        if (openTopResult && !query.empty() && !fileFilter_.empty() && !state->busy) load((*state->files)[fileFilter_.front()].path);
+        // A song that Next, Previous, a hotkey or shuffle loads is scrolled into view
+        // once, if its row is listed here; a row click loads a row already in view.
+        if (state->loaded != followedFile_) {
+            if (state->loaded != clickedFile_ && revealFile_.empty()) revealFile_ = state->loaded;
+            followedFile_ = state->loaded;
+            clickedFile_.clear();
         }
         // Row order: the up row, folders, then files. The first two appear only while
         // browsing; a search lists files alone.
@@ -3495,11 +3929,13 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         std::string moveTo;
         const float rowPitch = s.metric.controlHeight + s.spacing.s2;
         // A just-located file: its folder is open by now, so scroll its row to a third
-        // of the way down, leaving context around it.
+        // of the way down, leaving context around it. A row already in view stays put.
         if (!revealFile_.empty()) {
             for (size_t row = 0; row < fileFilter_.size(); ++row)
                 if ((*state->files)[fileFilter_[row]].path == revealFile_) {
-                    ImGui::SetScrollY(std::max(0.f, (fileStart + static_cast<int>(row)) * rowPitch - listSize.y / 3));
+                    const float rowTop = (fileStart + static_cast<int>(row)) * rowPitch;
+                    if (rowTop < ImGui::GetScrollY() || rowTop + rowPitch > ImGui::GetScrollY() + listSize.y)
+                        ImGui::SetScrollY(std::max(0.f, rowTop - listSize.y / 3));
                     break;
                 }
             revealFile_.clear();
@@ -3534,7 +3970,10 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             const auto& file = (*state->files)[fileFilter_[i - fileStart]];
             ImGui::PushID(static_cast<int>(fileFilter_[i - fileStart]));
             ImGui::BeginDisabled(state->busy);
-            if (ImGui::Selectable("##file", file.path == state->loaded, 0, ImVec2(width, s.metric.controlHeight))) load(file.path);
+            if (ImGui::Selectable("##file", file.path == state->loaded, 0, ImVec2(width, s.metric.controlHeight))) {
+                load(file.path);
+                clickedFile_ = file.path;
+            }
             ImGui::EndDisabled();
             // Like Explorer's search results: go to the file's location, which ends the
             // search and opens its folder at its row.
@@ -3551,7 +3990,13 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             }
             const bool selected = file.path == state->loaded;
             auto* listDraw = ImGui::GetWindowDrawList();
-            if (selected) listDraw->AddRectFilled(pos, ImVec2(pos.x + 2 * dpi, pos.y + s.metric.controlHeight), Colour(s.accent.accent));
+            // The bar spans the row's highlight, which Selectable extends by half the item
+            // spacing above and the rest below.
+            if (selected) {
+                const float spacing = ImGui::GetStyle().ItemSpacing.y, up = IM_TRUNC(spacing * .5f);
+                listDraw->AddRectFilled(ImVec2(pos.x, pos.y - up), ImVec2(pos.x + 2 * dpi, pos.y + s.metric.controlHeight + spacing - up),
+                                        Colour(s.accent.accent));
+            }
             FontScope rowFont(fonts, design, design.type.body * SpecFontScale(design), selected ? Weight::Semibold : Weight::Regular);
             const auto bytes = std::to_string((file.bytes + 1023) / 1024) + " KB";
             const float sizeWidth = ImGui::CalcTextSize(bytes.c_str()).x;
@@ -3612,7 +4057,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     // since bare caps without actions say nothing useful.
     const std::string title = state->loaded.empty() ? "Playback" : Utf8(state->loaded.stem());
     float titleWidth = 0;
-    { FontScope font(fonts, design, 20 * SpecFontScale(design), Weight::Medium);
+    { FontScope font(fonts, design, design.type.title * SpecFontScale(design), Weight::Medium);
       titleWidth = ImGui::CalcTextSize(title.c_str()).x; }
     float hintsWidth = 0;
     { FontScope font(fonts, design, design.type.meta * SpecFontScale(design));
@@ -3627,7 +4072,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
               ImVec2(content.x + contentWidth - sheetButtonWidth - hintsWidth + s.spacing.s3 - s.spacing.s2,
                      content.y + (titleHeight - ImGui::GetTextLineHeight()) / 2), *state, tapCaps);
       } }
-    { FontScope font(fonts, design, 20 * SpecFontScale(design), Weight::Medium);
+    { FontScope font(fonts, design, design.type.title * SpecFontScale(design), Weight::Medium);
       DrawEllipsis(title,
                    contentWidth - sheetButtonWidth - hintsWidth - s.spacing.s2, ImVec2(content.x, content.y + (titleHeight - ImGui::GetTextLineHeight()) / 2)); }
     ImGui::SetCursorScreenPos(ImVec2(content.x + contentWidth - sheetButtonWidth, content.y));
@@ -3742,7 +4187,14 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         if (seekGeneration_ == state->generation) number(ShellEngine::Action::Seek, seekPosition_);
         seeking_ = false;
     } else if (seekChanged && !ImGui::IsItemActive()) number(ShellEngine::Action::Seek, seekPosition_);
-    if (ImGui::IsItemHovered() || seeking_) ImGui::SetTooltip("%s", Time(seekPosition_).c_str());
+    // The dragged time, else the time a click under the pointer seeks to, mapped
+    // as the slider maps it (2 px in from each end).
+    if (seeking_) ImGui::SetTooltip("%s", Time(seekPosition_).c_str());
+    else if (ImGui::IsItemHovered()) {
+        const auto barMin = ImGui::GetItemRectMin(), barMax = ImGui::GetItemRectMax();
+        const float at = std::clamp((ImGui::GetIO().MousePos.x - barMin.x - 2) / std::max(1.f, barMax.x - barMin.x - 4), 0.f, 1.f);
+        ImGui::SetTooltip("%s", Time(at * state->duration).c_str());
+    }
     const float transportY = content.y + titleHeight + seekHeight + 2 * rowGap;
     // From the title row (with the hotkeys) down to the transport.
     tourRect(TourStop::Play, content, ImVec2(content.x + contentWidth, transportY + s.metric.controlHeight));
@@ -3869,18 +4321,22 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     float headerBottom = tableMin.y, headerHeight = 0.f;
     const float rowHeight = s.metric.controlHeight + 2 * s.spacing.s1;
     // The two text columns split the width according to this file's contents.
-    // ImGui reads column weights only when a table is created, so the table ID is
-    // keyed by the load.
+    // The table isn't resizable, so ImGui reapplies the weights every frame and one
+    // table serves every load; a new load starts its rows at the top.
     float nameWeight = ImGui::CalcTextSize("TRACK").x, instrumentWeight = ImGui::CalcTextSize("INSTRUMENT").x;
     for (const auto& row : state->rows) {
         nameWeight = std::max(nameWeight, ImGui::CalcTextSize(row.name.c_str()).x * 1.06f);
         instrumentWeight = std::max(instrumentWeight, ImGui::CalcTextSize(row.instrument.c_str()).x +
             (row.piano ? 14 * dpi + s.spacing.s1 : 0.f));
     }
-    const std::string tableId = "##tracks-" + std::to_string(state->generation);
+    // The scroll is set for the table's own scrolling window, which BeginTable begins
+    // unless this window skips its items; then nothing may be left to the next window.
+    if (tracksOpen && tracksGeneration_ != state->generation && !ImGui::GetCurrentWindowRead()->SkipItems)
+        ImGui::SetNextWindowScroll(ImVec2(0, 0));
     // PadOuterX, or the # column sits flush against the frame's left edge.
-    if (tracksOpen && ImGui::BeginTable(tableId.c_str(), 7, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
-        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX, tableSize)) {
+    if (tracksOpen && ImGui::BeginTable("##tracks", 7, ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg |
+        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX | ImGuiTableFlags_NoSavedSettings, tableSize)) {
+        tracksGeneration_ = state->generation;
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 20 * dpi);
         ImGui::TableSetupColumn("TRACK", ImGuiTableColumnFlags_WidthStretch, nameWeight);
@@ -3997,10 +4453,14 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
 
     DrawVelocity(fonts, design, dpi, engine, ImVec2(right, curveTop), ImVec2(edge, curveTop + curveHeight));
     DrawStatus(fonts, design, dpi, *state, ImVec2(origin.x, origin.y + size.y - status), size.x, status);
-    if (preferences.keyMappingOpen) DrawKeyMapping(fonts, design, dpi, engine);
+    // These are OS windows of their own, above the tour's dim and out of its
+    // modal's reach, so they wait out the tour and come back as they were.
+    if (preferences.keyMappingOpen && tourStop < 0) DrawKeyMapping(fonts, design, dpi, engine);
     else mappingArmed_ = false;
-    DrawAutoVolume(fonts, design, dpi, engine);
-    DrawThemeEditor(fonts, design, dpi);
+    if (tourStop < 0) {
+        DrawAutoVolume(fonts, design, dpi, engine);
+        DrawThemeEditor(fonts, design, dpi);
+    }
     DrawLog(hwnd, fonts, design, dpi, engine);
     // Drawn last, and only in the full window; mini has no tour.
     DrawTour(fonts, design, dpi, origin, size);

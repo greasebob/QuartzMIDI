@@ -9,6 +9,8 @@
 #include "AddonKey.hpp"
 #include "Bundle.hpp"
 #include <shlobj.h>
+#include <cfgmgr32.h>
+#pragma comment(lib, "cfgmgr32.lib")
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
 #include <fstream>
@@ -21,7 +23,7 @@ namespace {
 
 // Globals the engine sources expect their host to define.
 VirtualPianoPlayer* g_player = nullptr;
-int g_sustainCutoff = 64;
+std::atomic<int> g_sustainCutoff{64};
 
 namespace shell {
 namespace {
@@ -98,10 +100,10 @@ std::filesystem::path SheetTarget(const std::filesystem::path& root, const std::
     auto relative = midiFolder.empty() ? std::filesystem::path() : std::filesystem::relative(midi, midiFolder, ignored);
     if (relative.empty() || *relative.begin() == L"..") relative = midi.filename();
     auto target = root / relative;
-    // Keep a .midi extension so a.mid and a.midi don't produce the same sheet name.
+    // Keep a .midi or .kar extension so a.mid, a.midi and a.kar don't produce the same sheet name.
     auto extension = target.extension().wstring();
     std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
-    if (extension != L".midi") target.replace_extension();
+    if (extension != L".midi" && extension != L".kar") target.replace_extension();
     return target;
 }
 
@@ -134,6 +136,170 @@ nlohmann::json PageForFile(const MidiFile& file, const std::string& title, const
             if ((event.status & 0xF0) == 0x90 && event.data2 != 0) ticks.push_back({event.absoluteTick, event.data1});
     }
     return page;
+}
+
+// A folder with more MIDI files than this is something like a drive root.
+constexpr size_t kMaxLibraryFiles = 20000;
+// The MIDI files below root, unsorted, each named by its path relative to root.
+// Stops at kMaxLibraryFiles. Null when root cannot be read.
+std::shared_ptr<std::vector<MidiEntry>> WalkLibrary(const std::filesystem::path& root, std::stop_token stop, std::error_code& error) {
+    auto files = std::make_shared<std::vector<MidiEntry>>();
+    // Skip permission-denied folders. Directory symlinks are not
+    // followed, so a junction to its own parent can't recurse forever.
+    std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, error);
+    if (error) return nullptr;
+    const std::filesystem::recursive_directory_iterator end;
+    // Bound the walk for pathological trees.
+    constexpr int kMaxDepth = 32;
+    while (it != end && files->size() < kMaxLibraryFiles) {
+        if (stop.stop_requested()) break;
+        const auto& entry = *it;
+        std::error_code entryError;
+        if (entry.is_regular_file(entryError) && !entryError && LibraryFile(entry.path())) {
+            std::error_code sizeError, timeError;
+            const auto bytes = entry.file_size(sizeError);
+            // The iterator builds every path as root / ..., so the name is
+            // lexical; std::filesystem::relative would open the file and root.
+            auto shown = entry.path().lexically_relative(root);
+            if (shown.empty()) shown = entry.path().filename();
+            const auto modified = entry.last_write_time(timeError);
+            files->push_back({entry.path(), Utf8(shown), sizeError ? 0 : bytes,
+                timeError ? std::filesystem::file_time_type{} : modified});
+        }
+        if (it.depth() >= kMaxDepth) it.disable_recursion_pending();
+        std::error_code step;
+        it.increment(step);
+        // A failed increment may not advance; continuing would spin.
+        if (step) break;
+    }
+    return files;
+}
+
+bool WatchFolder(const std::filesystem::path& root, HANDLE directory, std::stop_token stop, HANDLE woken, HANDLE leavingDrive,
+                 const std::function<bool(const std::filesystem::path&)>& listed, const std::function<void()>& changed);
+
+// What the drive under a watched folder says, set from a system thread:
+// leaving (asked to eject, or gone), closed (the watcher's answer), stayed
+// (the eject was refused) and removed.
+struct DriveSignals { HANDLE leaving, closed, stayed, removed; };
+
+DWORD CALLBACK DriveChanged(HCMNOTIFICATION, PVOID context, CM_NOTIFY_ACTION action, PCM_NOTIFY_EVENT_DATA, DWORD) {
+    const auto& signals = *static_cast<const DriveSignals*>(context);
+    switch (action) {
+    case CM_NOTIFY_ACTION_DEVICEQUERYREMOVE:
+        // The eject waits on this answer, so the watch lets go first.
+        SetEvent(signals.leaving);
+        WaitForSingleObject(signals.closed, 5000);
+        break;
+    case CM_NOTIFY_ACTION_DEVICEQUERYREMOVEFAILED: SetEvent(signals.stayed); break;
+    case CM_NOTIFY_ACTION_DEVICEREMOVEPENDING:
+    case CM_NOTIFY_ACTION_DEVICEREMOVECOMPLETE: SetEvent(signals.removed); SetEvent(signals.leaving); break;
+    default: break;
+    }
+    return ERROR_SUCCESS;
+}
+
+// Waits for MIDI files below root, or folders holding them, to be added,
+// removed, renamed or rewritten, and calls changed once they settle. listed
+// says whether a path that is gone held listed files. The folder is let go
+// while its drive is asked to eject, and watched again if the eject is refused.
+// Returns when stop is requested or root can no longer be watched.
+void WatchLibrary(const std::filesystem::path& root, std::stop_token stop,
+                  const std::function<bool(const std::filesystem::path&)>& listed, const std::function<void()>& changed) {
+    const HANDLE woken = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    DriveSignals signals{CreateEventW(nullptr, TRUE, FALSE, nullptr), CreateEventW(nullptr, TRUE, FALSE, nullptr),
+                         CreateEventW(nullptr, TRUE, FALSE, nullptr), CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+    if (woken && signals.leaving && signals.closed && signals.stayed && signals.removed) {
+        std::stop_callback wake(stop, [&] { SetEvent(woken); });
+        for (bool again = false; !stop.stop_requested(); again = true) {
+            const HANDLE directory = CreateFileW(root.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                                 nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr);
+            if (directory == INVALID_HANDLE_VALUE) break;
+            for (const HANDLE signal : {signals.leaving, signals.closed, signals.stayed, signals.removed}) ResetEvent(signal);
+            CM_NOTIFY_FILTER filter{};
+            filter.cbSize = sizeof filter;
+            filter.FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEHANDLE;
+            filter.u.DeviceHandle.hTarget = directory;
+            HCMNOTIFICATION notification = nullptr;
+            if (CM_Register_Notification(&filter, &signals, DriveChanged, &notification) != CR_SUCCESS) notification = nullptr;
+            // What changed while the folder was let go.
+            if (again) changed();
+            const bool leaving = WatchFolder(root, directory, stop, woken, signals.leaving, listed, changed);
+            CloseHandle(directory);
+            SetEvent(signals.closed);
+            DWORD outcome = WAIT_FAILED;
+            if (leaving) {
+                const HANDLE answers[]{woken, signals.stayed, signals.removed};
+                outcome = WaitForMultipleObjects(3, answers, FALSE, INFINITE);
+            }
+            // Not from inside DriveChanged: this waits for it to return.
+            if (notification) CM_Unregister_Notification(notification);
+            if (outcome != WAIT_OBJECT_0 + 1) break;
+        }
+    }
+    for (const HANDLE event : {woken, signals.leaving, signals.closed, signals.stayed, signals.removed}) if (event) CloseHandle(event);
+}
+
+// WatchLibrary's reading of one open directory. True when its drive is
+// leaving, false when stop is requested or the folder can no longer be read.
+bool WatchFolder(const std::filesystem::path& root, HANDLE directory, std::stop_token stop, HANDLE woken, HANDLE leavingDrive,
+                 const std::function<bool(const std::filesystem::path&)>& listed, const std::function<void()>& changed) {
+    using namespace std::chrono_literals;
+    bool leaving = false;
+    OVERLAPPED overlapped{};
+    overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (overlapped.hEvent) {
+        // DWORD-aligned, and no more than the 64 KB a network share accepts.
+        std::vector<DWORD> buffer(16384);
+        const auto read = [&] {
+            ResetEvent(overlapped.hEvent);
+            return ReadDirectoryChangesW(directory, buffer.data(), static_cast<DWORD>(buffer.size() * sizeof(DWORD)), TRUE,
+                FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE,
+                nullptr, &overlapped, nullptr) != FALSE;
+        };
+        bool reading = read();
+        bool pending = false;
+        std::chrono::steady_clock::time_point first{}, due{};
+        while (reading && !stop.stop_requested()) {
+            // Checked before waiting, so a stream of other changes cannot hold it off.
+            const auto now = std::chrono::steady_clock::now();
+            if (pending && now >= due) { pending = false; changed(); continue; }
+            const DWORD timeout = pending
+                ? static_cast<DWORD>(std::chrono::ceil<std::chrono::milliseconds>(due - now).count()) : INFINITE;
+            const HANDLE handles[]{woken, leavingDrive, overlapped.hEvent};
+            const DWORD woke = WaitForMultipleObjects(3, handles, FALSE, timeout);
+            if (woke == WAIT_TIMEOUT) continue;
+            if (woke == WAIT_OBJECT_0 + 1) { leaving = true; break; }
+            if (woke != WAIT_OBJECT_0 + 2) break;
+            reading = false;
+            DWORD bytes = 0;
+            // An overflowed buffer names nothing, so it counts as a change.
+            if (!GetOverlappedResult(directory, &overlapped, &bytes, FALSE) && GetLastError() != ERROR_NOTIFY_ENUM_DIR) break;
+            bool relevant = bytes == 0;
+            for (size_t offset = 0; bytes && !relevant;) {
+                const auto* record = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(reinterpret_cast<const char*>(buffer.data()) + offset);
+                const auto path = root / std::wstring(record->FileName, record->FileNameLength / sizeof(wchar_t));
+                std::error_code ignored;
+                relevant = LibraryFile(path) ||
+                    ((record->Action == FILE_ACTION_ADDED || record->Action == FILE_ACTION_RENAMED_NEW_NAME) && std::filesystem::is_directory(path, ignored)) ||
+                    ((record->Action == FILE_ACTION_REMOVED || record->Action == FILE_ACTION_RENAMED_OLD_NAME) && listed(path));
+                if (!record->NextEntryOffset) break;
+                offset += record->NextEntryOffset;
+            }
+            if (relevant) {
+                const auto seen = std::chrono::steady_clock::now();
+                if (!pending) first = seen;
+                pending = true;
+                // Settle for half a second, but show a long copy as it goes.
+                due = std::min(seen + 500ms, first + 2s);
+            }
+            reading = read();
+        }
+        // The buffer must outlive a cancelled read.
+        if (reading && CancelIoEx(directory, &overlapped)) { DWORD ignored = 0; GetOverlappedResult(directory, &overlapped, &ignored, TRUE); }
+    }
+    if (overlapped.hEvent) CloseHandle(overlapped.hEvent);
+    return leaving;
 }
 
 std::mutex addonsMutex;
@@ -169,12 +335,10 @@ void ShellEngine::Send(Command command) {
 }
 
 std::shared_ptr<const EngineSnapshot> ShellEngine::Snapshot() const {
-    const auto played = velocity_telemetry::snapshot();
     const auto log = ShellLog::Instance().Snapshot();
     std::lock_guard lock(mutex_);
-    if (played.revision != snapshot_->playedVelocities.revision || log != snapshot_->log) {
+    if (log != snapshot_->log) {
         auto copy = std::make_shared<EngineSnapshot>(*snapshot_);
-        copy->playedVelocities = played;
         copy->log = log;
         snapshot_ = std::move(copy);
     }
@@ -189,10 +353,9 @@ void ShellEngine::Publish(const EngineSnapshot& state) {
     { std::lock_guard lock(mutex_); newError = !state.error.empty() && state.error != snapshot_->error; }
     if (newError) ShellLog::Instance().Append("[error] " + state.error + "\n");
     auto copy = std::make_shared<EngineSnapshot>(state);
-    // Fill these on the worker; otherwise Snapshot() sees them differ and deep
+    // Fill the log on the worker; otherwise Snapshot() sees it differ and deep
     // copies the whole state on the UI thread.
     copy->log = ShellLog::Instance().Snapshot();
-    copy->playedVelocities = velocity_telemetry::snapshot();
     { std::lock_guard lock(mutex_); snapshot_ = std::move(copy); }
     // Wake the on-demand render loop.
     if (void* window = wakeWindow_.load(std::memory_order_acquire)) PostMessageW(static_cast<HWND>(window), WM_NULL, 0, 0);
@@ -291,6 +454,11 @@ void ShellEngine::Run(std::stop_token stop) {
     std::mt19937 random(std::random_device{}());
     bool loadAutoSolo = false;
     bool shuffleAdvancePending = false;
+    // A quiet rescan that came during playback, run once playback stops.
+    bool rescanOwed = false;
+    // Songs left for another, oldest first, which Previous with Shuffle Play
+    // walks back through.
+    std::vector<std::filesystem::path> played;
     // Each sub-folder of the add-on folder is one add-on, identified by its
     // exports. Declared before the player, which calls into the performer, so
     // they unload after it.
@@ -382,6 +550,12 @@ void ShellEngine::Run(std::stop_token stop) {
             for (size_t i = 0; i < kHotkeys; ++i) {
                 if (hotkeyFields[i].empty()) continue;
                 state.hotkeys[i] = keys->value(hotkeyFields[i], hotkeyDefaults[i]);
+                // A key the app types, saved before capture passed over it, is unbound.
+                if (const int vk = NameToVK(state.hotkeys[i]); vk != 0 && IsNoteKey(vk, state.keyMappings)) {
+                    state.hotkeys[i].clear();
+                    if (keys->contains(hotkeyFields[i])) (*keys)[hotkeyFields[i]] = std::string();
+                    continue;
+                }
                 // A default yields to a key the user bound elsewhere.
                 if (keys->contains(hotkeyFields[i])) continue;
                 for (size_t j = 0; j < kHotkeys; ++j)
@@ -632,6 +806,9 @@ void ShellEngine::Run(std::stop_token stop) {
         player->buffer_index.store(static_cast<size_t>(next - player->note_events.begin()));
         player->last_resume_tsc = __rdtsc();
         player->playback_start_time = player->last_resume_tsc;
+        // Cleared before the end check can see this start: a song that ended
+        // leaves it set, and a replay or the next song would stop at once.
+        player->song_done.store(false, std::memory_order_release);
         player->playback_started.store(true, std::memory_order_release);
         player->should_stop.store(false, std::memory_order_release);
         player->paused.store(true, std::memory_order_release);
@@ -758,15 +935,43 @@ void ShellEngine::Run(std::stop_token stop) {
     // MIDI input and output from the last session, reopened when the panel's
     // first scan lists them. A missing device stays saved without raising an error.
     std::wstring restoreInput, restoreOutput;
+    // Their groups, which find one plugged into another USB port.
+    std::wstring restoreInputGroup, restoreOutputGroup;
     bool restoreInputActive = true, restoreOutputMidi = false;
+    // The input was on MidiConnect, which it reopens through.
+    bool restoreInputConnect = false;
     if (const auto session = configJson.find("SHELL_SESSION"); session != configJson.end() && session->is_object()) {
         try {
             restoreInput = PathFromJson(*session, "liveDevice").wstring();
+            restoreInputGroup = PathFromJson(*session, "liveDeviceGroup").wstring();
             restoreInputActive = session->value("liveActive", true);
+            restoreInputConnect = session->value("midiConnect", false);
             restoreOutput = PathFromJson(*session, "outputDevice").wstring();
+            restoreOutputGroup = PathFromJson(*session, "outputDeviceGroup").wstring();
             restoreOutputMidi = session->value("outputMidi", false);
         } catch (const std::exception&) { restoreInput.clear(); restoreOutput.clear(); }
     }
+    // The user's own input and output choices, counted. A scan's reopen that
+    // finds a choice made after it was queued leaves that choice alone.
+    // noReopen: no scan's reopen is queued.
+    constexpr uint64_t noReopen = ~uint64_t{0};
+    uint64_t inputChoices = 0, outputChoices = 0, inputReopenAt = noReopen, outputReopenAt = noReopen;
+    // A device whose reopen failed and said so. Each scan tries it again, quietly,
+    // until a reopen or a choice succeeds.
+    std::wstring quietInput, quietOutput;
+    // The chosen input's and output's groups, which tell a failed enumeration
+    // from an unplugged device.
+    KeptGroup liveGroup, outputGroup;
+    // An input that goes away mid-session waits in restoreInput the same way.
+    // A transport that stops delivering reports its id from its own thread,
+    // and the next scan closes that input as gone.
+    std::mutex lostMutex;
+    std::wstring lostReport;
+    SetMidiInputLostHandler([&](const std::wstring& id) {
+        { std::lock_guard lock(lostMutex); lostReport = id; }
+        Send({Action::LiveScan});
+    });
+    struct LostHandlerGuard { ~LostHandlerGuard() { SetMidiInputLostHandler({}); } } lostHandlerGuard;
     VelocityHistory curveHistory;
     curveHistory.Reset(state.curve);
     // The converter ships separately: a release installs it by unzipping into
@@ -785,6 +990,9 @@ void ShellEngine::Run(std::stop_token stop) {
         state.youtubeSignedIn = install.SignedIn();
         state.converterInstalled = install.Found();
         state.converterCanSetUp = install.CanSetUp();
+        state.converterGpu = install.gpu;
+        state.converterCanSwitch = install.CanSwitch();
+        state.nvidiaCard = audio_to_midi::HasNvidiaCard();
     };
     readConverter();
     Publish(state);
@@ -903,13 +1111,42 @@ void ShellEngine::Run(std::stop_token stop) {
     };
     // Library sheet export. Reports through Send; stopped and joined when Run returns.
     std::jthread sheetBatch;
+    // Watches the open folder on its own thread and walks it again when its
+    // MIDI files change, so the list follows the disk even during playback.
+    // Restarted by each Scan that is not quiet; stopped and joined when Run returns.
+    std::jthread libraryWatch;
+    const auto watchLibrary = [&](const std::filesystem::path& root) {
+        libraryWatch = std::jthread([this, root](std::stop_token token) {
+            const auto listed = [this](const std::filesystem::path& gone) {
+                const auto files = Snapshot()->files;
+                const auto& prefix = gone.native();
+                return std::any_of(files->begin(), files->end(), [&](const MidiEntry& file) {
+                    const auto& path = file.path.native();
+                    return path.size() > prefix.size() && (path[prefix.size()] == L'\\' || path[prefix.size()] == L'/') &&
+                        _wcsnicmp(path.c_str(), prefix.c_str(), prefix.size()) == 0;
+                });
+            };
+            WatchLibrary(root, token, listed, [&] {
+                std::error_code error;
+                auto files = WalkLibrary(root, token, error);
+                if (!files || token.stop_requested()) return;
+                Command found{Action::Scan, root, 0, 0, true};
+                found.files = std::move(files);
+                Send(std::move(found));
+            });
+        });
+    };
     while (!stop.stop_requested()) {
         Command command{Action::Stop};
         bool hasCommand = false;
+        // True while a scan's reopen runs, so the catch below can tell its
+        // failure from one in the ticks that follow it.
+        bool reopening = false;
+        const bool ticking = state.playing || volumePending || state.playbackCountdown;
         {
             std::unique_lock lock(mutex_);
             const auto ready = [&] { return stop.stop_requested() || !commands_.empty(); };
-            if (state.playing || volumePending || state.playbackCountdown) wake_.wait_for(lock, 25ms, ready);
+            if (ticking) wake_.wait_for(lock, 25ms, ready);
             else if (state.outputMidi && !state.outputDevice.empty()) wake_.wait_for(lock, 250ms, ready);
             else if (configDirty) wake_.wait_until(lock, configDue, ready);
             else wake_.wait(lock, ready);
@@ -922,6 +1159,7 @@ void ShellEngine::Run(std::stop_token stop) {
                 const bool overtaken =
                     (command.action == Action::Load || command.action == Action::Seek ||
                      command.action == Action::Speed || command.action == Action::Transpose ||
+                     command.action == Action::LiveScan || command.action == Action::OutputScan ||
                      command.action == Action::WootingTriggerThreshold ||
                      command.action == Action::WootingShiftAmount ||
                      command.action == Action::WootingVelocityScale ||
@@ -933,6 +1171,9 @@ void ShellEngine::Run(std::stop_token stop) {
                 break;
             }
         }
+        // A pass that only polled the MIDI output publishes nothing, so an
+        // idle window stops drawing.
+        bool stateChanged = hasCommand || ticking;
         try {
             if (hasCommand) {
                 const bool scoreCommand = command.action != Action::Scan && command.action != Action::Load &&
@@ -944,6 +1185,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     command.action != Action::VelocityModifier &&
                     command.action < Action::CurveSelect;
                 if (scoreCommand && command.generation != state.generation) continue;
+                reopening = command.automatic;
                 if (!state.typingAcknowledged &&
                     (command.action == Action::LiveOpen && !command.device.empty() ||
                      command.action == Action::LiveActive && command.value ||
@@ -954,10 +1196,26 @@ void ShellEngine::Run(std::stop_token stop) {
                 // focus another window; only Calibrate starts a sweep. Progress
                 // reports from worker threads neither cancel it nor clear the error.
                 const bool fromConverter = command.action == Action::ConvertProgress || command.action == Action::SheetBatchProgress;
+                // Nor do device scans, which also run whenever a device comes or goes.
+                const bool deviceScan = command.action == Action::LiveScan || command.action == Action::OutputScan;
+                // The reopens they send leave the calibration too, but clear the
+                // error, so a device that comes back takes its disconnect message.
                 if (volumePending && command.action != Action::AutoVolumeCalibrate &&
-                    command.action != Action::AutoVolumeScan && command.action != Action::Scan && !fromConverter)
+                    command.action != Action::AutoVolumeScan && command.action != Action::Scan && !fromConverter && !deviceScan &&
+                    !command.automatic)
                     cancelVolume();
-                if (!fromConverter) state.error.clear();
+                // A quiet rescan leaves the error shown as well.
+                const bool quietScan = command.action == Action::Scan && command.value;
+                // Nor does a reopen tried again after it said why it failed.
+                const bool quietReopen = command.automatic &&
+                    (command.action == Action::LiveOpen && !quietInput.empty() && command.device == quietInput ||
+                     command.action == Action::OutputOpen && !quietOutput.empty() && command.device == quietOutput);
+                if (!fromConverter && !quietScan && !deviceScan && !quietReopen) state.error.clear();
+                if (!command.automatic) {
+                    if (command.action == Action::LiveOpen || command.action == Action::LiveActive ||
+                        command.action == Action::MidiConnect) { ++inputChoices; quietInput.clear(); }
+                    if (command.action == Action::OutputOpen || command.action == Action::OutputTarget) { ++outputChoices; quietOutput.clear(); }
+                }
                 switch (command.action) {
                 case Action::MidiConnect:
                     if (!command.value) { stopConnect(); break; }
@@ -1036,6 +1294,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     configJson["SHELL_SHUFFLE"] = command.value;
                     touchConfig();
                     break;
+                case Action::AutoSolo: loadAutoSolo = command.value; break;
                 case Action::SortFiles: {
                     if (!std::isfinite(command.amount)) break;
                     state.fileSort = static_cast<FileSort>(static_cast<int>(std::clamp(command.amount, 0.0, 2.0)));
@@ -1089,6 +1348,8 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (command.track >= kHotkeys || hotkeyFields[command.track].empty()) break;
                     if (!command.key.empty() && NameToVK(command.key) == 0)
                         throw std::runtime_error("That key cannot be a hotkey.");
+                    // Capture passes over note keys; one sent anyway is ignored.
+                    if (!command.key.empty() && IsNoteKey(NameToVK(command.key), state.keyMappings)) break;
                     if (!command.key.empty() && command.key.rfind("VK_", 0) != 0) command.key.insert(0, "VK_");
                     if (state.hotkeys[command.track] == command.key) break;
                     const int vk = NameToVK(command.key);
@@ -1118,61 +1379,47 @@ void ShellEngine::Run(std::stop_token stop) {
                     }
                     break;
                 case Action::Scan: {
-                    if (state.playing) {
+                    // value marks a quiet rescan of the open folder, from the
+                    // folder watcher with the files it found or after a
+                    // conversion: the list stays usable and the error stays.
+                    // During playback only the watcher's own walk applies; a
+                    // walk here waits until playback stops.
+                    if (state.playing && !command.files) {
+                        if (command.value) { rescanOwed = true; break; }
                         state.error = "Stop playback before changing the MIDI folder.";
                         break;
                     }
-                    state.busy = true;
-                    Publish(state);
+                    if (command.value && command.path != state.folder) break;
+                    if (!command.value) {
+                        state.busy = true;
+                        Publish(state);
+                    }
                     // Scan recursively; entries are named relative to the chosen
                     // folder. The panel browses one folder at a time (BrowseFolder
                     // in LibraryModel.hpp) while search covers the whole library.
-                    auto files = std::make_shared<std::vector<MidiEntry>>();
-                    std::error_code error;
-                    // Skip permission-denied folders. Directory symlinks are not
-                    // followed, so a junction to its own parent can't recurse forever.
-                    std::filesystem::recursive_directory_iterator it(
-                        command.path, std::filesystem::directory_options::skip_permission_denied, error);
-                    if (error) throw std::runtime_error("Cannot read MIDI folder: " + error.message());
-                    const std::filesystem::recursive_directory_iterator end;
-                    // Bound the walk for pathological trees.
-                    constexpr int kMaxDepth = 32;
-                    // Stop with an error if the folder is something like a drive root.
-                    constexpr size_t kMaxFiles = 20000;
-                    while (it != end) {
-                        if (stop.stop_requested()) break;
-                        const auto& entry = *it;
-                        std::error_code entryError;
-                        if (entry.is_regular_file(entryError) && !entryError) {
-                            auto extension = entry.path().extension().wstring();
-                            std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
-                            if (extension == L".mid" || extension == L".midi") {
-                                std::error_code sizeError, relativeError;
-                                const auto bytes = entry.file_size(sizeError);
-                                auto shown = std::filesystem::relative(entry.path(), command.path, relativeError);
-                                if (relativeError || shown.empty()) shown = entry.path().filename();
-                                std::error_code timeError;
-                                const auto modified = entry.last_write_time(timeError);
-                                files->push_back({entry.path(), Utf8(shown), sizeError ? 0 : bytes,
-                                    timeError ? std::filesystem::file_time_type{} : modified});
-                            }
+                    auto files = std::move(command.files);
+                    if (!files) {
+                        std::error_code error;
+                        files = WalkLibrary(command.path, stop, error);
+                        if (!files) {
+                            if (command.value) break;
+                            throw std::runtime_error("Cannot read MIDI folder: " + error.message());
                         }
-                        if (files->size() >= kMaxFiles) {
-                            state.error = "Stopped at " + std::to_string(kMaxFiles) +
+                        // Stop with an error if the folder is something like a drive root.
+                        if (!command.value && files->size() >= kMaxLibraryFiles)
+                            state.error = "Stopped at " + std::to_string(kMaxLibraryFiles) +
                                           " files. Choose a folder with fewer sub-folders in it.";
-                            break;
-                        }
-                        if (it.depth() >= kMaxDepth) it.disable_recursion_pending();
-                        std::error_code step;
-                        it.increment(step);
-                        // A failed increment may not advance; continuing would spin.
-                        if (step) break;
                     }
                     std::sort(files->begin(), files->end(), [&](const auto& a, const auto& b) {
                         return FileBefore(a, b, state.fileSort, state.descendingFiles);
                     });
-                    state.files = std::move(files);
-                    state.folder = command.path;
+                    // The same files again keep the list the panel already shows.
+                    if (*files != *state.files) state.files = std::move(files);
+                    rescanOwed = false;
+                    if (!command.value) {
+                        state.folder = command.path;
+                        watchLibrary(state.folder);
+                    }
                     break;
                 }
                 case Action::Previous:
@@ -1188,15 +1435,41 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (files.empty()) files = *state.files;
                     const auto found = std::find_if(files.begin(), files.end(), [&](const auto& file) { return file.path == state.loaded; });
                     size_t index = command.action == Action::Previous ? files.size() - 1 : 0;
+                    // With Shuffle Play, Next draws another file at random, as
+                    // the advance at the end of a song does.
+                    const bool drawn = state.shuffle && command.action == Action::Next && files.size() > 1;
+                    const auto step = [&](size_t from) {
+                        return command.action == Action::Previous ? (from + files.size() - 1) % files.size() : (from + 1) % files.size();
+                    };
                     if (found != files.end()) {
                         const auto current = static_cast<size_t>(found - files.begin());
-                        index = command.action == Action::Previous ? (current + files.size() - 1) % files.size() : (current + 1) % files.size();
-                        if (command.amount == 1 && state.shuffle && files.size() > 1) {
+                        index = step(current);
+                        if (drawn) {
                             index = std::uniform_int_distribution<size_t>(0, files.size() - 2)(random);
                             if (index >= current) ++index;
                         }
+                    } else if (drawn) index = std::uniform_int_distribution<size_t>(0, files.size() - 1)(random);
+                    // Step past files removed or renamed since the scan; a drawn
+                    // file steps on to another one.
+                    std::error_code gone;
+                    for (size_t tried = 1; tried < files.size() && !std::filesystem::is_regular_file(files[index].path, gone); ++tried) {
+                        index = step(index);
+                        if (drawn && files[index].path == state.loaded) index = step(index);
                     }
                     command.path = files[index].path;
+                    // With Shuffle Play, Previous goes back through the songs
+                    // played before this one that are still in its folder,
+                    // then to the neighbour in the list.
+                    if (command.action == Action::Previous && state.shuffle)
+                        while (!played.empty()) {
+                            const auto back = std::move(played.back());
+                            played.pop_back();
+                            if (back != state.loaded && std::filesystem::is_regular_file(back, gone) &&
+                                std::any_of(files.begin(), files.end(), [&](const MidiEntry& file) { return file.path == back; })) {
+                                command.path = back;
+                                break;
+                            }
+                        }
                     command.amount = state.playing || command.amount == 1 ? 1 : 0;
                     command.value = loadAutoSolo;
                     [[fallthrough]];
@@ -1229,6 +1502,16 @@ void ShellEngine::Run(std::stop_token stop) {
                     // A settings reload keeps the playback position.
                     const bool sameFile = command.action == Action::DetectDrums || command.action == Action::AutoTranspose;
                     const double keepPosition = sameFile ? state.position : 0;
+                    // A file removed or renamed since the scan loses its row and
+                    // the open song plays on; the parse would throw, and the
+                    // catch below stops playback.
+                    if (std::error_code gone; !std::filesystem::is_regular_file(command.path, gone)) {
+                        state.error = Utf8(command.path.filename()) + ": Unable to open file.";
+                        auto kept = std::make_shared<std::vector<MidiEntry>>();
+                        for (const auto& file : *state.files) if (file.path != command.path) kept->push_back(file);
+                        if (kept->size() != state.files->size()) state.files = std::move(kept);
+                        break;
+                    }
                     // AutoVol stays calibrated across a load: the calibration
                     // lives in the player, which outlives the file.
                     // Stop before the potentially slow parse so nothing keeps
@@ -1240,8 +1523,19 @@ void ShellEngine::Run(std::stop_token stop) {
                     auto file = parser.parse(Utf8(std::filesystem::absolute(command.path)));
                     if (file.format == 2) throw std::runtime_error("MIDI format 2 contains independent sequences. Use a format 0 or 1 file.");
                     auto rows = DescribeTracks(file);
+                    // Transpose belongs to the song: another song starts at 0, or
+                    // at Auto-transpose's fit below, and the open one keeps it.
+                    if (!sameFile && command.path != state.loaded) state.transpose = 0;
                     ensurePlayer();
                     applyMappings();
+                    // A settings reload carries the rows' mutes and solos over.
+                    const auto keptRows = sameFile ? state.rows : std::vector<TrackRow>{};
+                    // Previous with Shuffle Play walks back through these
+                    // without adding to them.
+                    if (!state.loaded.empty() && command.path != state.loaded && !(command.action == Action::Previous && state.shuffle)) {
+                        played.push_back(state.loaded);
+                        if (played.size() > 100) played.erase(played.begin());
+                    }
                     state.loaded.clear();
                     state.rows.clear();
                     state.duration = state.position = 0;
@@ -1284,7 +1578,15 @@ void ShellEngine::Run(std::stop_token stop) {
                         player->trackSoloed.push_back(std::make_shared<std::atomic<bool>>(false));
                     }
                     state.rows = std::move(rows);
-                    if (command.value) SoloPiano(state.rows);
+                    // A settings reload keeps Solo Piano when that is what the
+                    // rows were, so newly detected drums follow it, and the
+                    // user's own mutes and solos otherwise.
+                    if (sameFile && SoloPianoApplied(keptRows)) SoloPiano(state.rows);
+                    else if (sameFile && SilentTracks(keptRows) > 0) {
+                        for (auto& row : state.rows)
+                            for (const auto& kept : keptRows)
+                                if (kept.index == row.index) { row.muted = kept.muted; row.solo = kept.solo; }
+                    } else if (command.value && (!sameFile || AllPiano(keptRows))) SoloPiano(state.rows);
                     applyTracks();
                     if (!player->note_events.empty())
                         state.duration = static_cast<double>(player->note_events.back().time.count()) / 1e9;
@@ -1378,20 +1680,67 @@ void ShellEngine::Run(std::stop_token stop) {
                     break;
                 }
                 case Action::LiveScan: {
+                    // The chosen row's group, from the list about to be replaced
+                    // or, after a failed listing left the row out, the list before.
+                    const std::wstring chosenGroup = liveGroup.Update(state.devices, state.liveDevice);
                     state.devices.clear();
                     for (const auto& device : EnumerateMidiInputs())
                         state.devices.push_back({device.id, Utf8(std::filesystem::path(device.group.empty() ? device.name : device.group)),
                             device.group, device.backend});
+                    // An input that was unplugged, or whose transport stopped,
+                    // closes and waits to reopen like one missing at startup.
+                    std::wstring reported;
+                    { std::lock_guard lock(lostMutex); reported.swap(lostReport); }
+                    std::wstring closed;
+                    const std::wstring closedGroup = chosenGroup;
+                    const bool closedActive = state.liveActive, closedConnect = state.midiConnect;
+                    if (!state.liveDevice.empty() && restoreInput.empty() &&
+                        (reported == state.liveDevice ||
+                         DeviceGone(state.devices, state.liveDevice, BackendForDeviceId(state.liveDevice), chosenGroup))) {
+                        closed = state.liveDevice;
+                        stopLive();
+                        stopConnect();
+                        state.liveDevice.clear();
+                    }
+                    if (const auto listed = ReturnedId(state.devices, restoreInput, BackendForDeviceId(restoreInput), restoreInputGroup);
+                        !listed.empty()) restoreInput = listed;
                     if (!restoreInput.empty() && state.liveDevice.empty() && !state.midiConnect &&
                         std::any_of(state.devices.begin(), state.devices.end(), [&](const LiveDevice& device) { return device.id == restoreInput; })) {
-                        Command open{Action::LiveOpen}; open.device = restoreInput; Send(open);
-                        if (!restoreInputActive) Send({Action::LiveActive});
+                        // MidiConnect stops a song, so one started meanwhile keeps it off.
+                        const bool reconnect = restoreInputConnect && !state.playing;
+                        if (!reconnect && !restoreInputActive) {
+                            // An input left off comes back chosen and closed, as the config
+                            // holds it: opening it only to close it again would let go of a
+                            // playing song's keys. LiveActive opens it when it is turned on.
+                            stopLive();
+                            state.liveDevice = restoreInput;
+                        } else {
+                            Command open{Action::LiveOpen}; open.device = restoreInput; open.value = reconnect; open.automatic = true;
+                            inputReopenAt = inputChoices;
+                            Send(open);
+                        }
+                        // The group stays for a reopen that fails and waits again.
                         restoreInput.clear();
+                        restoreInputConnect = false;
+                    }
+                    // Set after the restore above, so an input that is still listed
+                    // reopens at a later scan rather than straight into what stopped it.
+                    if (!closed.empty()) {
+                        restoreInput = closed;
+                        restoreInputGroup = closedGroup;
+                        restoreInputActive = closedActive;
+                        restoreInputConnect = closedConnect;
                     }
                     break;
                 }
                 case Action::LiveOpen: {
-                    const bool connectRoute = state.midiConnect;
+                    if (command.automatic) {
+                        const uint64_t queuedAt = std::exchange(inputReopenAt, noReopen);
+                        if (queuedAt != noReopen && queuedAt != inputChoices) break;
+                    }
+                    // value opens the device through MidiConnect, restoring a
+                    // session that left it on.
+                    const bool connectRoute = state.midiConnect || command.value;
                     stopConnect();
                     stopLive();
                     if (command.device.empty()) {
@@ -1455,30 +1804,44 @@ void ShellEngine::Run(std::stop_token stop) {
                     state.outputMidi = command.value;
                     break;
                 case Action::OutputScan: {
+                    // The chosen row's group, kept as for inputs.
+                    const std::wstring chosenGroup = outputGroup.Update(state.outputDevices, state.outputDevice);
                     state.outputDevices.clear();
                     for (const auto& device : EnumerateMidiOutputs())
                         state.outputDevices.push_back({device.id, Utf8(std::filesystem::path(device.name)),
                             device.group, device.backend});
                     if (!state.outputDevice.empty() &&
-                        std::none_of(state.outputDevices.begin(), state.outputDevices.end(),
-                            [&](const LiveDevice& device) { return device.id == state.outputDevice; })) {
+                        DeviceGone(state.outputDevices, state.outputDevice, BackendForOutputId(state.outputDevice), chosenGroup)) {
                         ensurePlayer();
+                        // Reopened by the restore below once a scan lists it again.
+                        restoreOutput = state.outputDevice;
+                        restoreOutputGroup = chosenGroup;
+                        restoreOutputMidi = state.outputMidi;
                         player->close_midi_output();
                         state.outputMidi = false;
                         state.outputDevice.clear();
                         state.error = "MIDI output disconnected; using keystrokes.";
                     }
+                    if (const auto listed = ReturnedId(state.outputDevices, restoreOutput, BackendForOutputId(restoreOutput), restoreOutputGroup);
+                        !listed.empty()) restoreOutput = listed;
                     if (!restoreOutput.empty() && state.outputDevice.empty() &&
                         std::any_of(state.outputDevices.begin(), state.outputDevices.end(), [&](const LiveDevice& device) { return device.id == restoreOutput; })) {
-                        Command open{Action::OutputOpen}; open.device = restoreOutput; Send(open);
-                        if (restoreOutputMidi) { Command target{Action::OutputTarget}; target.value = true; Send(target); }
+                        // One command, so a failed open leaves the output on keystrokes.
+                        Command open{Action::OutputOpen}; open.device = restoreOutput; open.value = restoreOutputMidi; open.automatic = true;
+                        outputReopenAt = outputChoices;
+                        Send(open);
                         restoreOutput.clear();
                     }
                     break;
                 }
                 case Action::OutputOpen: {
+                    if (command.automatic) {
+                        const uint64_t queuedAt = std::exchange(outputReopenAt, noReopen);
+                        if (queuedAt != noReopen && queuedAt != outputChoices) break;
+                    }
+                    // value also switches to the MIDI target, restoring a session that left it on.
                     ensurePlayer();
-                    const bool resumeMidi = state.outputMidi;
+                    const bool resumeMidi = state.outputMidi || command.value;
                     player->close_midi_output();
                     state.outputMidi = false;
                     state.outputDevice.clear();
@@ -1530,6 +1893,9 @@ void ShellEngine::Run(std::stop_token stop) {
                     state.position = 0;
                     stopLive();
                     stopConnect();
+                    // An input waiting to come back comes back off, as Stop leaves an open one.
+                    restoreInputActive = false;
+                    restoreInputConnect = false;
                     break;
                 case Action::Mute:
                 case Action::Solo:
@@ -1598,7 +1964,8 @@ void ShellEngine::Run(std::stop_token stop) {
                 case Action::ConverterSetUp: {
                     if (state.converting) break;
                     const auto install = converterInstall();
-                    if (!install.CanSetUp()) { readConverter(); break; }
+                    // value asks for the GPU build; over an install it swaps the build.
+                    if (!install.CanSetUp() && !install.CanSwitch()) { readConverter(); break; }
                     const bool started = converter.Start(audio_to_midi::SetupCommandLine(install.setup, command.value), reportConversion);
                     state.settingUp = state.converting = started;
                     state.signingIn = false;
@@ -1620,7 +1987,7 @@ void ShellEngine::Run(std::stop_token stop) {
                         // One playlist item saved; rescan and keep going.
                         ++convertedCount;
                         ShellLog::Instance().Append("[convert] Saved " + command.key + "\n");
-                        if (!state.playing) Send({Action::Scan, state.folder});
+                        Send({Action::Scan, state.folder, 0, 0, true});
                         break;
                     }
                     state.converting = false;
@@ -1651,15 +2018,12 @@ void ShellEngine::Run(std::stop_token stop) {
                     }
                     if (kind == Kind::Finished) {
                         state.conversionStatus = command.key;
-                        if (state.playing) state.conversionStatus += " Refresh the list after playback to see them.";
-                        else Send({Action::Scan, state.folder});
+                        Send({Action::Scan, state.folder, 0, 0, true});
                         break;
                     }
                     const auto name = Utf8(std::filesystem::path(std::u8string(command.key.begin(), command.key.end())).filename());
                     state.conversionStatus = "Converted " + name + ".";
-                    // Scan is refused during playback, so tell the user to refresh later.
-                    if (state.playing) state.conversionStatus += " Refresh the list after playback to see it.";
-                    else Send({Action::Scan, state.folder});
+                    Send({Action::Scan, state.folder, 0, 0, true});
                     break;
                 }
                 case Action::CopySheet: {
@@ -1816,8 +2180,20 @@ void ShellEngine::Run(std::stop_token stop) {
                 case Action::CurveNew:
                 case Action::CurveDuplicate:
                 case Action::CurveRename:
+                case Action::CurveDelete:
                 case Action::SustainCutoff: {
                     if (state.curves.size() < midi::kBuiltinVelocityCurves || !std::isfinite(command.amount)) break;
+                    // Live input reads the cutoff at each pedal message, so while
+                    // nothing plays a new cutoff needs no rebuild, and the held
+                    // notes and the open port are left alone.
+                    if (command.action == Action::SustainCutoff && !state.playing) {
+                        auto next = state;
+                        next.sustainCutoff = static_cast<int>(std::clamp(command.amount, 0.0, 127.0));
+                        saveCurves(next);
+                        state.sustainCutoff = next.sustainCutoff;
+                        g_sustainCutoff = state.sustainCutoff;
+                        break;
+                    }
                     auto next = state;
                     auto nextHistory = curveHistory;
                     bool changedCurve = false;
@@ -1852,6 +2228,29 @@ void ShellEngine::Run(std::stop_token stop) {
                         if (!changed) break;
                         next.curve = nextHistory.current;
                         changedCurve = true;
+                    } else if (command.action == Action::CurveDelete) {
+                        const size_t index = command.track;
+                        if (index < midi::kBuiltinVelocityCurves || index >= next.curves.size()) break;
+                        next.curves.erase(next.curves.begin() + static_cast<std::ptrdiff_t>(index));
+                        // Deleting the active curve falls back to the default
+                        // built-in, which can't be deleted, so a second click
+                        // can't take another curve with it. Later curves move
+                        // down one place.
+                        const auto rebase = [&](VelocityEdit& edit) { if (edit.preset > index) --edit.preset; };
+                        if (next.curve.preset == index) next.curve = {};
+                        else rebase(next.curve);
+                        if (next.previousCurve.preset == index) next.hasPreviousCurve = false;
+                        else rebase(next.previousCurve);
+                        next.comparingCurve = false;
+                        // The curve can't come back, so undo steps on it are
+                        // dropped; the rest keep working on the renumbered list.
+                        for (auto* steps : {&nextHistory.undo, &nextHistory.redo}) {
+                            std::erase_if(*steps, [&](const VelocityEdit& edit) { return edit.preset == index; });
+                            for (auto& edit : *steps) rebase(edit);
+                            steps->erase(std::unique(steps->begin(), steps->end()), steps->end());
+                            if (!steps->empty() && steps->back() == next.curve) steps->pop_back();
+                        }
+                        nextHistory.current = next.curve;
                     } else {
                         auto name = command.key;
                         const auto first = name.find_first_not_of(" \t\r\n"), last = name.find_last_not_of(" \t\r\n");
@@ -1882,6 +2281,8 @@ void ShellEngine::Run(std::stop_token stop) {
                     const bool resume = state.playing;
                     const auto device = state.liveDevice;
                     const bool active = state.liveActive;
+                    // An input the user turned off stays closed.
+                    const bool hadLive = live != nullptr;
                     if (live && !device.empty()) {
                         live->SetActive(false);
                         live->CloseDevice(); // Close the port before rebuilding its lookup.
@@ -1897,7 +2298,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     state = std::move(next); curveHistory = std::move(nextHistory); ++state.curveRevision;
                     applyCurve();
                     // MidiConnect holds the port while it is on.
-                    if (!device.empty() && !state.midiConnect) {
+                    if (hadLive && !device.empty() && !state.midiConnect) {
                         live = std::make_unique<MIDI2Key>(player.get());
                         live->SetMidiChannel(state.liveChannel);
                         live->OpenDevice(device);
@@ -1921,6 +2322,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     ensurePlayer();
                     const auto device = state.liveDevice;
                     const bool active = state.liveActive;
+                    const bool hadLive = live != nullptr;
                     // Closing joins callbacks before any lookup changes. Live
                     // note ownership is private, so release the outgoing map
                     // in full and replace its owner before building new caches.
@@ -1939,7 +2341,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     invalidateSheet();
                     configJson[layoutChange ? "SHELL_88_KEYS" : "SHELL_OUT_RANGE"] = command.value;
                     touchConfig();
-                    if (!device.empty() && !state.midiConnect) {
+                    if (hadLive && !device.empty() && !state.midiConnect) {
                         live = std::make_unique<MIDI2Key>(player.get());
                         live->SetMidiChannel(state.liveChannel);
                         live->OpenDevice(device);
@@ -1971,11 +2373,12 @@ void ShellEngine::Run(std::stop_token stop) {
                         throw std::runtime_error("Invalid AutoVol range or step in config.json.");
                     invalidateVolume();
                     const auto device = state.liveDevice;
+                    const bool hadLive = live != nullptr;
                     if (live) { live->SetActive(false); live->CloseDevice(); }
                     stopPlayback();
                     if (live) { player->release_every_mapped_key(); live.reset(); }
                     state.liveActive = false;
-                    if (!device.empty() && !state.midiConnect) {
+                    if (hadLive && !device.empty() && !state.midiConnect) {
                         live = std::make_unique<MIDI2Key>(player.get());
                         live->SetMidiChannel(state.liveChannel);
                         live->OpenDevice(device);
@@ -2023,24 +2426,33 @@ void ShellEngine::Run(std::stop_token stop) {
                 // that finds a device unplugged doesn't erase the saved one.
                 switch (command.action) {
                 case Action::Velocity: case Action::Sustain: case Action::LiveOpen: case Action::LiveActive:
+                case Action::MidiConnect:
                 case Action::LiveChannel: case Action::OutputTarget: case Action::OutputOpen:
                 case Action::Speed:   // Transpose is per song and starts at 0, so it isn't saved
                     if (configLoaded) {
                         // Choosing a device cancels the pending restore; a device
                         // still pending restore is not overwritten.
-                        if (command.action == Action::LiveOpen || command.action == Action::LiveActive) restoreInput.clear();
+                        if (command.action == Action::LiveOpen || command.action == Action::LiveActive ||
+                            command.action == Action::MidiConnect) restoreInput.clear();
                         if (command.action == Action::OutputOpen || command.action == Action::OutputTarget) restoreOutput.clear();
                         auto& session = configJson["SHELL_SESSION"];
                         session["velocity"] = state.velocity;
                         session["sustain"] = state.sustain;
                         session["liveChannel"] = state.liveChannel;
                         session["speed"] = state.speed;
-                        if (!state.midiConnect && restoreInput.empty()) {
+                        const auto groupOf = [](const std::vector<LiveDevice>& devices, const std::wstring& id) {
+                            const auto found = std::find_if(devices.begin(), devices.end(), [&](const LiveDevice& device) { return device.id == id; });
+                            return Utf8(std::filesystem::path(found == devices.end() ? std::wstring() : found->group));
+                        };
+                        if (restoreInput.empty()) {
                             session["liveDevice"] = Utf8(std::filesystem::path(state.liveDevice));
+                            session["liveDeviceGroup"] = groupOf(state.devices, state.liveDevice);
                             session["liveActive"] = state.liveActive;
+                            session["midiConnect"] = state.midiConnect;
                         }
                         if (restoreOutput.empty()) {
                             session["outputDevice"] = Utf8(std::filesystem::path(state.outputDevice));
+                            session["outputDeviceGroup"] = groupOf(state.outputDevices, state.outputDevice);
                             session["outputMidi"] = state.outputMidi;
                         }
                         touchConfig();
@@ -2057,6 +2469,11 @@ void ShellEngine::Run(std::stop_token stop) {
                     liveTranspose = state.transpose;
                     live->SetActive(true);
                 }
+                if (reopening && command.action == Action::LiveOpen) quietInput.clear();
+                if (reopening && command.action == Action::OutputOpen) quietOutput.clear();
+                // It came back, so its failure is no longer news.
+                if (quietReopen) state.error.clear();
+                reopening = false;
             }
             if (volumePending && !stop.stop_requested()) {
                 const auto now = std::chrono::steady_clock::now();
@@ -2091,8 +2508,11 @@ void ShellEngine::Run(std::stop_token stop) {
             }
             if (state.playing) {
                 state.position = std::clamp(player->get_adjusted_time().count() / 1e9, 0.0, state.duration);
+                // The playback thread reports the end itself. The take can add
+                // keys to the score and is rebuilt while playing, so its size and
+                // the index into it, read here, need not belong to the same take.
                 if (player->playback_started.load(std::memory_order_acquire) &&
-                    player->buffer_index.load(std::memory_order_acquire) >= player->note_events.size()) {
+                    player->song_done.load(std::memory_order_acquire)) {
                     stopPlayback();
                     state.position = state.duration;
                     if (state.shuffle && !state.files->empty()) {
@@ -2101,27 +2521,57 @@ void ShellEngine::Run(std::stop_token stop) {
                     }
                 }
             }
+            if (rescanOwed && !state.playing && !state.playbackCountdown && !shuffleAdvancePending) {
+                rescanOwed = false;
+                Send({Action::Scan, state.folder, 0, 0, true});
+            }
             if (state.outputMidi && !state.outputDevice.empty() && player &&
                 player->opened_midi_output() != state.outputDevice) {
                 player->close_midi_output();
                 state.outputMidi = false;
                 state.outputDevice.clear();
                 state.error = "MIDI output disconnected; using keystrokes.";
+                stateChanged = true;
             }
         } catch (const std::exception& error) {
-            if (volumePending) invalidateVolume();
-            stopPlayback();
-            state.error = error.what();
+            stateChanged = true;
+            // A scan's reopen that fails leaves an armed calibration and a
+            // playing song alone, and its device waits for the next scan, so a
+            // later save does not erase it.
+            if (volumePending && !reopening) invalidateVolume();
+            bool quiet = false;
+            if (reopening) {
+                if (command.action == Action::LiveOpen) {
+                    restoreInput = command.device; restoreInputConnect = command.value;
+                    quiet = std::exchange(quietInput, command.device) == command.device;
+                }
+                if (command.action == Action::OutputOpen) {
+                    restoreOutput = command.device; restoreOutputMidi = command.value;
+                    quiet = std::exchange(quietOutput, command.device) == command.device;
+                }
+            }
+            // A failed command that never drives the player leaves the song
+            // playing. The curve actions stop and resume it themselves.
+            const bool leavesPlayer = reopening || (hasCommand &&
+                (command.action == Action::CopySheet || command.action == Action::OpenSheetEditor ||
+                 command.action == Action::SaveSheetFiles || command.action == Action::SheetsFolder ||
+                 command.action == Action::SheetStylePage || command.action == Action::SheetFiles ||
+                 command.action == Action::SaveLibrarySheets || command.action == Action::Hotkey ||
+                 command.action == Action::VelocityModifier ||
+                 (command.action >= Action::CurveSelect && command.action <= Action::SustainCutoff)));
+            if (!leavesPlayer) stopPlayback();
+            if (!quiet) state.error = error.what();
             // A failed load leaves the previous file open, so name the file
-            // that failed.
-            if (hasCommand && command.action == Action::Load && !command.path.empty())
+            // that failed. Previous and Next load through the same path.
+            if (hasCommand && (command.action == Action::Load || command.action == Action::Previous ||
+                               command.action == Action::Next) && !command.path.empty())
                 state.error = Utf8(command.path.filename()) + ": " + state.error;
             state.busy = false;
         }
-        state.playedVelocities = velocity_telemetry::snapshot();
         if (configDirty && std::chrono::steady_clock::now() >= configDue) {
             try { flushConfig(); }
             catch (const std::exception& error) {
+                stateChanged = true;
                 state.error = error.what();
                 // Back off 5 s so the wait doesn't spin on a past deadline.
                 // A config that never loaded can never be saved.
@@ -2130,7 +2580,7 @@ void ShellEngine::Run(std::stop_token stop) {
             }
         }
         syncPoller();
-        Publish(state);
+        if (stateChanged) Publish(state);
     }
     poller.request_stop();
     poller.join();

@@ -407,7 +407,11 @@ public:
             if (colours != entry.end() && colours->is_object())
                 for (const auto& colour : ThemeColours()) {
                     const auto value = colours->find(colour.key);
-                    if (value != colours->end() && value->is_string()) ParseColour(value->get<std::string>(), colour.at(skin));
+                    // Only the fine-detail colours may be translucent, as in the
+                    // editor; a see-through text or surface colour would hide the UI.
+                    if (value != colours->end() && value->is_string() && ParseColour(value->get<std::string>(), colour.at(skin)) &&
+                        !colour.derived)
+                        colour.at(skin) |= 0xFF000000u;
                 }
             if (shape != entry.end() && shape->is_object())
                 for (const auto& number : ThemeNumbers()) {
@@ -474,7 +478,13 @@ public:
     }
     bool Save(const std::filesystem::path& path) const {
         auto temporary = path; temporary += L".tmp";
-        { std::ofstream stream(temporary); stream << ToJson().dump(2) << '\n'; if (!stream) return false; }
+        {
+            std::ofstream stream(temporary);
+            stream << ToJson().dump(2) << '\n';
+            // Close before checking: the last block is written, and can fail, only here.
+            stream.close();
+            if (!stream) { std::error_code ignored; std::filesystem::remove(temporary, ignored); return false; }
+        }
         std::error_code error;
         std::filesystem::rename(temporary, path, error);
         return !error;

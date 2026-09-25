@@ -31,7 +31,9 @@ ICONS = [
     ("Copy", "copy"), ("Rename", "pencil"), ("Check", "check"),
     ("SortDown", "arrow-down"), ("SortUp", "arrow-up"),
     ("Undo", "undo-2"), ("Redo", "redo-2"), ("Anchor", "git-commit-horizontal"),
-    ("Clear", "eraser"), ("Hold", "hand"), ("Tap", "pointer"),
+    ("Clear", "eraser"),
+    ("Draw", "line-squiggle"), ("Delete", "trash-2"),
+    ("Hold", "hand"), ("Tap", "pointer"),
     ("Audio", "audio-lines"), ("Discord", "discord"), ("Roblox", "roblox"),
     ("Help", "circle-question-mark"),
 ]

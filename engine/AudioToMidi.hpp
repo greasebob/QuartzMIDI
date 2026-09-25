@@ -103,8 +103,16 @@ struct Install {
     std::filesystem::path signin;  // signin.py beside convert.py, if present
     // setup.ps1 beside convert.py; downloads Python, the packages, FFmpeg and Deno.
     std::filesystem::path setup;
+    // setup.ps1 -Nvidia installed a CUDA build of PyTorch (its dist-info is
+    // torch-<version>+cu<nnn>); false for the CPU build.
+    bool gpu = false;
     bool Found() const { return !python.empty() && !script.empty(); }
     bool CanSetUp() const { return !Found() && !setup.empty(); }
+    // An install setup.ps1 made can be run again to swap the CPU and GPU builds;
+    // a Python from MIDIPP_CONVERTER_PYTHON is not setup.ps1's to change.
+    bool CanSwitch() const {
+        return Found() && !setup.empty() && python == script.parent_path() / L"python" / L"python.exe";
+    }
     // signin.py writes the YouTube session to cookies.txt; convert.py reads it.
     bool SignedIn() const {
         std::error_code ec;
@@ -125,6 +133,15 @@ inline std::wstring SetupCommandLine(const std::filesystem::path& setup, bool nv
     const auto shell = std::filesystem::path(system) / L"WindowsPowerShell" / L"v1.0" / L"powershell.exe";
     return QuoteArgument(shell.native()) + L" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " +
            QuoteArgument(setup.native()) + (nvidia ? L" -Nvidia" : L"");
+}
+
+// setup.ps1 -Nvidia names the card with nvidia-smi, which NVIDIA's driver puts
+// in System32; without it the GPU build cannot be installed.
+inline bool HasNvidiaCard() {
+    wchar_t system[MAX_PATH]{};
+    GetSystemDirectoryW(system, MAX_PATH);
+    std::error_code ec;
+    return std::filesystem::is_regular_file(std::filesystem::path(system) / L"nvidia-smi.exe", ec);
 }
 
 inline Install FindInstall(const std::filesystem::path& exeFolder) {
@@ -156,6 +173,14 @@ inline Install FindInstall(const std::filesystem::path& exeFolder) {
         for (const auto& candidate : {found.script.parent_path() / L"python" / L"python.exe",
                                       found.script.parent_path() / L".venv" / L"Scripts" / L"python.exe"})
             if (fs::is_regular_file(candidate, ec)) { found.python = candidate; break; }
+    if (!found.python.empty())
+        for (const auto& packages : {found.python.parent_path() / L"Lib" / L"site-packages",
+                                     found.python.parent_path().parent_path() / L"Lib" / L"site-packages"})
+            for (fs::directory_iterator entry(packages, ec), end; !ec && entry != end; entry.increment(ec)) {
+                const auto name = entry->path().filename().wstring();
+                if (name.starts_with(L"torch-") && name.ends_with(L".dist-info") && name.find(L"+cu") != std::wstring::npos)
+                    found.gpu = true;
+            }
     return found;
 }
 
@@ -172,7 +197,10 @@ public:
     // Otherwise the sink runs on the job's thread and the last status is always
     // Done, Finished or Error.
     bool Start(const std::wstring& commandLine, Sink sink) {
-        if (worker_.joinable()) worker_.join();
+        // The previous run has already reported its final status, but its
+        // process tree can take seconds to exit (Python unloading torch, a
+        // closing sign-in window). Joining without Cancel waits for all of it.
+        if (worker_.joinable()) { Cancel(); worker_.join(); }
         SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
         HANDLE read = nullptr, write = nullptr;
         if (!CreatePipe(&read, &write, &inherit, 0)) return false;

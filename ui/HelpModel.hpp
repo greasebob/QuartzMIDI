@@ -171,4 +171,14 @@ inline TourRect TourBetween(const TourRect& from, const TourRect& to, float t) {
     return {from.x0 + (to.x0 - from.x0) * e, from.y0 + (to.y0 - from.y0) * e,
             from.x1 + (to.x1 - from.x1) * e, from.y1 + (to.y1 - from.y1) * e};
 }
+// One frame of the card's text crossfade: the text on screen fades out from
+// wherever it is, then `stop`'s fades in, so a stop passed mid-fade never shows
+// and going back to the text still on screen fades it back in. `step` is the
+// frame's share of one fade; `alpha` is linear, eased where it is drawn.
+inline void TourTextStep(int stop, float step, int& shown, float& alpha) {
+    if (shown == stop) { alpha = std::min(1.f, alpha + step); return; }
+    alpha -= step;
+    // The rest of the step goes to the new text, keeping both halves the same length.
+    if (alpha <= 0) { shown = stop; alpha = std::min(1.f, -alpha); }
+}
 }

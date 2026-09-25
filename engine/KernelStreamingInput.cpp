@@ -340,10 +340,14 @@ public:
 
     void close() override {
         if (reader_.joinable()) {
-            stop_.store(true, std::memory_order_release);
+            stop_.store(true, std::memory_order_seq_cst);
             // The reader is blocked in GetOverlappedResult, and an idle pin
-            // never completes the read, so cancel it.
-            if (pin_) CancelIoEx(pin_, nullptr);
+            // never completes the read, so cancel it. A cancel that lands
+            // after the reader checked stop_ but before it queued the read
+            // finds nothing to cancel, so keep cancelling until it exits.
+            do {
+                if (pin_) CancelIoEx(pin_, nullptr);
+            } while (WaitForSingleObject(reader_.native_handle(), 10) == WAIT_TIMEOUT);
             reader_.join();
         }
         if (pin_) { setState(KSSTATE_PAUSE); setState(KSSTATE_STOP); }
@@ -414,9 +418,13 @@ private:
                 // ERROR_OPERATION_ABORTED is close() cancelling the read. Any
                 // other error means the device went away: report it and stop.
                 const DWORD error = GetLastError();
-                if (error != ERROR_OPERATION_ABORTED)
+                if (error != ERROR_OPERATION_ABORTED) {
                     std::wcerr << L"Kernel Streaming read failed, live input has stopped. Error "
                                << error << std::endl;
+                    // An unplug does not always arrive as a device change,
+                    // so report the loss from here as well.
+                    ReportMidiInputLost(openedId_);
+                }
                 break;
             }
 

@@ -15,6 +15,11 @@ namespace shell {
 extern std::function<std::filesystem::path(HWND)> PickMidiFile;
 // Same for theme files; with `save`, picks where to write a theme named `name`.
 extern std::function<std::filesystem::path(HWND, bool save, const std::string& name)> PickThemeFile;
+// True while a control's 160 ms transition is still moving; part of Animating.
+bool MotionPending();
+// Every control's transition jumps to its end on the current frame. Called
+// after NewFrame by a render test, so each capture starts at rest.
+void SettleMotion();
 
 // Extra layout size a theme's shape adds over the built-ins, before DPI scaling.
 struct LayoutGrowth { float control, window, panel, text, meta; };
@@ -40,9 +45,20 @@ struct Preferences {
     // Browse the MIDI Files list by sub-folder; off lists every file flat.
     bool folders = true;
     std::filesystem::path folder;
+    // The song open when the app last closed; the next start opens it again,
+    // paused at its beginning.
+    std::filesystem::path lastSong;
     // Full window position and width in screen pixels; width 0 means none saved.
     // The height is derived from which panels are open.
     int windowX = 0, windowY = 0, windowWidth = 0;
+    // Any height the full window was dragged beyond that, in dp, and whether it
+    // was maximized.
+    float windowExtra = 0;
+    bool maximized = false;
+    // Mini window position in screen pixels; miniSaved is false until mini has
+    // been shown.
+    int miniX = 0, miniY = 0;
+    bool miniSaved = false;
     // Restore mini mode at startup. The shell switches after placing the full
     // window, because mini records the full window's position to return to.
     bool startMini = false;
@@ -55,8 +71,12 @@ struct Preferences {
 class Panels {
 public:
     Preferences preferences;
+    // Makes `path` the MIDI Files list's folder, as Choose MIDI folder does.
+    void OpenFolder(const std::filesystem::path& path, ShellEngine& engine);
     // Persisted alongside the preferences as themes.json.
     ThemeStore themes;
+    // Adds a theme file and selects it, as Import does.
+    void ImportTheme(const std::filesystem::path& path);
     skin::Skin ActiveSkin() const { return themes.Active(preferences.theme).Shown(preferences.dark); }
     // Class for a separate OS window. It must carry TopMost when always-on-top is
     // set, or it opens behind the main window and cannot be raised.
@@ -123,11 +143,14 @@ public:
     // it every second and an unclean exit still keeps settings. Themes are saved
     // only when `exiting`; the theme editor saves its own.
     void SavePreferences(const std::filesystem::path& path, bool exiting = true) const;
+    // A failure on the panel side: `result` shows in the status bar until the next
+    // click, and the log gets `detail`, or `result` when there is none.
+    void ReportError(const std::string& result, const std::string& detail = {}) const;
     void Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design,
               float dpi, ShellEngine& engine);
     // True while something changes with time alone (the timing readout polls every
-    // 200 ms), so the on-demand renderer keeps drawing.
-    bool Animating() const { return measuring_ || hotkeyCapture >= 0 || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1)); }
+    // 200 ms, a control's transition moves), so the on-demand renderer keeps drawing.
+    bool Animating() const { return measuring_ || hotkeyCapture >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
 private:
     float HeightGrowth(bool tracksOpen, bool velocityOpen) const;
     void DrawHelp(const Fonts&, const skin::Skin&, float, const EngineSnapshot&);
@@ -143,15 +166,29 @@ private:
     int tourDrawn_ = -1;
     TourRect tourCardFrom_, tourCardShown_;
     float tourHeightFrom_ = 0, tourHeightShown_ = 0, tourFade_ = 1;
-    int tourPrevious_ = -1;
+    // Skip or Done was pressed; the tour fades out, then ends.
+    bool tourClosing_ = false;
+    // The stop whose text the card shows, and its linear alpha (TourTextStep).
+    int tourTextStop_ = -1;
+    float tourText_ = 1;
     // ImGui's modal dim alpha, saved while the tour draws its own dim with a cutout.
     float tourDim_ = 0;
     bool tourChecked_ = false;
     std::filesystem::path themesPath_;
     mutable std::string savedPreferences_;
+    // Preferences whose write last failed, so a retry reports only a new change.
+    mutable std::string unsavedPreferences_;
+    // Status bar text from ReportError, and the engine error last seen, so a
+    // newer engine error replaces it.
+    mutable std::string panelError_;
+    std::string errorSeen_;
     void SaveThemes() const;
     void DrawThemeEditor(const Fonts&, const skin::Skin&, float);
     bool themeEditorWasOpen_ = false;
+    // The copy of a built-in Customise made, as made, and that built-in's id;
+    // closing the editor with the copy unchanged removes it.
+    Theme customisedCopy_;
+    std::string customisedFrom_;
     // Theme editor Size while its slider is held, or 0.
     float themeSizeDrag_ = 0;
     char themeName_[64]{};
@@ -168,6 +205,9 @@ private:
     std::string browse_;
     // Set by Open file location; the list scrolls to it once its folder is shown.
     std::filesystem::path revealFile_;
+    // Loaded file the list last saw, and the file a row click loaded, so a song
+    // that Next, a hotkey or shuffle loads is revealed once and a clicked one isn't.
+    std::filesystem::path followedFile_, clickedFile_;
     std::vector<std::string> folderRows_;
     void DrawKeyMapping(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine);
     int selectedNote_ = -1;
@@ -177,6 +217,8 @@ private:
     float seekPosition_ = 0;
     bool seeking_ = false;
     uint64_t seekGeneration_ = 0;
+    // Load the Tracks table last scrolled to the top for.
+    uint64_t tracksGeneration_ = 0;
     uint64_t handledSheetRevision_ = 0;
     uint64_t sheetStatusGeneration_ = 0;
     std::string sheetStatus_;
@@ -186,6 +228,9 @@ private:
     bool convertPlaylist_ = false;
     // Which converter install (CPU or NVIDIA) is running.
     bool installNvidia_ = false;
+    // Whether the last frame drew the Convert popover's moving progress bar; a
+    // conversion with the popover closed has nothing that moves on its own.
+    bool convertBarDrawn_ = false;
     void DrawVelocity(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, ImVec2);
     void DrawSettings(const Fonts&, const skin::Skin&, float, ShellEngine&);
     void DrawMidiDevices(const Fonts&, const skin::Skin&, float, ShellEngine&);
@@ -206,7 +251,8 @@ private:
     int nameOperation_ = 0;
     char curveName_[128]{};
     bool focusCurveName_ = false;
-    uint64_t nameRevision_ = 0;
+    // Curve the name field was opened for; choosing another closes it.
+    size_t namePreset_ = 0;
     uint64_t editorRevision_ = UINT64_MAX;
     uint64_t listRevision_ = UINT64_MAX;
     uint64_t histogramRevision_ = UINT64_MAX;
@@ -224,6 +270,10 @@ private:
     std::vector<VelocityPoint> freeDraw_;
     bool cutoffEditing_ = false;
     float cutoffPreview_ = 64;
+    // Sent and not yet published: the preview stays shown until the engine
+    // reports the value or an error.
+    bool cutoffPending_ = false;
+    std::string cutoffPendingError_;
     std::array<float, 3> wootingPreview_{0.5f, 12.f, 5.f};
     std::array<bool, 3> wootingEditing_{};
     std::array<bool, 3> wootingPending_{};

@@ -67,9 +67,22 @@ std::unique_ptr<IMidiInput> CreateMidiInput(MidiBackend backend);
 using MidiInputFactory = std::function<std::unique_ptr<IMidiInput>(MidiBackend)>;
 void SetMidiInputFactory(MidiInputFactory factory);
 
+// An open input whose transport stops delivering on its own, such as a Kernel
+// Streaming read failing when the device goes away, is reported with its id.
+// The handler runs on the transport's thread; passing {} removes it, and no
+// report reaches a handler once the call that removed it has returned.
+using MidiInputLostHandler = std::function<void(const std::wstring& deviceId)>;
+void SetMidiInputLostHandler(MidiInputLostHandler handler);
+void ReportMidiInputLost(const std::wstring& deviceId);
+
 // Device list for the UI: WinRT, WinMM, Kernel Streaming and, when available,
 // Wooting. Each id encodes its backend, so any entry can be opened directly.
 std::vector<MidiInputDevice> EnumerateMidiInputs();
+
+// Test hook: substitutes the list EnumerateMidiInputs returns. Passing {}
+// restores the real transports. Not synchronised: set it before a scan.
+using MidiInputEnumerator = std::function<std::vector<MidiInputDevice>()>;
+void SetMidiInputEnumerator(MidiInputEnumerator enumerator);
 
 // Which backend produced this id. Defaults to WinRT for empty or unknown ids.
 MidiBackend BackendForDeviceId(const std::wstring& deviceId);

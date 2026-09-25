@@ -269,13 +269,16 @@ MidiFile MidiParser::parse(const std::string& filename) {
 
             uint8_t status = readByte(ptr, trackEnd);
             // Running status: a data byte (< 0x80) reuses the previous status.
+            // Only channel messages set it. Some files continue a run of notes
+            // after a meta or SysEx event, and 0xFF as the running status would
+            // read the next note as a meta event.
             if (status < 0x80) {
                 if (lastStatus == 0)
                     throw std::runtime_error("Running status encountered with no previous status");
                 status = lastStatus;
                 ptr--;
             }
-            else {
+            else if (status < 0xF0) {
                 lastStatus = status;
             }
 

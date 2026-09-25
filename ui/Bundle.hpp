@@ -154,7 +154,11 @@ inline size_t Unpack(std::span<const std::uint8_t> bytes, const std::filesystem:
         temporary += L".unpacking";
         {
             std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-            if (!out.write(entry.data.data(), static_cast<std::streamsize>(entry.data.size()))) continue;
+            out.write(entry.data.data(), static_cast<std::streamsize>(entry.data.size()));
+            // Close before checking: the last block is written, and can fail, only
+            // here, and a short file recorded as ours would never be repaired.
+            out.close();
+            if (!out) { std::filesystem::remove(temporary, ignored); continue; }
         }
         if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
             std::filesystem::remove(temporary, ignored);

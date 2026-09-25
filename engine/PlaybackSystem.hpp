@@ -54,7 +54,8 @@ extern VirtualPianoPlayer* g_player;
 
 // Global variables (definitions provided in CPP)
 extern double g_totalSongSeconds;
-extern int    g_sustainCutoff;
+// Written by the engine thread, read by the live MIDI callback.
+extern std::atomic<int> g_sustainCutoff;
 
 // =====================================================
 // Sustain Mode Enumeration
@@ -263,7 +264,6 @@ public:
 
     // Data members
     std::vector<RawNoteEvent> note_events;
-    std::vector<std::string> string_storage;
     std::vector<std::pair<double, double>> tempo_changes;
     std::vector<TimeSignature> timeSignatures;
     std::unique_ptr<std::jthread> playback_thread;
@@ -276,6 +276,11 @@ public:
     std::atomic<bool> paused{ true };
     std::atomic<bool> playback_started{ false };
     std::atomic<size_t> buffer_index{ 0 };
+    // Set by the playback thread once it has played the whole take, which can
+    // add keys to the score; cleared by whatever starts playback or moves the
+    // index. The end is read from here and not from buffer_index against the
+    // take's size, since a rebuild publishes those two one after the other.
+    std::atomic<bool> song_done{ false };
 
     double current_speed{ 1.0 };
     double paused_time = 0.0;
@@ -440,6 +445,8 @@ private:
     void initializeKeyCache();
     void KeyPress(std::string_view key, bool press);
     void release_keys(bool everyMapping);
+    // release_keys with dispatch_mutex already held by the caller.
+    void release_keys_locked(bool everyMapping);
     int stringToVK(std::string_view keyName);
     void sendVirtualKey(WORD vk, bool is_press);
     void pressKey(WORD vk);

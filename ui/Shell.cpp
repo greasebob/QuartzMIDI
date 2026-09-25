@@ -18,6 +18,7 @@
 #include <tchar.h>
 #include <shellapi.h>
 #include <dwmapi.h>
+#include <dbt.h>
 #include "json.hpp"
 #include <algorithm>
 #include <cctype>
@@ -160,6 +161,31 @@ static void CleanupDevice() {
     if (g_device)    { g_device->Release();    g_device = nullptr; }
 }
 
+// Paths dropped or handed over, opened by the frame loop between frames: a
+// modal dialog open inside a frame dispatches those messages too.
+static std::vector<std::filesystem::path> g_opened;
+
+// A path dropped on the window, given on the command line or handed over by a
+// second start: a folder becomes the MIDI Files list's folder, a theme file is
+// imported, and anything else opens as a row click opens a song. True when a
+// song was sent to load.
+static bool OpenPath(std::filesystem::path path) {
+    if (!g_engine || !g_panels || path.empty()) return false;
+    std::error_code error;
+    if (auto full = std::filesystem::absolute(path, error); !error) path = std::move(full);
+    auto extension = path.extension().wstring();
+    std::transform(extension.begin(), extension.end(), extension.begin(), ::towlower);
+    if (std::filesystem::is_directory(path, error)) { g_panels->OpenFolder(path, *g_engine); return false; }
+    if (extension == L".qmtheme") { g_panels->ImportTheme(path); return false; }
+    g_engine->Send({shell::ShellEngine::Action::Load, path, 0, 0, g_panels->preferences.autoSolo});
+    return true;
+}
+
+// A device arriving or leaving sends a burst of WM_DEVICECHANGE; MIDI devices
+// are rescanned once it has been quiet this long.
+static constexpr UINT_PTR kDeviceScanTimer = 1;
+static constexpr UINT kDeviceScanSettleMs = 500;
+
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
     switch (msg) {
@@ -183,11 +209,22 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DROPFILES: {
         const auto drop = reinterpret_cast<HDROP>(wp);
         wchar_t path[32768]{};
-        if (g_engine && g_panels && DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path))))
-            g_engine->Send({shell::ShellEngine::Action::Load, path, 0, 0, g_panels->preferences.autoSolo});
+        if (DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path)))) g_opened.emplace_back(path);
         DragFinish(drop);
         return 0;
     }
+    case WM_DEVICECHANGE:
+        if (wp != DBT_DEVNODES_CHANGED) break;
+        SetTimer(hwnd, kDeviceScanTimer, kDeviceScanSettleMs, nullptr);
+        return TRUE;
+    case WM_TIMER:
+        if (wp != kDeviceScanTimer) break;
+        KillTimer(hwnd, kDeviceScanTimer);
+        if (g_engine) {
+            g_engine->Send({shell::ShellEngine::Action::LiveScan});
+            g_engine->Send({shell::ShellEngine::Action::OutputScan});
+        }
+        return 0;
     case WM_DPICHANGED: {
         g_dpi = static_cast<float>(HIWORD(wp)) / 96.f;
         const RECT& rect = *reinterpret_cast<const RECT*>(lp);
@@ -229,6 +266,56 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// One copy runs per data folder, so the hotkeys and the saved settings have one
+// owner; builds with other data folders still run side by side. A second start
+// hands its path to the running copy's message-only receiver, named like the
+// mutex, and exits.
+constexpr wchar_t kReceiverClass[] = L"QuartzMIDI.Open";
+constexpr ULONG_PTR kOpenPathData = 0x514D4F50;
+
+static std::wstring InstanceName(const std::filesystem::path& directory) {
+    std::wstring folder = directory.lexically_normal().wstring();
+    CharLowerBuffW(folder.data(), static_cast<DWORD>(folder.size()));
+    const std::string hash = shell::bundle::Fnv1a({reinterpret_cast<const char*>(folder.data()), folder.size() * sizeof(wchar_t)});
+    return L"QuartzMIDI-" + std::wstring(hash.begin(), hash.end());
+}
+
+// GWLP_USERDATA holds the main window, raised after each hand-over.
+static LRESULT WINAPI ReceiverProc(HWND receiver, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg != WM_COPYDATA) return DefWindowProcW(receiver, msg, wp, lp);
+    const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lp);
+    if (!data || data->dwData != kOpenPathData || data->cbData % sizeof(wchar_t) != 0 || data->cbData > 32768 * sizeof(wchar_t) ||
+        (data->cbData > 0 && !data->lpData))
+        return FALSE;
+    if (data->cbData > 0) g_opened.emplace_back(std::wstring(static_cast<const wchar_t*>(data->lpData), data->cbData / sizeof(wchar_t)));
+    if (const HWND main = reinterpret_cast<HWND>(GetWindowLongPtrW(receiver, GWLP_USERDATA))) {
+        if (IsIconic(main)) ShowWindow(main, SW_RESTORE);
+        SetForegroundWindow(main);
+    }
+    return TRUE;
+}
+
+// Hands `path` (possibly empty) to the copy holding `instance`. False when that
+// copy exits first, leaving `instance` owned by this one, or cannot be reached;
+// either way this copy then starts as usual.
+static bool HandToRunningCopy(HANDLE instance, const std::wstring& name, const std::filesystem::path& path) {
+    // The receiver appears once the running copy's window is up.
+    const ULONGLONG deadline = GetTickCount64() + 10000;
+    HWND receiver = nullptr;
+    while (!(receiver = FindWindowExW(HWND_MESSAGE, nullptr, kReceiverClass, name.c_str()))) {
+        const DWORD waited = WaitForSingleObject(instance, 50);
+        if (waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED || GetTickCount64() >= deadline) return false;
+    }
+    // Only the foreground process can let another take the foreground.
+    DWORD process = 0;
+    GetWindowThreadProcessId(receiver, &process);
+    AllowSetForegroundWindow(process);
+    const std::wstring text = path.wstring();
+    COPYDATASTRUCT data{kOpenPathData, static_cast<DWORD>(text.size() * sizeof(wchar_t)), const_cast<wchar_t*>(text.data())};
+    DWORD_PTR accepted = 0;
+    return SendMessageTimeoutW(receiver, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&data), SMTO_ABORTIFHUNG, 5000, &accepted) && accepted;
+}
+
 // Match the DWM caption to the skin. Windows 11 honours the colours; Windows 10
 // 20H1+ honours only dark mode; older builds ignore both.
 void ApplyCaption(HWND hwnd, const skin::Skin& s) {
@@ -239,6 +326,20 @@ void ApplyCaption(HWND hwnd, const skin::Skin& s) {
     DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &caption, sizeof(caption));
+}
+
+// Fits a window rect into a monitor's work area: no larger than it, then moved
+// inside it, so neither the title bar nor the status bar ends up off screen or
+// under the taskbar.
+static RECT ClampToWork(RECT target, HMONITOR monitor) {
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(monitor, &info);
+    const RECT& work = info.rcWork;
+    const LONG width = std::min(target.right - target.left, work.right - work.left);
+    const LONG height = std::min(target.bottom - target.top, work.bottom - work.top);
+    const LONG left = std::clamp(target.left, work.left, work.right - width);
+    const LONG top = std::clamp(target.top, work.top, work.bottom - height);
+    return {left, top, left + width, top + height};
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
@@ -255,6 +356,28 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (args) LocalFree(args);
         if (unpackOnly) return 0;
     }
+    // Owned for this copy's lifetime; checked before anything loads settings.
+    const std::wstring instanceName = InstanceName(directory);
+    HANDLE instance = CreateMutexW(nullptr, TRUE, instanceName.c_str());
+    if (instance && GetLastError() == ERROR_ALREADY_EXISTS) {
+        std::filesystem::path handed;
+        int count = 0;
+        if (LPWSTR* args = CommandLineToArgvW(GetCommandLineW(), &count)) {
+            // Resolved here: the running copy has its own working folder.
+            std::error_code error;
+            if (count > 1) handed = std::filesystem::absolute(args[1], error);
+            if (count > 1 && (error || handed.empty())) handed = args[1];
+            LocalFree(args);
+        }
+        if (HandToRunningCopy(instance, instanceName, handed)) {
+            CloseHandle(instance);
+            if (SUCCEEDED(com)) CoUninitialize();
+            return 0;
+        }
+    }
+    // Released when wWinMain returns, after the engine below has written
+    // config.json and the settings are saved, so a start waiting on it reads both.
+    struct InstanceGuard { HANDLE handle; ~InstanceGuard() { if (handle) { ReleaseMutex(handle); CloseHandle(handle); } } } instanceGuard{instance};
     const auto preferencesPath = directory / L"shell-settings.json";
     shell::Panels panels;
     panels.LoadPreferences(preferencesPath);
@@ -263,27 +386,36 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         [] { return std::make_unique<shell::NativeConnectInput>(); });
     g_engine = &engine;
     g_panels = &panels;
-    g_dpi = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(POINT{100, 100}, MONITOR_DEFAULTTOPRIMARY));
     // Icon resource 1 in Shell.rc.
     HICON icon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     WNDCLASSEXW wc = { sizeof(wc), CS_CLASSDC, WndProc, 0, 0, inst,
                        icon, nullptr, nullptr, nullptr, L"QuartzMIDI", icon };
     ::RegisterClassExW(&wc);
+    // Restore the saved position if its title bar is still on a monitor, and
+    // size the window for that monitor's DPI; otherwise open on the primary.
+    const auto& saved = panels.preferences;
+    const RECT last{saved.windowX, saved.windowY, saved.windowX + saved.windowWidth, saved.windowY + 100};
+    const HMONITOR restored = saved.windowWidth > 0 ? MonitorFromRect(&last, MONITOR_DEFAULTTONULL) : nullptr;
+    const HMONITOR home = restored ? restored : MonitorFromPoint(POINT{100, 100}, MONITOR_DEFAULTTOPRIMARY);
+    g_dpi = ImGui_ImplWin32_GetDpiScaleForMonitor(home);
     const ImVec2 desired = panels.DesiredSize();
-    RECT initial{0, 0, static_cast<LONG>(desired.x * UiScale()), static_cast<LONG>(desired.y * UiScale())};
+    // Any height the full window was dragged beyond the desired one comes back too.
+    RECT initial{0, 0, static_cast<LONG>(desired.x * UiScale()), static_cast<LONG>((desired.y + saved.windowExtra) * UiScale())};
     AdjustWindowRectExForDpi(&initial, WS_OVERLAPPEDWINDOW, FALSE, 0, static_cast<UINT>(96.f * g_dpi));
-    // Restore the saved position if it is still on a monitor.
-    int startX = 100, startY = 100, startWidth = initial.right - initial.left;
-    if (const auto& saved = panels.preferences; saved.windowWidth > 0) {
-        const RECT last{saved.windowX, saved.windowY, saved.windowX + saved.windowWidth, saved.windowY + 100};
-        if (MonitorFromRect(&last, MONITOR_DEFAULTTONULL)) {
-            startX = saved.windowX; startY = saved.windowY;
-            startWidth = std::max(startWidth, saved.windowWidth);
-        }
-    }
+    const LONG startWidth = restored ? std::max(initial.right - initial.left, static_cast<LONG>(saved.windowWidth)) : initial.right - initial.left;
+    const LONG startX = restored ? saved.windowX : 100, startY = restored ? saved.windowY : 100;
+    const RECT start = ClampToWork({startX, startY, startX + startWidth, startY + initial.bottom - initial.top}, home);
     HWND hwnd = ::CreateWindowW(wc.lpszClassName, L"QuartzMIDI",
-                                WS_OVERLAPPEDWINDOW, startX, startY, startWidth, initial.bottom - initial.top,
+                                WS_OVERLAPPEDWINDOW, start.left, start.top, start.right - start.left, start.bottom - start.top,
                                 nullptr, nullptr, wc.hInstance, nullptr);
+    // Windows sends no WM_DPICHANGED to a window created on a monitor, so one
+    // that still lands at another DPI is rescaled for it here.
+    if (const float actual = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd); actual != g_dpi) {
+        const float ratio = actual / g_dpi;
+        g_dpi = actual;
+        SetWindowPos(hwnd, nullptr, 0, 0, static_cast<LONG>((start.right - start.left) * ratio),
+                     static_cast<LONG>((start.bottom - start.top) * ratio), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
     ApplyCaption(hwnd, panels.ActiveSkin());  // before the first paint to avoid a white flash
     if (!CreateDevice(hwnd)) {
         CleanupDevice();
@@ -291,9 +423,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (SUCCEEDED(com)) CoUninitialize();
         return 1;
     }
-    ::ShowWindow(hwnd, SW_SHOWDEFAULT);
-    ::UpdateWindow(hwnd);
     DragAcceptFiles(hwnd, TRUE);
+    WNDCLASSEXW receiverClass{sizeof(receiverClass)};
+    receiverClass.lpfnWndProc = ReceiverProc;
+    receiverClass.hInstance = inst;
+    receiverClass.lpszClassName = kReceiverClass;
+    ::RegisterClassExW(&receiverClass);
+    HWND receiver = ::CreateWindowExW(0, kReceiverClass, instanceName.c_str(), 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
+    if (receiver) SetWindowLongPtrW(receiver, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(hwnd));
     // Registered from the loop because RegisterHotKey binds to the thread that
     // owns hwnd; re-registered whenever the snapshot's hotkeys change.
     Registered hotkeys;
@@ -329,7 +466,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     };
     std::array<float, 4> appliedLayout = layoutNow();
     RECT fullRect{}; GetWindowRect(hwnd, &fullRect);
-    bool fullMaximized = false;
+    // DPI fullRect was measured at; mini may be moved to a monitor at another.
+    float fullDpi = g_dpi;
+    bool fullMaximized = panels.preferences.maximized;
     panels.miniMode = panels.preferences.startMini;
     ULONGLONG preferencesSaved = GetTickCount64();
     if (panels.preferences.folder.empty()) {
@@ -337,12 +476,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (!std::filesystem::is_directory(folder)) folder = directory.parent_path().parent_path() / L"x64" / L"Release" / L"midi";
         if (std::filesystem::is_directory(folder)) panels.preferences.folder = std::filesystem::weakly_canonical(folder);
     }
+    engine.Send({shell::ShellEngine::Action::AutoSolo, {}, 0, 0, panels.preferences.autoSolo});
     if (!panels.preferences.folder.empty()) engine.Send({shell::ShellEngine::Action::Scan, panels.preferences.folder});
     int argc = 0;
+    bool songOpened = false;
     if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
-        if (argc > 1) engine.Send({shell::ShellEngine::Action::Load, argv[1], 0, 0, panels.preferences.autoSolo});
+        if (argc > 1) songOpened = OpenPath(argv[1]);
         LocalFree(argv);
     }
+    // Without a song to open, the song open at the last close opens again,
+    // paused at its beginning. One that is gone is left alone.
+    if (std::error_code gone; !songOpened && std::filesystem::is_regular_file(panels.preferences.lastSong, gone))
+        engine.Send({shell::ShellEngine::Action::Load, panels.preferences.lastSong, 0, 0, panels.preferences.autoSolo});
+    // Saved with the preferences. Nothing is open until the reopened song
+    // loads, so an empty snapshot keeps the song already saved.
+    const auto keepSong = [&] {
+        if (const auto open = engine.Snapshot()->loaded; !open.empty()) panels.preferences.lastSong = open;
+    };
 
     bool running = true;
     bool appliedTopmost = false;
@@ -353,9 +503,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     engine.SetWakeWindow(hwnd);
     struct WakeGuard { shell::ShellEngine& engine; ~WakeGuard() { engine.SetWakeWindow(nullptr); } } wakeGuard{engine};
     std::shared_ptr<const shell::EngineSnapshot> drawnSnapshot;
+    // Live velocities are drawn only by the open Velocity Response graph, so a
+    // note redraws only while it is shown.
+    uint64_t drawnPlayed = 0;
     auto drawUntil = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    // Set before the first frame and after an idle wait, so the frame that follows
+    // doesn't count the wait as frame time and skip the transitions input starts.
+    bool waited = true;
+    std::chrono::steady_clock::time_point drawnAt;
     bool occluded = false;
     bool rendererUp = true;
+    // The window is first shown by the first pass, at its final size and mode,
+    // so a start in mini never shows an empty full-size window.
+    bool shown = false;
     while (running) {
         MSG msg;
         bool input = false;
@@ -371,6 +531,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             input = true;
         }
         if (!running) break;
+        for (auto& path : std::exchange(g_opened, {})) { OpenPath(std::move(path)); input = true; }
         {
             DWORD foreground = 0;
             GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
@@ -380,7 +541,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             if (capturedKey != 0 && !keyDown(static_cast<int>(capturedKey))) capturedKey = 0;
             if (panels.hotkeyCapture >= 0) {
                 if (!capturing) { UnregisterHotkeys(hwnd, hotkeys); capture.Begin(keyDown); capturing = true; }
-                const int pressed = capture.Poll(keyDown);
+                const auto mapped = engine.Snapshot();
+                const int pressed = capture.Poll(keyDown, [&](int vk) { return shell::IsNoteKey(vk, mapped->keyMappings); });
                 if (pressed > 0) {
                     shell::ShellEngine::Command command{shell::ShellEngine::Action::Hotkey};
                     command.track = static_cast<size_t>(panels.hotkeyCapture);
@@ -435,7 +597,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             if (applied) appliedOpacity = panels.preferences.opacity;
             else {
                 panels.preferences.opacity = appliedOpacity;
-                shell::ShellLog::Instance().Append("[error] Could not change window opacity.\n");
+                panels.ReportError("Could not change window opacity.");
             }
         }
         if (appliedTopmost != panels.preferences.alwaysOnTop) {
@@ -447,21 +609,44 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (IsIconic(hwnd)) { WaitMessage(); continue; }
         const skin::Skin current = panels.ActiveSkin();
         const uint64_t active = shell::SkinSignature(current);
+        // "Focused" means any window of this process, since viewports such as
+        // Key Mapping are separate top-level windows.
+        DWORD foregroundProcess = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
+        const bool ours = foregroundProcess == GetCurrentProcessId();
         {
             const auto now = std::chrono::steady_clock::now();
             auto snapshot = engine.Snapshot();
+            const uint64_t played = velocity_telemetry::snapshot().revision;
             const bool pending = appliedMini != panels.miniMode || appliedLayout != layoutNow() ||
                 (panels.miniMode && appliedMiniAutoplay != panels.miniAutoplay) || appliedSkin != active || appliedDpi != UiScale();
             // Keep the drawn snapshot alive: a freed snapshot's address can be
             // reused by the next one, so a raw-pointer compare would miss it.
-            if (input || pending || snapshot != drawnSnapshot || panels.Animating() || snapshot->converting || snapshot->busy ||
-                (ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput) || g_deviceLost)
+            const bool graphShown = panels.velocityExpanded && !panels.miniMode;
+            if (input || pending || snapshot != drawnSnapshot || panels.Animating() || snapshot->busy ||
+                (graphShown && played != drawnPlayed) || g_deviceLost)
                 drawUntil = now + std::chrono::milliseconds(750);
-            if (now >= drawUntil) {
-                MsgWaitForMultipleObjectsEx(0, nullptr, 500, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            // An active text field only needs its caret blinking: a frame every
+            // 100 ms, as the blink follows elapsed time. ImGui keeps the field
+            // active after the game takes the foreground, so only while focused.
+            const bool caret = ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput && ours;
+            const auto caretDue = drawnAt + std::chrono::milliseconds(100);
+            if (now >= drawUntil && !(caret && now >= caretDue)) {
+                // Live notes reach the velocity graph without a publish to wake
+                // the loop, so poll for them while the graph is shown and live
+                // input can deliver any.
+                auto wait = std::chrono::milliseconds(graphShown && (snapshot->liveActive || snapshot->midiConnect) ? 16 : 500);
+                if (caret) wait = std::min(wait, std::chrono::ceil<std::chrono::milliseconds>(caretDue - now));
+                MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(wait.count()), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                waited = true;
                 continue;
             }
             drawnSnapshot = std::move(snapshot);
+            drawnPlayed = played;
+            drawnAt = now;
+            // A frame drawn only for the caret keeps its real frame time: capped
+            // like the frame after an idle wait, the blink would run slow.
+            if (now >= drawUntil) waited = false;
         }
         // Rebuild the device after a driver reset or adapter removal.
         if (g_deviceLost) {
@@ -485,6 +670,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         // of drawing, unless another viewport window may still be visible.
         if (occluded && ImGui::GetPlatformIO().Viewports.Size <= 1 &&
             g_swapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
+            // Nothing was shown, so the current snapshot is drawn once visible;
+            // a song that ended while locked would otherwise stay on screen.
+            drawnSnapshot.reset();
             MsgWaitForMultipleObjectsEx(0, nullptr, 250, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             continue;
         }
@@ -499,16 +687,31 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             if (modeChanged) {
                 // Mini has no maximize box. A maximized full window is
                 // restored on entering mini and re-maximized on leaving it.
-                if (panels.miniMode) { fullMaximized = IsZoomed(hwnd) != FALSE; if (fullMaximized) ShowWindow(hwnd, SW_RESTORE); }
+                // Before the first show, the saved state stands in for IsZoomed.
+                if (panels.miniMode && shown) { fullMaximized = IsZoomed(hwnd) != FALSE; if (fullMaximized) ShowWindow(hwnd, SW_RESTORE); }
                 const auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
                 SetWindowLongPtrW(hwnd, GWL_STYLE, panels.miniMode ? style & ~WS_MAXIMIZEBOX : style | WS_MAXIMIZEBOX);
             }
             RECT window{}, client{}; GetWindowRect(hwnd, &window); GetClientRect(hwnd, &client);
-            if (modeChanged && panels.miniMode) fullRect = window;
+            if (modeChanged && panels.miniMode) { fullRect = window; fullDpi = g_dpi; }
+            // Mini reopens where it was left, in this session and the next.
+            if (modeChanged && !panels.miniMode) {
+                panels.preferences.miniX = window.left;
+                panels.preferences.miniY = window.top;
+                panels.preferences.miniSaved = true;
+            }
             RECT target{};
+            HMONITOR onto = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             const auto desired = panels.DesiredSize();
-            if (modeChanged && !panels.miniMode) target = fullRect;
-            else {
+            if (modeChanged && !panels.miniMode) {
+                // The full window returns where it was, rescaled for any DPI
+                // change since; if that monitor is gone, it opens where mini is.
+                const float ratio = g_dpi / fullDpi;
+                target = {fullRect.left, fullRect.top, fullRect.left + static_cast<LONG>((fullRect.right - fullRect.left) * ratio),
+                          fullRect.top + static_cast<LONG>((fullRect.bottom - fullRect.top) * ratio)};
+                if (const HMONITOR fullMonitor = MonitorFromRect(&fullRect, MONITOR_DEFAULTTONULL)) onto = fullMonitor;
+                else OffsetRect(&target, window.left - target.left, window.top - target.top);
+            } else {
                 // The full window keeps its user-set width, rescaled by the
                 // change in Size; WM_GETMINMAXINFO enforces the floor.
                 const float ratio = layoutNow()[3] / appliedLayout[3];
@@ -519,14 +722,19 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 AdjustWindowRectExForDpi(&dimensions, WS_OVERLAPPEDWINDOW, FALSE, 0, static_cast<UINT>(96.f * g_dpi));
                 target = {window.left, window.top, window.left + dimensions.right - dimensions.left,
                     window.top + dimensions.bottom - dimensions.top};
+                if (modeChanged && panels.preferences.miniSaved) {
+                    RECT parked = target;
+                    OffsetRect(&parked, panels.preferences.miniX - target.left, panels.preferences.miniY - target.top);
+                    if (const HMONITOR there = MonitorFromRect(&parked, MONITOR_DEFAULTTONULL)) { target = parked; onto = there; }
+                }
             }
-            MONITORINFO monitor{sizeof(monitor)};
-            GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
-            const LONG width = std::min(target.right - target.left, monitor.rcWork.right - monitor.rcWork.left);
-            const LONG height = std::min(target.bottom - target.top, monitor.rcWork.bottom - monitor.rcWork.top);
-            target.left = std::clamp(target.left, monitor.rcWork.left, monitor.rcWork.right - width);
-            target.top = std::clamp(target.top, monitor.rcWork.top, monitor.rcWork.bottom - height);
-            SetWindowPos(hwnd, nullptr, target.left, target.top, width, height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            // A move onto a monitor at another DPI rescales the window through
+            // WM_DPICHANGED, so it is clamped at the size it will have there.
+            const float landing = ImGui_ImplWin32_GetDpiScaleForMonitor(onto) / g_dpi;
+            const RECT placed = ClampToWork({target.left, target.top, target.left + static_cast<LONG>((target.right - target.left) * landing),
+                                             target.top + static_cast<LONG>((target.bottom - target.top) * landing)}, onto);
+            SetWindowPos(hwnd, nullptr, placed.left, placed.top, static_cast<LONG>((placed.right - placed.left) / landing),
+                         static_cast<LONG>((placed.bottom - placed.top) / landing), SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
             if (modeChanged && !panels.miniMode && fullMaximized) ShowWindow(hwnd, SW_MAXIMIZE);
             appliedMini = panels.miniMode;
             appliedLayout = layoutNow();
@@ -539,9 +747,30 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             appliedSkin = active;
             appliedDpi = UiScale();
         }
+        if (!shown) {
+            // A shortcut set to start minimized still restores to the maximized window left last time.
+            STARTUPINFOW start{sizeof start};
+            GetStartupInfoW(&start);
+            const bool startMinimized = (start.dwFlags & STARTF_USESHOWWINDOW) &&
+                (start.wShowWindow == SW_SHOWMINIMIZED || start.wShowWindow == SW_MINIMIZE ||
+                 start.wShowWindow == SW_SHOWMINNOACTIVE || start.wShowWindow == SW_FORCEMINIMIZE);
+            if (startMinimized && !panels.miniMode && fullMaximized) {
+                WINDOWPLACEMENT place{sizeof place};
+                GetWindowPlacement(hwnd, &place);
+                place.flags |= WPF_RESTORETOMAXIMIZED;
+                place.showCmd = SW_SHOWMINNOACTIVE;
+                SetWindowPlacement(hwnd, &place);
+            } else {
+                ::ShowWindow(hwnd, !panels.miniMode && fullMaximized ? SW_SHOWMAXIMIZED : SW_SHOWDEFAULT);
+            }
+            ::UpdateWindow(hwnd);
+            shown = true;
+        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        if (waited) ImGui::GetIO().DeltaTime = std::min(ImGui::GetIO().DeltaTime, 1.f / 60);
+        waited = false;
         ImGui::NewFrame();
         ImGui::PushFont(fonts.Get(current), current.type.body);
 
@@ -574,33 +803,45 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         // Save preferences every second so a crash or shutdown doesn't lose them.
         if (const auto now = GetTickCount64(); now - preferencesSaved >= 1000) {
             preferencesSaved = now;
-            RECT window{};
-            if (!panels.miniMode && !IsZoomed(hwnd) && !IsIconic(hwnd) && GetWindowRect(hwnd, &window)) {
+            RECT window{}, client{};
+            // While mini is shown, the full window's state is the one it returns to.
+            if (!IsIconic(hwnd)) panels.preferences.maximized = panels.miniMode ? fullMaximized : IsZoomed(hwnd) != FALSE;
+            if (!panels.miniMode && !IsZoomed(hwnd) && !IsIconic(hwnd) && GetWindowRect(hwnd, &window) && GetClientRect(hwnd, &client)) {
                 panels.preferences.windowX = window.left;
                 panels.preferences.windowY = window.top;
                 panels.preferences.windowWidth = window.right - window.left;
+                // Height dragged beyond the applied layout's, in dp.
+                panels.preferences.windowExtra = std::max(0.f, client.bottom - appliedLayout[0] * g_dpi) / (g_dpi * appliedLayout[3]);
             }
+            if (panels.miniMode && !IsIconic(hwnd) && GetWindowRect(hwnd, &window)) {
+                panels.preferences.miniX = window.left;
+                panels.preferences.miniY = window.top;
+                panels.preferences.miniSaved = true;
+            }
+            keepSong();
             panels.SavePreferences(preferencesPath, false);
         }
         // Throttle redraws to ~12 fps when unfocused; playback doesn't depend on
-        // frame rate. "Focused" means any window of this process, since viewports
-        // such as Key Mapping are separate top-level windows.
-        DWORD foregroundProcess = 0;
-        GetWindowThreadProcessId(GetForegroundWindow(), &foregroundProcess);
-        const bool ours = foregroundProcess == GetCurrentProcessId();
+        // frame rate. The engine's WM_NULL posts wait for the next pass then, or
+        // each publish would draw a frame; input and hotkeys still end the wait.
         MsgWaitForMultipleObjectsEx(0, nullptr, ours ? 16 : 80,
-                                    QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                                    ours ? QS_ALLINPUT : QS_ALLINPUT & ~QS_POSTMESSAGE, MWMO_INPUTAVAILABLE);
     }
+    // Nothing is pumped from here on, so a start now waits for the mutex instead.
+    if (receiver) ::DestroyWindow(receiver);
 
     if (rendererUp) { ImGui_ImplDX11_Shutdown(); ImGui_ImplWin32_Shutdown(); }
     ImGui::DestroyContext();
     UnregisterHotkeys(hwnd, hotkeys);
+    keepSong();
     panels.SavePreferences(preferencesPath);
     g_engine = nullptr;
     g_panels = nullptr;
     CleanupDevice();
     ::DestroyWindow(hwnd);
     ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    ::UnregisterClassW(kReceiverClass, inst);
+
     if (SUCCEEDED(com)) CoUninitialize();
     return 0;
 }

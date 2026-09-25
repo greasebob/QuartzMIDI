@@ -71,6 +71,20 @@ inline std::string VKToName(int vk) {
     return {};
 }
 
+// True for a key the game plays or the app types: every letter and digit (the
+// notes and the velocity taps), Space and the arrows (sustain, volume and
+// transpose), and the key of each binding in keyMappings (values such as "q",
+// "E" or "ctrl+2"). Bound as a hotkey, the app's own typing would press it.
+template <class KeyMappings> bool IsNoteKey(int vk, const KeyMappings& keyMappings) {
+    if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) return true;
+    if (vk == VK_SPACE || vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN) return true;
+    for (const auto& binding : keyMappings) {
+        const auto& key = binding.second;
+        if (!key.empty() && (VkKeyScanW(static_cast<unsigned char>(key.back())) & 0xff) == vk) return true;
+    }
+    return false;
+}
+
 // Captures the next key for a rebind by polling (with hotkeys unregistered),
 // because registered hotkeys never produce WM_KEYDOWN and Settings may be a
 // separate OS window. `down` is GetAsyncKeyState in the app, a table in tests.
@@ -82,18 +96,22 @@ public:
     template <class Down> void Begin(Down down) {
         for (int vk = 1; vk < 256; ++vk) held_[vk] = down(vk);
     }
-    // Returns the newly pressed key, Cancelled for Escape, or None.
-    template <class Down> int Poll(Down down) {
+    // Returns the newly pressed key, Cancelled for Escape, or None. A key
+    // `refused` names is passed over, and capture keeps listening.
+    template <class Down, class Refused> int Poll(Down down, Refused refused) {
         int pressed = None;
         for (int vk = 1; vk < 256; ++vk) {
             const bool now = down(vk);
             if (!now) { held_[vk] = false; continue; }
             if (held_[vk] || pressed != None) continue;
             if (vk == VK_ESCAPE) pressed = Cancelled;
-            else if (!VKToName(vk).empty()) pressed = vk;
+            else if (VKToName(vk).empty()) continue;
+            else if (refused(vk)) held_[vk] = true;   // passed over until released
+            else pressed = vk;
         }
         return pressed;
     }
+    template <class Down> int Poll(Down down) { return Poll(down, [](int) { return false; }); }
 private:
     std::array<bool, 256> held_{};
 };
@@ -117,6 +135,23 @@ inline std::string HotkeyLabel(std::string name) {
     case VK_SNAPSHOT:         return "PrtSc";
     case VK_RETURN:           return "Enter";
     case VK_BACK:             return "Backspace";
+    case VK_SPACE:            return "Space";
+    case VK_TAB:              return "Tab";
+    case VK_PAUSE:            return "Pause";
+    case VK_LEFT:             return "Left";
+    case VK_RIGHT:            return "Right";
+    case VK_UP:               return "Up";
+    case VK_DOWN:             return "Down";
+    case VK_HOME:             return "Home";
+    case VK_END:              return "End";
+    case VK_INSERT:           return "Insert";
+    case VK_DELETE:           return "Delete";
+    case VK_SCROLL:           return "Scroll Lock";
+    case VK_NUMLOCK:          return "Num Lock";
+    case VK_APPS:             return "Menu";
+    case VK_BROWSER_BACK:     return "Browser Back";
+    // "Browser Forward" is wider than the Settings keycap at the largest text size.
+    case VK_BROWSER_FORWARD:  return "Browser Fwd";
     case VK_MULTIPLY:         return "Num *";
     case VK_ADD:              return "Num +";
     case VK_SUBTRACT:         return "Num -";
