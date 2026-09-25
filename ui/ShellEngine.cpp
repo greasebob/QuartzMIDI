@@ -992,6 +992,7 @@ void ShellEngine::Run(std::stop_token stop) {
         state.converterCanSetUp = install.CanSetUp();
         state.converterGpu = install.gpu;
         state.converterCanSwitch = install.CanSwitch();
+        state.converterGpuUnsupported = install.gpuUnsupported;
         state.nvidiaCard = audio_to_midi::HasNvidiaCard();
     };
     readConverter();
@@ -1992,6 +1993,8 @@ void ShellEngine::Run(std::stop_token stop) {
                     }
                     state.converting = false;
                     state.conversionFailed = kind == Kind::Error;
+                    // A conversion may have found the GPU build cannot run on the card.
+                    if (!state.settingUp && !state.signingIn) readConverter();
                     if (state.settingUp) {
                         // Setup is resumable; downloaded packages are kept.
                         state.settingUp = false;

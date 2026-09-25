@@ -132,12 +132,47 @@ def playlist_entries(link):
     return info.get("title") or "the playlist", entries
 
 
+# Written beside this script when the installed CUDA build has no code for the
+# card; the app then offers to set the GPU build up again. setup.ps1 removes it.
+GPU_UNSUPPORTED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu-unsupported")
+
+
+def runs_on(arch_list, major, minor):
+    """Whether a CUDA build compiled for arch_list runs on a card of compute
+    capability major.minor: machine code for the same major version at or below
+    its minor, the rule PyTorch's own compatibility warning uses."""
+    card = major * 10 + minor
+    for arch in arch_list:
+        kind, _, number = arch.partition("_")
+        if kind == "sm" and number.isdigit() and int(number) // 10 == major and int(number) <= card:
+            return True
+    return False
+
+
 def device(choice):
     if choice != "auto":
         return choice
+    import warnings
+
     import torch
 
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if not torch.cuda.is_available():
+        return "cpu"
+    # PyTorch warns on stderr when the card is too new for the build; the
+    # check below says so once, in the app's terms.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        major, minor = torch.cuda.get_device_capability(0)
+        name = torch.cuda.get_device_name(0)
+    if runs_on(torch.cuda.get_arch_list(), major, minor):
+        if os.path.exists(GPU_UNSUPPORTED):
+            os.remove(GPU_UNSUPPORTED)
+        return "cuda"
+    with open(GPU_UNSUPPORTED, "w", encoding="utf-8") as marker:
+        marker.write(name + "\n")
+    print(f"The GPU install has no code for the {name} (compute capability {major}.{minor}); using the CPU.",
+          flush=True)
+    return "cpu"
 
 
 def reason_for(failure):

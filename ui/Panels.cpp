@@ -2907,7 +2907,7 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     // same width at the same edge. The width fits the widest label either shows,
     // so nothing moves when Convert becomes Cancel.
     float actionWidth = 0;
-    for (const char* label : {"Convert", "Cancel", "Close", "Sign in", "Sign in again", "Install", "Use CPU", "Use GPU"})
+    for (const char* label : {"Convert", "Cancel", "Close", "Sign in", "Sign in again", "Install", "Use CPU", "Use GPU", "Update GPU"})
         actionWidth = std::max(actionWidth, ImGui::CalcTextSize(label).x + 2 * 12 * dpi);
     const float rowStart = ImGui::GetCursorPosX();
     // Progress: an indeterminate bar while running, then the converter's last line,
@@ -3009,17 +3009,20 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     }
 
     // The build the converter runs on, and a setup that swaps it; a CPU install
-    // offers the GPU only when an NVIDIA driver is there.
+    // offers the GPU only when an NVIDIA driver is there. A GPU build with no
+    // code for the card runs on the CPU and is offered its setup again.
     if (state->converterCanSwitch && (state->converterGpu || state->nvidiaCard)) {
+        const bool onGpu = state->converterGpu && !state->converterGpuUnsupported;
         ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted(state->converterGpu ? "Runs on the GPU" : "Runs on the CPU");
+        ImGui::TextUnformatted(onGpu ? "Runs on the GPU" : "Runs on the CPU");
         ImGui::PopStyleColor();
         ImGui::SameLine();
         ImGui::SetCursorPosX(rowStart + width - actionWidth);
         ImGui::BeginDisabled(busy);
-        if (EasedButton(state->converterGpu ? "Use CPU" : "Use GPU", ImVec2(actionWidth, s.metric.controlHeight))) {
-            installNvidia_ = !state->converterGpu;
+        const char* action = state->converterGpuUnsupported ? "Update GPU" : onGpu ? "Use CPU" : "Use GPU";
+        if (EasedButton(action, ImVec2(actionWidth, s.metric.controlHeight))) {
+            installNvidia_ = !onGpu;
             engine.Send({ShellEngine::Action::ConverterSetUp, {}, 0, 0, installNvidia_});
         }
         ImGui::EndDisabled();

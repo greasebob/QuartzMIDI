@@ -224,6 +224,7 @@ struct EngineSnapshot {
     // Installed on PyTorch's CUDA build, and able to be set up again as the other.
     bool converterGpu = false;
     bool converterCanSwitch = false;
+    bool converterGpuUnsupported = false;
     bool nvidiaCard = false;
     bool settingUp = false;
     std::string ActiveVelocityName() const {

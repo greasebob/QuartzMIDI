@@ -193,6 +193,8 @@ try {
     # Delete the ~300 MB of downloaded archives.
     Remove-Item -LiteralPath $downloads -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $partial -Force
+    # convert.py's note that the last CUDA build had no code for the card.
+    Remove-Item -LiteralPath (Join-Path $here 'gpu-unsupported') -Force -ErrorAction SilentlyContinue
     Write-Host 'done: The converter is installed.'
 } catch {
     # Single error: line for the app; setup.partial remains so a rerun resumes.

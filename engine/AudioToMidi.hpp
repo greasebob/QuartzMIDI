@@ -106,6 +106,9 @@ struct Install {
     // setup.ps1 -Nvidia installed a CUDA build of PyTorch (its dist-info is
     // torch-<version>+cu<nnn>); false for the CPU build.
     bool gpu = false;
+    // convert.py found the CUDA build has no code for the card and ran on the
+    // CPU (gpu-unsupported beside it); setup.ps1 -Nvidia replaces the build.
+    bool gpuUnsupported = false;
     bool Found() const { return !python.empty() && !script.empty(); }
     bool CanSetUp() const { return !Found() && !setup.empty(); }
     // An install setup.ps1 made can be run again to swap the CPU and GPU builds;
@@ -181,6 +184,7 @@ inline Install FindInstall(const std::filesystem::path& exeFolder) {
                 if (name.starts_with(L"torch-") && name.ends_with(L".dist-info") && name.find(L"+cu") != std::wstring::npos)
                     found.gpu = true;
             }
+    found.gpuUnsupported = found.gpu && fs::exists(found.script.parent_path() / L"gpu-unsupported", ec);
     return found;
 }
 
