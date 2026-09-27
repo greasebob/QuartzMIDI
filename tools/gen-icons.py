@@ -36,6 +36,7 @@ ICONS = [
     ("Hold", "hand"), ("Tap", "pointer"),
     ("Audio", "audio-lines"), ("Discord", "discord"), ("Roblox", "roblox"),
     ("Help", "circle-question-mark"),
+    ("Repeat", "repeat"), ("Repeat1", "repeat-1"),
 ]
 
 CURVE_STEPS = 10   # enough for a 24-unit glyph at 32 px

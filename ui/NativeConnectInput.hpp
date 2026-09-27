@@ -14,10 +14,13 @@ public:
     void Activate(bool active) override { input_.SetActive(active); active_ = active; }
     void Close() override {
         input_.SetActive(false);
-        input_.CloseDevice(); // Join callbacks before the release sweep.
+        // Joins callbacks, then sends the offs for the notes and pedal left on,
+        // before the release sweep.
+        input_.CloseDevice();
         if (active_) input_.ReleaseAllNumpadKeys();
         active_ = false;
     }
+    bool Busy() const override { return input_.Busy(); }
     ~NativeConnectInput() override { Close(); }
 };
 }

@@ -292,6 +292,7 @@ public:
 
     bool open(const std::wstring& deviceId, MidiInputCallback callback) override {
         close();
+        busy_ = false;
         ULONG pin = 0;
         std::wstring path;
         // Open exactly the named pin or fail; never fall back to another one.
@@ -319,7 +320,10 @@ public:
         request.format.Specifier = KSDATAFORMAT_SPECIFIER_NONE;
 
         HANDLE pinHandle = nullptr;
-        if (KsCreatePin(filter_, &request.connect, GENERIC_READ, &pinHandle) != ERROR_SUCCESS || !pinHandle) {
+        const DWORD created = KsCreatePin(filter_, &request.connect, GENERIC_READ, &pinHandle);
+        if (created != ERROR_SUCCESS || !pinHandle) {
+            // A pin with one instance is refused while another program has it.
+            busy_ = created == ERROR_BUSY || created == ERROR_DEVICE_IN_USE || created == ERROR_SHARING_VIOLATION;
             closeHandles();
             return false;
         }
@@ -358,6 +362,7 @@ public:
 
     bool isOpen() const noexcept override { return pin_ != nullptr; }
     const std::wstring& openedDeviceId() const noexcept override { return openedId_; }
+    bool busy() const noexcept override { return busy_; }
 
 private:
     void closeHandles() {
@@ -456,6 +461,7 @@ private:
     std::atomic<bool> stop_{false};
     MidiInputCallback callback_;
     std::wstring openedId_;
+    bool busy_ = false;
 };
 
 } // namespace

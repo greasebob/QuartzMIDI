@@ -81,13 +81,22 @@ inline std::optional<std::vector<Entry>> Parse(std::span<const std::uint8_t> byt
     return entries;
 }
 
-inline std::span<const std::uint8_t> FromResource(HMODULE module) {
-    HRSRC found = FindResourceW(module, L"QUARTZBUNDLE", MAKEINTRESOURCEW(10));   // RT_RCDATA
+inline std::span<const std::uint8_t> FromResource(HMODULE module, const wchar_t* name = L"QUARTZBUNDLE") {
+    HRSRC found = FindResourceW(module, name, MAKEINTRESOURCEW(10));   // RT_RCDATA
     if (!found) return {};
     HGLOBAL loaded = LoadResource(module, found);
     const void* data = loaded ? LockResource(loaded) : nullptr;
     if (!data) return {};
     return {static_cast<const std::uint8_t*>(data), SizeofResource(module, found)};
+}
+
+// The tracked default config, x64\Release\config.json, which every build
+// carries as RCDATA "QUARTZCONFIG" (Shell.rc). No zip carries a config.json,
+// so extracting a newer one over the folder keeps the user's; this is written
+// only where there is none. Empty in a build without it.
+inline std::string_view DefaultConfig() {
+    const auto bytes = FromResource(GetModuleHandleW(nullptr), L"QUARTZCONFIG");
+    return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
 // Where config, preferences, add-ons and the midi folder live. QUARTZMIDI_DATA

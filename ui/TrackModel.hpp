@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bitset>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -49,5 +50,19 @@ inline bool SoloPianoApplied(const std::vector<TrackRow>& rows) {
 }
 inline bool AllPiano(const std::vector<TrackRow>& rows) {
     return std::all_of(rows.begin(), rows.end(), [](const auto& row) { return row.piano; });
+}
+
+// Slices the mini window's seek bar counts a song's notes in.
+inline constexpr size_t kDensitySlices = 128;
+// Notes struck in each of `slices` equal slices of a song `duration` seconds
+// long, from their times in seconds; one at the very end counts in the last.
+inline std::vector<uint16_t> NoteDensity(const std::vector<double>& strikes, double duration, size_t slices = kDensitySlices) {
+    std::vector<uint16_t> counts(duration > 0 ? slices : 0);
+    for (const double at : strikes) {
+        if (counts.empty() || !(at >= 0) || at > duration) continue;
+        auto& count = counts[(std::min)(slices - 1, static_cast<size_t>(at / duration * static_cast<double>(slices)))];
+        if (count < UINT16_MAX) ++count;
+    }
+    return counts;
 }
 }

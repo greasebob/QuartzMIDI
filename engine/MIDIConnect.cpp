@@ -155,6 +155,7 @@ void MIDIConnect::SetCallbackThreadPriority() {
 }
 void MIDIConnect::OpenDevice(const std::wstring& deviceId) {
     CloseDevice();
+    m_busy = false;
     if (deviceId.empty()) return;
 
     m_input = CreateMidiInput(BackendForDeviceId(deviceId));
@@ -165,6 +166,7 @@ void MIDIConnect::OpenDevice(const std::wstring& deviceId) {
             this->HandleMessage(timestampQpc, data, length);
         });
     if (!opened) {
+        m_busy = m_input->busy();
         m_input.reset();
         return;
     }
@@ -179,6 +181,16 @@ void MIDIConnect::CloseDevice() {
         m_input.reset();
     }
     m_selectedDevice.clear();
+    ReleaseHeld();
+}
+
+void MIDIConnect::ReleaseHeld() {
+    INPUT batched[MAX_BATCH_INPUTS];
+    for (int note = 0; note < 128; ++note)
+        if (m_held[note].exchange(false, std::memory_order_acq_rel))
+            input_latency::send(static_cast<UINT>(Compose(batched, m_keys[note], m_keys[0])), batched, sizeof(INPUT));
+    if (m_pedalDown.exchange(false, std::memory_order_acq_rel))
+        input_latency::send(static_cast<UINT>(Compose(batched, m_sustainKeys, m_keys[0])), batched, sizeof(INPUT));
 }
 
 void MIDIConnect::SetActive(bool active) {
@@ -227,13 +239,17 @@ void MIDIConnect::HandleMessage(uint64_t timestampQpc, const uint8_t* data, size
     case 0x90: // Note On
         // A velocity-0 note-on sends value 0, the same as a note-off.
         inputCount = Compose(batched, m_keys[data1], m_keys[data2]);
+        m_held[data1].store(data2 > 0, std::memory_order_release);
         break;
     case 0x80: // Note Off; release velocity is ignored
         inputCount = Compose(batched, m_keys[data1], m_keys[0]);
+        m_held[data1].store(false, std::memory_order_release);
         break;
     case 0xB0: // Control Change
-        if (data1 == 64) // Sustain pedal
+        if (data1 == 64) { // Sustain pedal
             inputCount = Compose(batched, m_sustainKeys, m_keys[data2]);
+            m_pedalDown.store(data2 > 0, std::memory_order_release);
+        }
         break;
     }
 

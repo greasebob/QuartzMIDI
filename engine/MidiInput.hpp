@@ -16,7 +16,8 @@ enum class MidiBackend {
     WinRT,   // Windows.Devices.Midi, Windows 10+
     WinMM,   // legacy midiIn*, through the vendored RtMidi
     KernelStreaming, // KS MIDI capture pin, which WinRT and WinMM sit on
-    WootingAnalog // analog key depth from the Wooting SDK
+    WootingAnalog, // analog key depth from the Wooting SDK
+    NamedPort // output only: a port this app creates (see MidiOutput.hpp)
 };
 
 struct MidiInputDevice {
@@ -51,6 +52,9 @@ public:
 
     virtual bool isOpen() const noexcept = 0;
     virtual const std::wstring& openedDeviceId() const noexcept = 0;
+
+    // Whether the last open failed because another program holds the port.
+    virtual bool busy() const noexcept { return false; }
 };
 
 // Implemented in KernelStreamingInput.cpp, the only translation unit that

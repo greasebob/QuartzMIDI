@@ -218,7 +218,11 @@ namespace midi {
             {"TRIGGER_THRESHOLD", w.TRIGGER_THRESHOLD},
             {"RELEASE_FRACTION", w.RELEASE_FRACTION},
             {"SHIFT_AMOUNT", w.SHIFT_AMOUNT},
-            {"VELOCITY_SCALE", w.VELOCITY_SCALE}
+            {"VELOCITY_SENSITIVITY", w.VELOCITY_SENSITIVITY},
+            {"MIN_VELOCITY", w.MIN_VELOCITY},
+            {"SUSTAIN_PEDAL_KEY", w.SUSTAIN_PEDAL_KEY},
+            {"SOSTENUTO_PEDAL_KEY", w.SOSTENUTO_PEDAL_KEY},
+            {"SOFT_PEDAL_KEY", w.SOFT_PEDAL_KEY}
         };
     }
 
@@ -227,7 +231,11 @@ namespace midi {
         w.TRIGGER_THRESHOLD = j.value("TRIGGER_THRESHOLD", w.TRIGGER_THRESHOLD);
         w.RELEASE_FRACTION = j.value("RELEASE_FRACTION", w.RELEASE_FRACTION);
         w.SHIFT_AMOUNT = j.value("SHIFT_AMOUNT", w.SHIFT_AMOUNT);
-        w.VELOCITY_SCALE = j.value("VELOCITY_SCALE", w.VELOCITY_SCALE);
+        w.VELOCITY_SENSITIVITY = j.value("VELOCITY_SENSITIVITY", w.VELOCITY_SENSITIVITY);
+        w.MIN_VELOCITY = j.value("MIN_VELOCITY", w.MIN_VELOCITY);
+        w.SUSTAIN_PEDAL_KEY = j.value("SUSTAIN_PEDAL_KEY", w.SUSTAIN_PEDAL_KEY);
+        w.SOSTENUTO_PEDAL_KEY = j.value("SOSTENUTO_PEDAL_KEY", w.SOSTENUTO_PEDAL_KEY);
+        w.SOFT_PEDAL_KEY = j.value("SOFT_PEDAL_KEY", w.SOFT_PEDAL_KEY);
         w.validate();
     }
 
@@ -239,8 +247,13 @@ namespace midi {
         // Any shift beyond ±127 puts every note outside the MIDI range 0..127.
         if (SHIFT_AMOUNT < -127 || SHIFT_AMOUNT > 127)
             throw ConfigException("WOOTING_ANALOG SHIFT_AMOUNT must be between -127 and 127 semitones");
-        if (VELOCITY_SCALE < 0.1 || VELOCITY_SCALE > 20.0)
-            throw ConfigException("WOOTING_ANALOG VELOCITY_SCALE must be between 0.1 and 20");
+        if (VELOCITY_SENSITIVITY < 0.1 || VELOCITY_SENSITIVITY > 10.0)
+            throw ConfigException("WOOTING_ANALOG VELOCITY_SENSITIVITY must be between 0.1 and 10");
+        if (MIN_VELOCITY < 1 || MIN_VELOCITY > 126)
+            throw ConfigException("WOOTING_ANALOG MIN_VELOCITY must be between 1 and 126");
+        for (const int key : {SUSTAIN_PEDAL_KEY, SOSTENUTO_PEDAL_KEY, SOFT_PEDAL_KEY})
+            if (key < 0 || key > 0xE0FF || (key > 0xFF && key < 0xE000))
+                throw ConfigException("WOOTING_ANALOG pedal keys must be set 1 scancodes, or 0 for none");
     }
 
     void to_json(nlohmann::json& j, const UISettings& ui) {

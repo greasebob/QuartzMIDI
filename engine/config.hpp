@@ -83,9 +83,19 @@ namespace midi {
         // "Shift Amount": semitones added while shift is held. At 1, shift gives
         // the sharp, matching the game's layout (upstream defaults to an octave).
         int SHIFT_AMOUNT = 1;
-        // "Velocity Scale": velocity = key travel rate at the trigger * SCALE / 100,
-        // the same formula as upstream.
-        double VELOCITY_SCALE = 2.0;
+        // How loud a strike of a given speed is, 0.1 to 10: each doubling moves
+        // every strike up about a seventh of the range. Replaces upstream's
+        // VELOCITY_SCALE, whose straight line gave 127 to most firm presses;
+        // WootingVelocityFor has the curve and why. An old VELOCITY_SCALE is
+        // not read, since its number means something else.
+        double VELOCITY_SENSITIVITY = 1.0;
+        // Velocity of the gentlest strike, 1 to 126.
+        int MIN_VELOCITY = 1;
+        // Set 1 scancodes of the keys that work the pedals by how far they are
+        // pressed, 0 for none. Extended keys carry 0xE0 in the high byte.
+        int SUSTAIN_PEDAL_KEY = 0x39;   // Space
+        int SOSTENUTO_PEDAL_KEY = 0;
+        int SOFT_PEDAL_KEY = 0;
 
         void validate() const;
     };

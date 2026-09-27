@@ -91,6 +91,7 @@ struct Submission {
     uint32_t untagged = 0;
     Source source = Source::LiveKeys;
     Kind kind = Kind::NoteOn;
+    uint32_t notes = 1; // note-ons carried; autoplay sends a chord's in one call
 };
 
 struct Record {
@@ -215,7 +216,7 @@ public:
         for (const auto& sample : samples(source)) {
             const auto& s = sample.submission;
             if (s.kind != Kind::NoteOn) continue;
-            ++result.notes;
+            result.notes += s.notes;
             result.requested += s.requested;
             result.accepted += s.accepted;
             result.failures += s.failures;

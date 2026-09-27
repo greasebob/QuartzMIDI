@@ -44,22 +44,36 @@ bool IsRobloxWindow(HWND window) noexcept
     return roblox;
 }
 
-namespace {
-
 // Runs on every batch on the note thread, so the foreground-window verdict is
 // cached until the foreground window changes, and the "Roblox is running"
 // check is cached for one second.
-bool KeysMayBeTyped() noexcept
+bool IsShellWindow(HWND window) noexcept
 {
-    constexpr uintptr_t IsRoblox = uintptr_t{1} << 63;
+    wchar_t name[64];
+    if (!GetClassNameW(window, name, static_cast<int>(std::size(name)))) return false;
+    for (const wchar_t* shell : { L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd", L"Progman", L"WorkerW", L"MultitaskingViewFrame",
+                                  L"XamlExplorerHostIslandWindow", L"ForegroundStaging", L"TaskSwitcherWnd", L"Windows.UI.Core.CoreWindow" })
+        if (_wcsicmp(name, shell) == 0) return true;
+    return false;
+}
+
+Foreground ForegroundNow() noexcept
+{
+    constexpr uintptr_t IsRoblox = uintptr_t{1} << 63, IsOwn = uintptr_t{1} << 62, IsShell = uintptr_t{1} << 61,
+                        Flags = IsRoblox | IsOwn | IsShell;
     static std::atomic<uintptr_t> front{0};
-    const auto window = reinterpret_cast<uintptr_t>(GetForegroundWindow()) & ~IsRoblox;
+    const auto window = reinterpret_cast<uintptr_t>(GetForegroundWindow()) & ~Flags;
     uintptr_t known = front.load(std::memory_order_relaxed);
-    if ((known & ~IsRoblox) != window) {
-        known = window | (IsRobloxWindow(reinterpret_cast<HWND>(window)) ? IsRoblox : 0);
+    if ((known & ~Flags) != window) {
+        DWORD process = 0;
+        GetWindowThreadProcessId(reinterpret_cast<HWND>(window), &process);
+        known = window | (IsRobloxWindow(reinterpret_cast<HWND>(window)) ? IsRoblox : 0) |
+                (window && process == GetCurrentProcessId() ? IsOwn : 0) |
+                (window && IsShellWindow(reinterpret_cast<HWND>(window)) ? IsShell : 0);
         front.store(known, std::memory_order_relaxed);
     }
-    if (known & IsRoblox) return true;
+    Foreground result{ reinterpret_cast<HWND>(known & ~Flags), (known & IsRoblox) != 0, (known & IsOwn) != 0, (known & IsShell) != 0, true };
+    if (result.roblox) return result;
 
     static std::atomic<ULONGLONG> checked{0};
     static std::atomic<bool> running{false};
@@ -72,7 +86,18 @@ bool KeysMayBeTyped() noexcept
         running.store(found, std::memory_order_relaxed);
         checked.store(now, std::memory_order_relaxed);
     }
-    return !running.load(std::memory_order_relaxed);
+    result.robloxRunning = running.load(std::memory_order_relaxed);
+    return result;
+}
+
+Foreground (*ForegroundProbe)() noexcept = ForegroundNow;
+
+namespace {
+
+bool KeysMayBeTyped() noexcept
+{
+    const Foreground front = ForegroundNow();
+    return front.roblox || !front.robloxRunning;
 }
 
 } // namespace
@@ -84,13 +109,19 @@ static UINT __fastcall SendInputCall(ULONG cInputs, LPINPUT pInputs, int cbSize)
 
     // Withheld key-downs are not failures: report the whole batch as sent so
     // callers do not count a fault for every note played with the game behind.
+    // They are counted as lost, so a velocity the game never got is sent again.
     INPUT ups[64];
+    bool withheld = false;
     for (ULONG done = 0; done < cInputs; done += static_cast<ULONG>(std::size(ups))) {
         const UINT chunk = static_cast<UINT>((std::min)(cInputs - done, static_cast<ULONG>(std::size(ups))));
         const UINT kept = KeyUpsOnly(pInputs + done, chunk, ups);
+        withheld |= kept < chunk;
         if (kept) ::SendInput(kept, ups, sizeof(INPUT));
     }
+    if (withheld) InputsLost.fetch_add(1, std::memory_order_acq_rel);
     return static_cast<UINT>(cInputs);
 }
+
+std::atomic<uint64_t> InputsLost{0};
 
 extern "C" UINT(__fastcall* InjectInput)(ULONG cInputs, LPINPUT pInputs, int cbSize) = SendInputCall;

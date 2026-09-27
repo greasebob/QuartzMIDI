@@ -3,6 +3,7 @@
 #include "MidiInput.hpp"
 
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -16,6 +17,7 @@
 // windowsapp.lib would also reroute shared Win32 imports.
 #pragma comment(lib, "runtimeobject.lib")
 
+#include "MidiOutput.hpp"
 #include "RtMidi.h"
 #include "WootingAnalog.hpp"
 
@@ -71,6 +73,18 @@ void ensureApartment() {
     }
 }
 
+// A port Windows still lists as enabled but will not open is held by another
+// program: a driver without multi-client support gives it to one at a time.
+bool WinRTPortHeld(const std::wstring& id) {
+    try {
+        const auto info = winrt::Windows::Devices::Enumeration::DeviceInformation::CreateFromIdAsync(winrt::hstring(id)).get();
+        return info && info.IsEnabled();
+    }
+    catch (winrt::hresult_error const&) {
+        return false;
+    }
+}
+
 class WinRTMidiInput final : public IMidiInput {
 public:
     ~WinRTMidiInput() override { close(); }
@@ -97,6 +111,7 @@ public:
 
     bool open(const std::wstring& deviceId, MidiInputCallback callback) override {
         close();
+        m_busy = false;
         if (deviceId.empty()) return false;
         try {
             ensureApartment();
@@ -105,7 +120,7 @@ public:
         catch (winrt::hresult_error const&) {
             m_port = nullptr;
         }
-        if (!m_port) return false;
+        if (!m_port) { m_busy = WinRTPortHeld(deviceId); return false; }
 
         auto delivery = std::make_shared<Delivery>();
         delivery->callback = std::move(callback);
@@ -145,8 +160,10 @@ public:
 
     bool isOpen() const noexcept override { return static_cast<bool>(m_port); }
     const std::wstring& openedDeviceId() const noexcept override { return m_openedId; }
+    bool busy() const noexcept override { return m_busy; }
 
 private:
+    bool m_busy = false;
     struct Delivery {
         MidiInputCallback callback;
         std::atomic<bool> open{true};
@@ -196,8 +213,10 @@ public:
 
     bool open(const std::wstring& deviceId, MidiInputCallback callback) override {
         close();
+        m_busy = false;
         if (deviceId.empty()) return false;
 
+        int target = -1;
         try {
             m_in = new RtMidiIn(RtMidi::Api::WINDOWS_MM, "QuartzMIDI", 100);
             const unsigned count = m_in->getPortCount();
@@ -208,12 +227,13 @@ public:
             for (unsigned i = 0; i < count; ++i) names.push_back(widen(m_in->getPortName(i)));
 
             // Fail when the device is missing; never fall back to port 0.
-            const int target = ResolveWinMMPort(deviceId, names);
+            target = ResolveWinMMPort(deviceId, names);
             if (target < 0) { destroy(); return false; }
 
             m_callback = std::move(callback);
             m_in->setCallback(&WinMMMidiInput::trampoline, this);
-            m_in->ignoreTypes(true, true, true);
+            // Active Sensing passes, so live input can tell a keyboard that went quiet.
+            m_in->ignoreTypes(true, true, false);
             m_in->setBufferSize(256, 1);
             m_in->openPort(static_cast<unsigned>(target));
             m_openedId = deviceId;
@@ -221,9 +241,12 @@ public:
         }
         catch (RtMidiError const&) {
             destroy();
+            m_busy = target >= 0 && WinMMInputHeld(static_cast<unsigned>(target));
             return false;
         }
     }
+
+    bool busy() const noexcept override { return m_busy; }
 
     void close() override {
         if (m_in) {
@@ -258,9 +281,18 @@ private:
         m_in = nullptr;
     }
 
+    // Whether another program holds the port: WinMM answers so when asked to open it.
+    static bool WinMMInputHeld(unsigned port) {
+        HMIDIIN handle = nullptr;
+        const MMRESULT result = midiInOpen(&handle, port, 0, 0, CALLBACK_NULL);
+        if (result == MMSYSERR_NOERROR) midiInClose(handle);
+        return result == MMSYSERR_ALLOCATED;
+    }
+
     RtMidiIn* m_in = nullptr;
     MidiInputCallback m_callback;
     std::wstring m_openedId;
+    bool m_busy = false;
 };
 
 } // namespace
@@ -304,6 +336,10 @@ void SetMidiInputEnumerator(MidiInputEnumerator enumerator) {
 
 std::vector<MidiInputDevice> EnumerateMidiInputs() {
     if (g_enumerator) return g_enumerator();
+    // The engine's presence check lists from a thread of its own, so one
+    // listing runs at a time; the Wooting SDK starts up on its first.
+    static std::mutex listing;
+    std::lock_guard lock(listing);
     WinRTMidiInput winrtInput;
     auto devices = winrtInput.enumerate();
 
@@ -331,6 +367,9 @@ std::vector<MidiInputDevice> EnumerateMidiInputs() {
         }
     }
 
+    // A port this app plays into would feed live input its own notes.
+    std::erase_if(devices, [](const MidiInputDevice& device) { return IsOwnMidiPort(device.group); });
+
     if (WootingAnalogAvailable()) {
         auto wooting = CreateWootingAnalogInput();
         // A Wooting keyboard reads analog key depth through the Wooting SDK,
@@ -356,7 +395,9 @@ int ResolveWinMMPort(const std::wstring& deviceId, const std::vector<std::wstrin
     unsigned index = 0;
     std::wstring wanted;
     if (!parseWinMMId(deviceId, index, wanted)) return -1;
-    const std::wstring target = StripRtMidiPortIndex(wanted);
+    // The id holds the name already without RtMidi's index, so a name that
+    // ends in a number ("Digital Piano 2") keeps it.
+    const std::wstring& target = wanted;
 
     if (!target.empty()) {
         // The stored index breaks ties: try it first, but accept it only if

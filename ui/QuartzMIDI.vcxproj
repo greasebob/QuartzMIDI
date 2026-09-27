@@ -13,7 +13,7 @@
   <ItemDefinitionGroup>
     <!-- Level3 because the vendored ImGui sources are not warning-clean at Level4. -->
     <ClCompile><AdditionalOptions>/d1trimfile:"$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))" %(AdditionalOptions)</AdditionalOptions><WarningLevel>Level3</WarningLevel><LanguageStandard>stdcpp20</LanguageStandard><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;__WINDOWS_MM__;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\third_party\imgui;$(MSBuildThisFileDirectory)..\engine;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories><MultiProcessorCompilation>true</MultiProcessorCompilation></ClCompile>
-    <Link><SubSystem>Windows</SubSystem><AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;dwmapi.lib;avrt.lib;winmm.lib;ole32.lib;shell32.lib;comdlg32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><SubSystem>Windows</SubSystem><AdditionalOptions>/PDBALTPATH:%_PDB% %(AdditionalOptions)</AdditionalOptions><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;user32.lib;gdi32.lib;dwmapi.lib;avrt.lib;winmm.lib;ole32.lib;shell32.lib;comdlg32.lib;winhttp.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
     <Manifest><AdditionalManifestFiles>$(MSBuildThisFileDirectory)Shell.manifest;%(AdditionalManifestFiles)</AdditionalManifestFiles></Manifest>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -23,6 +23,7 @@
     <ClCompile Include="Panels.cpp" />
     <ClCompile Include="TrackModel.cpp" />
     <ClCompile Include="ShellEngine.cpp" />
+    <ClCompile Include="UpdateCheck.cpp" />
     <ClCompile Include="..\engine\PlaybackCore.cpp" />
     <ClCompile Include="..\engine\MIDIParser.cpp" />
     <ClCompile Include="..\engine\ConfigHandler.cpp" />
@@ -49,6 +50,7 @@
     <ClInclude Include="Panels.hpp" />
     <ClInclude Include="TrackModel.hpp" />
     <ClInclude Include="ShellEngine.hpp" />
+    <ClInclude Include="UpdateCheck.hpp" />
     <ClInclude Include="AutoVolume.hpp" />
     <ClInclude Include="VelocityModel.hpp" />
     <ClInclude Include="HotkeyNames.hpp" />
@@ -56,6 +58,10 @@
     <ClInclude Include="HelpModel.hpp" />
     <ClInclude Include="AddonKey.hpp" />
     <ClInclude Include="Bundle.hpp" />
+    <ClInclude Include="SavedFiles.hpp" />
+    <ClInclude Include="WindowCapture.hpp" />
+    <ClInclude Include="MiniFocus.hpp" />
+    <ClInclude Include="KeyTest.hpp" />
     <ClInclude Include="..\engine\Skin.hpp" />
   </ItemGroup>
   <ItemGroup><ResourceCompile Include="Shell.rc" /></ItemGroup>

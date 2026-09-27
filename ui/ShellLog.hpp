@@ -3,6 +3,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -14,10 +15,35 @@ namespace shell {
 class ShellLog {
 public:
     static constexpr size_t Capacity = 256 * 1024;
+    // The log file's size before it starts again, the one before kept beside it.
+    static constexpr uint64_t FileCapacity = 1024 * 1024;
     static ShellLog& Instance() { static ShellLog log; return log; }
+    ~ShellLog() { if (file_ != INVALID_HANDLE_VALUE) CloseHandle(file_); }
+    // Also writes the log to path as it comes, so it outlives the app and a
+    // crash report can quote it. Past FileCapacity the file moves to
+    // <name>.old<extension> and a new one starts. An empty path stops it.
+    void SetFile(const std::filesystem::path& path) {
+        std::lock_guard lock(mutex_);
+        if (file_ != INVALID_HANDLE_VALUE) CloseHandle(file_);
+        file_ = INVALID_HANDLE_VALUE;
+        path_ = path;
+        if (path_.empty()) return;
+        OpenFile(OPEN_ALWAYS);
+        SYSTEMTIME now; GetLocalTime(&now);
+        char started[64];
+        snprintf(started, sizeof(started), "---- started %04u-%02u-%02u %02u:%02u:%02u ----\n",
+                 now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
+        WriteFileText(started);
+    }
+    std::filesystem::path OldFile() const {
+        auto old = path_;
+        old.replace_filename(path_.stem().wstring() + L".old" + path_.extension().wstring());
+        return old;
+    }
     void Append(const std::string& text) {
         if (text.empty()) return;
         std::lock_guard lock(mutex_);
+        WriteFileText(text);
         text_ += text;
         if (text_.size() > Capacity) {
             // Trim to 7/8 of Capacity so a full log isn't shifted on every append.
@@ -36,9 +62,31 @@ public:
         return cached_;
     }
 private:
+    void OpenFile(DWORD disposition) {
+        file_ = CreateFileW(path_.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
+        LARGE_INTEGER size{};
+        fileSize_ = file_ != INVALID_HANDLE_VALUE && GetFileSizeEx(file_, &size) ? static_cast<uint64_t>(size.QuadPart) : 0;
+    }
+    // Under mutex_. Written through at once, so what a crash leaves is on disk.
+    void WriteFileText(const std::string& text) {
+        if (file_ == INVALID_HANDLE_VALUE) return;
+        if (fileSize_ && fileSize_ + text.size() > FileCapacity) {
+            CloseHandle(file_);
+            MoveFileExW(path_.c_str(), OldFile().c_str(), MOVEFILE_REPLACE_EXISTING);
+            OpenFile(CREATE_ALWAYS);
+            if (file_ == INVALID_HANDLE_VALUE) return;
+        }
+        DWORD written = 0;
+        WriteFile(file_, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+        fileSize_ += written;
+    }
     std::mutex mutex_;
     std::string text_;
     std::shared_ptr<const std::string> cached_;
+    std::filesystem::path path_;
+    HANDLE file_ = INVALID_HANDLE_VALUE;
+    uint64_t fileSize_ = 0;
 };
 
 template<class Char> class LogBuffer final : public std::basic_streambuf<Char> {

@@ -42,7 +42,8 @@ inline const DeviceGroup* SelectedGroup(const std::vector<DeviceGroup>& groups, 
 }
 inline std::wstring PreferredInput(const DeviceGroup& group, const std::wstring& selected) {
     for (const auto& input : group.inputs) if (input.id == selected) return selected;
-    for (const auto backend : {MidiBackend::KernelStreaming, MidiBackend::WinRT, MidiBackend::WinMM, MidiBackend::WootingAnalog})
+    for (const auto backend : {MidiBackend::KernelStreaming, MidiBackend::WinRT, MidiBackend::WinMM, MidiBackend::WootingAnalog,
+                               MidiBackend::NamedPort})
         for (const auto& input : group.inputs) if (input.backend == backend) return input.id;
     return {};
 }
@@ -64,8 +65,10 @@ inline std::wstring ListedId(const std::vector<LiveDevice>& devices, const std::
 // The id a device waiting to come back is listed under now. A Kernel Streaming
 // or WinRT id names the USB port, so a device plugged into another port is
 // found by its group on the same transport, when one row alone has it there.
+// Nothing waits without an id, whatever group is left from before.
 inline std::wstring ReturnedId(const std::vector<LiveDevice>& devices, const std::wstring& id, MidiBackend backend,
                                const std::wstring& group) {
+    if (id.empty()) return {};
     if (auto listed = ListedId(devices, id); !listed.empty() || group.empty() || backend == MidiBackend::WinMM) return listed;
     const LiveDevice* match = nullptr;
     for (const auto& device : devices) {
@@ -84,6 +87,23 @@ inline bool DeviceGone(const std::vector<LiveDevice>& devices, const std::wstrin
     const auto listed = [&](auto match) { return std::any_of(devices.begin(), devices.end(), match); };
     return listed([&](const LiveDevice& device) { return device.backend == backend; }) || group.empty() ||
            !listed([&](const LiveDevice& device) { return device.group == group; });
+}
+// Whether a scan is owed between the device changes Windows reports: the chosen
+// device, listed at the last scan, is not listed now, or the one waiting to
+// come back is. A deleted loopMIDI port or a device that goes quiet may send
+// no device change.
+inline bool PresenceChanged(const std::vector<LiveDevice>& scanned, const std::vector<LiveDevice>& now,
+                            const std::wstring& chosen, const std::wstring& waiting, MidiBackend waitingBackend,
+                            const std::wstring& waitingGroup) {
+    if (!chosen.empty() && !ListedId(scanned, chosen).empty() && ListedId(now, chosen).empty()) return true;
+    return !waiting.empty() && !ReturnedId(now, waiting, waitingBackend, waitingGroup).empty();
+}
+// The name a device waiting to come back is shown under: its group, the name
+// it was listed under, or for a WinMM id the name the id carries.
+inline std::wstring WaitingName(const std::wstring& id, const std::wstring& group) {
+    if (id.empty() || !group.empty()) return id.empty() ? std::wstring() : group;
+    const size_t bar = id.find(L'|');
+    return id.rfind(L"winmm:", 0) == 0 && bar != std::wstring::npos ? id.substr(bar + 1) : std::wstring();
 }
 // The chosen device's group for DeviceGone, from the last list that had it. A
 // failed listing leaves the device out of the list it rebuilds, so a second

@@ -28,8 +28,14 @@ public:
     void CloseDevice();
     inline bool IsActive() const { return m_isActive.load(std::memory_order_relaxed); }
     inline const std::wstring& GetSelectedDevice() const { return m_selectedDevice; }
+    // Whether the last OpenDevice failed because another program holds the port.
+    inline bool Busy() const { return m_busy; }
     void SetActive(bool active);
     void ReleaseAllNumpadKeys();
+    // Tells the game every note it was told is on is off, and lifts the pedal
+    // if it was left down. CloseDevice calls it once the transport is closed,
+    // so no way of closing leaves the game's notes or pedal on.
+    void ReleaseHeld();
 
 private:
     // One message from the open transport. Safe to call concurrently: the
@@ -63,6 +69,10 @@ private:
     std::unique_ptr<IMidiInput> m_input;
     std::wstring m_selectedDevice;
     std::atomic<bool> m_isActive;
+    bool m_busy = false;
+    // The notes the game was told are on, and whether the pedal is down.
+    std::array<std::atomic<bool>, 128> m_held{};
+    std::atomic<bool> m_pedalDown{false};
 
     static HANDLE s_mmcssHandle;
     static DWORD s_mmcssTaskIndex;

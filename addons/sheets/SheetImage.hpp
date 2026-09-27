@@ -68,9 +68,10 @@ inline Gdiplus::Color ColourFromCss(const char* css) {
     return Gdiplus::Color(255, hex(1), hex(3), hex(5));
 }
 
-// Run: text of one colour and weight. Word: a chord plus its separator, never
-// split across lines. Line: a sheet line, wrapped to width when drawn.
-struct ImageRun { std::wstring text; Gdiplus::Color colour; bool outOfRange = false; };
+// Run: text of one colour and weight, and the pedal level of the highlight
+// behind it, -1 for none. Word: a chord plus its separator, never split across
+// lines. Line: a sheet line, wrapped to width when drawn.
+struct ImageRun { std::wstring text; Gdiplus::Color colour; bool outOfRange = false; int pedalHighlight = -1; };
 struct ImageWord { std::vector<ImageRun> runs; };
 struct ImageLine { std::vector<ImageWord> words; };
 
@@ -84,8 +85,11 @@ inline std::vector<ImageLine> ImageLines(const StyledResult& r) {
         if (item.kind == Kind::Chord) {
             ImageWord word;
             const auto colour = ColourFromCss(RhythmColour(item.rhythm));
-            for (const auto& segment : item.segments) word.runs.push_back({Wide(segment.text), colour, segment.outOfRange});
-            if (!item.separator.empty()) word.runs.push_back({Wide(item.separator), colour, false});
+            // As SheetBody draws them: the chord at its level, the separator
+            // at it while the pedal is held into the next chord.
+            const auto highlight = [&](int level) { return PedalHighlight(level, r.pedalMarks).empty() ? -1 : level; };
+            for (const auto& segment : item.segments) word.runs.push_back({Wide(segment.text), colour, segment.outOfRange, highlight(item.pedal)});
+            if (!item.separator.empty()) word.runs.push_back({Wide(item.separator), colour, false, highlight(item.pedalHeld ? item.pedal : 0)});
             lines.back().words.push_back(std::move(word));
         } else if (item.kind == Kind::Comment) {
             // Match the text output: blank line, comment, blank line.
@@ -139,8 +143,15 @@ inline std::pair<int, int> SavePng(const StyledResult& r, const std::string& tit
     };
     struct Placed { float x; float y; detail::ImageRun run; };
     std::vector<Placed> placed;
+    // Pedal highlights, drawn as the page draws them: behind the text's cell.
+    struct PedalHighlightRect { float x0; float x1; float y; int level; };
+    std::vector<PedalHighlightRect> pedalHighlights;
+    Gdiplus::FontFamily family;
+    regular.GetFamily(&family);
+    const float textBottom = fontPx * static_cast<float>(family.GetCellAscent(Gdiplus::FontStyleRegular) +
+        family.GetCellDescent(Gdiplus::FontStyleRegular)) / static_cast<float>(family.GetEmHeight(Gdiplus::FontStyleRegular));
     float y = pad, widest = 0;
-    const std::wstring heading = detail::Wide(title);
+    const std::wstring heading = detail::Wide(detail::Heading(title, r.difficulty));
     if (!heading.empty()) {
         placed.push_back({pad, y, {heading, Gdiplus::Color(255, 0xaa, 0xa4, 0xb3), false}});
         widest = (std::max)(widest, widthOf(heading, false));
@@ -154,7 +165,9 @@ inline std::pair<int, int> SavePng(const StyledResult& r, const std::string& tit
             if (x > pad && x - pad + wordWidth > wrapWidth) { x = pad; y += lineHeight; }
             for (const auto& run : word.runs) {
                 placed.push_back({x, y, run});
-                x += widthOf(run.text, run.outOfRange);
+                const float width = widthOf(run.text, run.outOfRange);
+                if (run.pedalHighlight >= 0) pedalHighlights.push_back({x, x + width, y, run.pedalHighlight});
+                x += width;
             }
             widest = (std::max)(widest, x - pad);
         }
@@ -168,6 +181,12 @@ inline std::pair<int, int> SavePng(const StyledResult& r, const std::string& tit
     Gdiplus::Graphics g(&bitmap);
     g.Clear(Gdiplus::Color(255, 0x2D, 0x2A, 0x32));
     g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+    Gdiplus::SolidBrush downBrush(detail::ColourFromCss(detail::kPedalDownColour)), upBrush(detail::ColourFromCss(detail::kPedalUpColour));
+    for (const auto& band : pedalHighlights) {
+        // Part way down fills the lower half, as the page's gradient does.
+        const float top = band.level == 1 ? band.y + textBottom / 2 : band.y;
+        g.FillRectangle(band.level > 0 ? &downBrush : &upBrush, band.x0, top, band.x1 - band.x0, band.y + textBottom - top);
+    }
     for (const auto& p : placed) {
         Gdiplus::SolidBrush brush(p.run.colour);
         g.DrawString(p.run.text.c_str(), -1, p.run.outOfRange ? &heavy : &regular, Gdiplus::PointF(p.x, p.y), &format, &brush);

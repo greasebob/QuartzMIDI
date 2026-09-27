@@ -28,6 +28,8 @@ public:
     ~Trace();
     Trace(const Trace&) = delete;
     Trace& operator=(const Trace&) = delete;
+    // How many note-ons the traced call carries: a chord's go out in one.
+    void notes(uint32_t count) noexcept { submission_.notes = count; }
 };
 
 // Sends through InjectInput, keeping the caller's batch boundaries. Tags a

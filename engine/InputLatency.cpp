@@ -124,11 +124,14 @@ Trace::~Trace() {
 
 UINT send(UINT count, const INPUT* inputs, int cbSize) noexcept {
     auto* trace = currentTrace;
-    if (!trace || !trace->submission_.id)
-        return InjectInput(count, const_cast<INPUT*>(inputs), cbSize);
+    if (!trace || !trace->submission_.id) {
+        const UINT returned = InjectInput(count, const_cast<INPUT*>(inputs), cbSize);
+        if (returned != count) InputsLost.fetch_add(1, std::memory_order_acq_rel);
+        return returned;
+    }
 
     auto& s = trace->submission_;
-    INPUT tagged[64];
+    INPUT tagged[256];   // a chord goes out in one call
     bool canTag = inputs && count <= std::size(tagged) && cbSize == sizeof(INPUT);
     if (canTag) {
         for (UINT i = 0; i < count; ++i) {
@@ -155,6 +158,7 @@ UINT send(UINT count, const INPUT* inputs, int cbSize) noexcept {
     // A return greater than count is a failure, never evidence of delivered input.
     s.accepted += returned <= count ? returned : 0;
     if (returned != count) {
+        InputsLost.fetch_add(1, std::memory_order_acq_rel);
         ++s.failures;
         s.error = returned > count ? ERROR_INVALID_DATA : error;
     }

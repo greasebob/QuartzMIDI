@@ -31,7 +31,7 @@ inline const std::vector<HelpEntry>& HelpEntries() {
         {"Getting Started", "How do I control a song from inside the game?",
          "Use the hotkeys shown beside the song's title. To change them, open Settings and go to Hotkeys."},
         {"Getting Started", "Should I use 61 or 88 keys?",
-         "Choose the one that matches your game's piano. On 61 keys, turn on Fold out-of-range notes onto the keys in Settings."},
+         "Choose the one that matches your game's piano, and turn on Fold out-of-range notes onto the keys in Settings."},
 
         {"Playback", "Why does Solo Piano leave a track playing, or mute a piano?",
          "Solo Piano goes by the instrument each track names. Open Tracks and use Mute or Solo to correct it."},

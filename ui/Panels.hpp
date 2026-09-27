@@ -7,6 +7,7 @@
 #include "HelpModel.hpp"
 #include "ThemeModel.hpp"
 #include "InputLatency.hpp"
+#include "UpdateCheck.hpp"
 #include <windows.h>
 
 namespace shell {
@@ -62,11 +63,25 @@ struct Preferences {
     // Restore mini mode at startup. The shell switches after placing the full
     // window, because mini records the full window's position to return to.
     bool startMini = false;
+    // No taskbar button and not in Alt+Tab. Applied only while the show/hide
+    // key works, and turned off when that key is unbound.
+    bool hideFromTaskbar = false;
     // The tour plays once per build that has one. Defaults to true so a Panels
     // that loaded no settings (as in tests) never plays it.
     bool tourSeen = true;
     // Build Help last showed its what's-new view for; a different build shows it once more.
     std::string helpBuild;
+    // Every window of the app is left out of screenshots, recordings and screen
+    // sharing; the shell applies it where Windows can (captureExclusionOffered).
+    bool hideFromCapture = false;
+    // Scan for MIDI files: the folders added to those it offers, and the
+    // folders left unticked.
+    std::vector<std::filesystem::path> scanFolders, scanSkipped;
+    // And the drives ticked, which start unticked, and the folders ignored
+    // from a result's heading, which no later scan enters.
+    std::vector<std::filesystem::path> scanPicked, scanIgnored;
+    // Ask GitHub once at start for a newer release, offered in the status bar.
+    bool checkForUpdates = true;
 };
 class Panels {
 public:
@@ -78,11 +93,15 @@ public:
     // Adds a theme file and selects it, as Import does.
     void ImportTheme(const std::filesystem::path& path);
     skin::Skin ActiveSkin() const { return themes.Active(preferences.theme).Shown(preferences.dark); }
-    // Class for a separate OS window. It must carry TopMost when always-on-top is
-    // set, or it opens behind the main window and cannot be raised.
+    // Whether the main window stays above others: with Always on top, and always
+    // in mini, which a borderless game would otherwise cover. Leaving mini goes
+    // back to the switch, which mini never changes.
+    bool Topmost() const { return preferences.alwaysOnTop || miniMode; }
+    // Class for a separate OS window. It must carry TopMost while the main window
+    // is topmost, or it opens behind the main window and cannot be raised.
     ImGuiWindowClass OwnWindowClass() const {
         ImGuiWindowClass windowClass;
-        windowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge | (preferences.alwaysOnTop ? ImGuiViewportFlags_TopMost : 0);
+        windowClass.ViewportFlagsOverrideSet = ImGuiViewportFlags_NoAutoMerge | (Topmost() ? ImGuiViewportFlags_TopMost : 0);
         return windowClass;
     }
     bool themeEditorOpen = false;
@@ -94,6 +113,28 @@ public:
     // Hotkey being rebound in Settings, or -1. The shell unregisters the hotkeys,
     // polls for the key and sends the rebind.
     int hotkeyCapture = -1;
+    // Song whose own key is being captured, from its menu in MIDI Files or its
+    // row in Settings, or empty. Cleared when neither is drawn any more.
+    std::filesystem::path songHotkeyCapture;
+    // ImGui time the armed capture last passed over a key it refuses, such as a
+    // note key, or -1; its button flashes in the warning colour for a moment.
+    double captureRefusedAt = -1;
+    static constexpr double kRefusedFlash = .4;
+    // Whether each of the snapshot's song keys registered; the shell sets it.
+    std::vector<bool> songKeysAvailable;
+    // Wooting pedal whose key is being learnt, or -1. The shell listens to the
+    // Wooting for the key and sends it.
+    int wootingPedalCapture = -1;
+    // Settings' Test keys: a one-frame request the shell answers by sending a key
+    // to the app's own window, while it runs, and the line it ends with.
+    bool keyTestRequested = false;
+    bool keyTesting = false, keyTestPassed = false;
+    std::string keyTestResult;
+    // Set by the shell where Windows can leave a window out of capture; without
+    // it, Settings has no Hide from screen capture.
+    bool captureExclusionOffered = false;
+    // A newer release the shell's check found, shown while Check for updates is on.
+    AvailableUpdate update;
     bool velocityExpanded = false;
     bool tracksExpanded = true;
     bool miniMode = false;
@@ -110,6 +151,8 @@ public:
     bool openConvert = false;
     // One-frame request to open the library save confirmation.
     bool openLibrarySave = false;
+    // One-frame request to open Scan for MIDI files.
+    bool openScan = false;
     // One-frame request to open Help; helpAdded selects its what's-new filter.
     bool openHelp = false;
     bool helpAdded = false;
@@ -155,12 +198,14 @@ public:
               float dpi, ShellEngine& engine);
     // True while something changes with time alone (the timing readout polls every
     // 200 ms, a control's transition moves), so the on-demand renderer keeps drawing.
-    bool Animating() const { return measuring_ || hotkeyCapture >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
+    bool Animating() const { return measuring_ || hotkeyCapture >= 0 || !songHotkeyCapture.empty() || wootingPedalCapture >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
 private:
     float HeightGrowth(bool tracksOpen, bool velocityOpen) const;
     void DrawHelp(const Fonts&, const skin::Skin&, float, const EngineSnapshot&);
     void DrawTour(const Fonts&, const skin::Skin&, float, ImVec2, ImVec2);
     bool performerRow_ = false;
+    // Set by whatever draws the armed song capture this frame.
+    bool songCaptureDrawn_ = false;
     char helpSearch_[128]{};
     int helpFolderRevealed_ = -1;
     // Screen rect of each tour stop's control, recorded as it draws, so the tour
@@ -187,6 +232,8 @@ private:
     // newer engine error replaces it.
     mutable std::string panelError_;
     std::string errorSeen_;
+    // The engine's resetNotice has been shown.
+    bool resetShown_ = false;
     void SaveThemes() const;
     void DrawThemeEditor(const Fonts&, const skin::Skin&, float);
     bool themeEditorWasOpen_ = false;
@@ -197,6 +244,8 @@ private:
     // Theme editor Size while its slider is held, or 0.
     float themeSizeDrag_ = 0;
     char themeName_[64]{};
+    // The own MIDI port's name as typed; sent when the field is left.
+    char portName_[128]{};
     std::string themeNameFor_;
     char search_[256]{};
     FileSort fileSort_ = FileSort::Name;
@@ -204,6 +253,33 @@ private:
     std::shared_ptr<const std::vector<MidiEntry>> filteredFiles_;
     std::string filteredQuery_;
     bool filteredFolders_ = true;
+    std::shared_ptr<const LibraryLists> filteredLibrary_;
+    int filteredList_ = kFolderList;
+    // The playlist or queue shown, as its rows draw: a library file's entry, or
+    // one named by its full path for a file outside the library.
+    std::vector<MidiEntry> listEntries_;
+    // Requests from the list menus, opened at the panel's level: name a new
+    // playlist (with a first song when one is set), rename one, delete one.
+    bool namePlaylist_ = false;
+    int renamePlaylist_ = -1, deletePlaylist_ = -1;
+    // The playlist being renamed (-1 for a new one) and the one asked about deleting.
+    int renamingPlaylist_ = -1, deletingPlaylist_ = -1;
+    std::filesystem::path playlistFirstSong_;
+    char playlistName_[128]{};
+    // The list menu, opened under a dragged song, closes when the drag ends.
+    bool listsByDrag_ = false;
+    // A song in the Trash whose Delete was chosen, and the one asked about.
+    std::filesystem::path deleteSong_, deletingSong_;
+    // Empty Trash was chosen, to be asked about.
+    bool emptyTrash_ = false;
+    // Scan for MIDI files: the user's folders and the drives it offers, read as
+    // it opens; the rows of what a scan found (a file's index, or -1 - n for the
+    // nth folder's heading), which are ticked, and whether they are shown.
+    std::vector<std::filesystem::path> scanUserFolders_, scanDrives_;
+    std::vector<int> scanRows_;
+    std::vector<char> scanChosen_;
+    uint64_t scanChosenRevision_ = 0;
+    bool scanResultsShown_ = false;
     std::vector<size_t> fileFilter_;
     // Current folder, as a prefix of MidiEntry::name; search covers it and its
     // sub-folders.
@@ -222,6 +298,15 @@ private:
     float seekPosition_ = 0;
     bool seeking_ = false;
     uint64_t seekGeneration_ = 0;
+    // The loop section handle held or awaiting the engine (see SectionHandles),
+    // its time, and the load it belongs to.
+    int loopHandle_ = -1;
+    float loopHandleAt_ = 0;
+    uint64_t loopHandleGeneration_ = 0;
+    // True when the seek groove carries the loop's section; forgets a handle of an earlier load.
+    bool LoopSection(const EngineSnapshot& state);
+    // Sends the time of a handle SectionHandles let go (0 the start, 1 the end; -1 none).
+    void SendLoopHandle(int released, ShellEngine& engine, const EngineSnapshot& state) const;
     // Load the Tracks table last scrolled to the top for.
     uint64_t tracksGeneration_ = 0;
     uint64_t handledSheetRevision_ = 0;
@@ -253,6 +338,9 @@ private:
     void SettingsControl(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, float);
     void DrawMini(HWND, const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, ImVec2);
     void DrawStatus(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, float, float);
+    // The armed capture's ring over the last item: the accent, or just after a
+    // refused key the warning colour with a tint of it inside.
+    void CaptureRing(ImDrawList* draw, const skin::Skin& s, float dpi) const;
     int nameOperation_ = 0;
     char curveName_[128]{};
     bool focusCurveName_ = false;
@@ -279,9 +367,9 @@ private:
     // reports the value or an error.
     bool cutoffPending_ = false;
     std::string cutoffPendingError_;
-    std::array<float, 3> wootingPreview_{0.5f, 12.f, 5.f};
-    std::array<bool, 3> wootingEditing_{};
-    std::array<bool, 3> wootingPending_{};
+    std::array<float, 4> wootingPreview_{0.25f, 1.f, 1.f, 1.f};
+    std::array<bool, 4> wootingEditing_{};
+    std::array<bool, 4> wootingPending_{};
     bool scannedLive_ = false;
     bool scannedOutput_ = false;
     bool measuring_ = false;

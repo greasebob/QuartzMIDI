@@ -12,6 +12,8 @@ public:
     virtual bool Open(const std::wstring& id) = 0;
     virtual void Activate(bool active) = 0;
     virtual void Close() = 0;
+    // Whether the last Open failed because another program holds the port.
+    virtual bool Busy() const { return false; }
 };
 using ConnectFactory = std::function<std::unique_ptr<ConnectInput>()>;
 }

@@ -36,6 +36,7 @@
 #include <fstream>
 #include <condition_variable>
 #include <functional>
+#include <optional>
 
 #include "Performer.hpp"
 
@@ -79,10 +80,10 @@ enum class EventType : uint8_t {
 // =====================================================
 struct alignas(64) NoteEvent {
     std::chrono::nanoseconds time;
-    std::string_view note;    // e.g. "C4" or "sustain"
+    std::string_view note;    // e.g. "C4", or a pedal from kPedalNames
     EventType action;         // Press or Release
     int velocity;
-    bool isSustain;           // true if sustain pedal event
+    bool isSustain;           // true for any pedal; note says which
     int sustainValue;
     int trackIndex;
     // Set by the take: skip drops the note from this playthrough; hold is how
@@ -164,13 +165,54 @@ struct RawNoteEvent {
     int trackIndex;
 };
 
-// Folds an out-of-range MIDI note onto the game's 61 keys, C2 to C7 (36..96).
-// Shifts by whole octaves so the pitch class is kept: notes below land in the
-// lowest octave, notes above in the highest. Any distance folds.
-constexpr int FoldOntoSixtyOneKeys(int midi) noexcept {
-    const int pitch = midi % 12;
-    return midi < 36 ? 36 + pitch : midi > 96 ? (pitch == 0 ? 96 : 84 + pitch) : midi;
+// The three piano pedals a file can carry, by the controller that sends each.
+// note_or_control names them; only sustain reaches the keystroke target.
+inline constexpr std::string_view kPedalNames[3] = { "sustain", "sostenuto", "soft" };
+inline constexpr uint8_t kPedalControllers[3] = { 64, 66, 67 };
+
+// Index into kPedalNames for a controller or an event name, or -1.
+constexpr int PedalForController(int controller) noexcept {
+    for (int i = 0; i < 3; ++i) if (kPedalControllers[i] == controller) return i;
+    return -1;
 }
+constexpr int PedalForName(std::string_view name) noexcept {
+    for (int i = 0; i < 3; ++i) if (kPedalNames[i] == name) return i;
+    return -1;
+}
+
+// The notes a layout's keys play: the 61 keys C2 to C7, the 88 A0 to C8.
+constexpr int KeysLow(bool eightyEight) noexcept { return eightyEight ? 21 : 36; }
+constexpr int KeysHigh(bool eightyEight) noexcept { return eightyEight ? 108 : 96; }
+
+// Folds an out-of-range MIDI note onto the keys low..high, which span at least
+// an octave. Shifts by whole octaves so the pitch class is kept: notes below
+// land in the lowest octave, notes above in the highest. Any distance folds.
+constexpr int FoldOntoKeys(int midi, int low, int high) noexcept {
+    if (midi < low) return midi + (low - midi + 11) / 12 * 12;
+    if (midi > high) return midi - (midi - high + 11) / 12 * 12;
+    return midi;
+}
+// The game's 61 keys, C2 to C7 (36..96).
+constexpr int FoldOntoSixtyOneKeys(int midi) noexcept { return FoldOntoKeys(midi, 36, 96); }
+
+// The velocity key the game was last tapped with, or 0 when it is not known.
+// It reads 0 once a send has lost an input since it was stored (InputsLost),
+// so the next note taps again rather than trusting a level the game never got.
+class SentVelocity {
+public:
+    operator char() const noexcept {
+        if (stamp_.load(std::memory_order_acquire) != InputsLost.load(std::memory_order_acquire)) return 0;
+        return key_.load(std::memory_order_relaxed);
+    }
+    SentVelocity& operator=(char key) noexcept {
+        key_.store(key, std::memory_order_relaxed);
+        stamp_.store(InputsLost.load(std::memory_order_acquire), std::memory_order_release);
+        return *this;
+    }
+private:
+    std::atomic<char> key_{ 0 };
+    std::atomic<uint64_t> stamp_{ 0 };
+};
 
 // =====================================================
 // VirtualPianoPlayer: Main class for virtual piano playback.
@@ -205,6 +247,13 @@ public:
     // pressed_keys, for the panic key, where that bookkeeping may be wrong.
     void release_all_keys();
     void release_every_mapped_key();
+    // The Panic hotkey's sweep, which trusts no record at all: every mapping of
+    // both layouts, the sustain key and Shift, Ctrl and Alt come up as
+    // keystrokes whichever target is chosen, and on the MIDI target every note
+    // of every channel written gets a note-off before the pedals lift. Queued
+    // performer actions are dropped and a hold while the game is behind ends.
+    // Called with playback stopped.
+    void panic();
     void calibrate_volume();
     void process_tracks(const MidiFile& midi_file);
 
@@ -245,19 +294,31 @@ public:
     bool open_midi_output(const std::wstring& deviceId);
     void close_midi_output();
     std::wstring opened_midi_output() const;
+    // A port that went away: closes it and keeps the target, so what would be
+    // sent is dropped until a port opens again rather than typed.
+    void drop_midi_output();
+    // Whether the last open_midi_output that failed did so because another
+    // program holds the port.
+    bool midi_output_busy() const noexcept { return midi_output_refused_busy.load(std::memory_order_relaxed); }
 
     // No-op unless the MIDI target is selected and a port is open. Safe from
     // the MIDI callback and playback threads.
     void send_midi_output(const uint8_t* message, size_t length) noexcept;
 
     // All Notes Off and sustain off on every channel used. Called on panic,
-    // where the held-note bookkeeping may be wrong.
-    void silence_midi_output() noexcept;
+    // where the held-note bookkeeping may be wrong. everyNote sends a note-off
+    // for all 128 notes of each such channel, not only the unmatched note-ons.
+    void silence_midi_output(bool everyNote = false) noexcept;
 
     // MIDI2Key tracks held keystrokes in pressed[] and scancodeOwner[]. Its
     // owner registers a reset here so a target switch clears that state in the
     // same call that releases the keys.
     void set_live_release_hook(std::function<void()> hook);
+
+    // Windows' finest timer tick is asked for only while it is needed: while
+    // a song plays and while live input is open, over every player. This is
+    // how many hold it now.
+    static int timer_resolution_holds() noexcept;
 
     // Static handle for command event
     static HANDLE command_event;
@@ -281,6 +342,9 @@ public:
     // index. The end is read from here and not from buffer_index against the
     // take's size, since a rebuild publishes those two one after the other.
     std::atomic<bool> song_done{ false };
+    // Set with song_done when the song ended on an error rather than at its
+    // end: nothing plays next. Cleared when playback starts.
+    std::atomic<bool> song_failed{ false };
 
     double current_speed{ 1.0 };
     double paused_time = 0.0;
@@ -353,15 +417,35 @@ public:
     std::atomic<Trigger> trigger{ Trigger::Auto };
     std::atomic<bool> tap_holds_notes{ true };   // false keeps the recording's lengths
     void tap(int key, bool down);
+    // A performer's action (qm_performer_action in Performer.hpp): what it
+    // returns is played between two events with the song's clock held, then
+    // the song goes on from where it stood. One that schedules is asked with
+    // the clock running and what it returns goes into the take ahead of the
+    // clock; in Tap it is not asked. Set before playback starts.
+    qm_performer_action_call* performer_action = nullptr;
+    void perform_action(std::string id, bool schedules = false);
     // Key mapping
     std::map<std::string, std::string> limited_key_mappings;
     std::map<std::string, std::string> full_key_mappings;
     std::unordered_map<std::string, std::atomic<bool>> pressed_keys;
-    std::string lastPressedKey;
+    // The game's velocity level, one for autoplay and live input, since both
+    // tap the same game. Cleared whenever the game may have another: a song
+    // starting, a loop's wrap, a stop, a pause, a seek, Panic, a hold while
+    // the game is behind ending, and any send that lost an input.
+    SentVelocity sent_velocity;
     bool isSustainPressed{ false };
     WORD sustain_key_code{ 0 };
 
     bool ENABLE_OUT_OF_RANGE_TRANSPOSE{ false };
+
+    // Octave doubling: for each note, the notes that sound with it, as note
+    // numbers whose mappings are their keys, -1 after the last. Set with the
+    // mappings while nothing plays. Keystrokes only, as Transpose is.
+    std::array<std::array<int8_t, 4>, 128> octave_doubles = [] {
+        std::array<std::array<int8_t, 4>, 128> none{};
+        for (auto& doubles : none) doubles.fill(-1);
+        return none;
+    }();
 
     std::array<int, 128> volume_lookup;
     WORD volume_up_key_code{ 0 };
@@ -396,6 +480,35 @@ public:
     unsigned long long last_resume_tsc;
     unsigned long long playback_start_time;
 
+    // ---- Loop ------------------------------------------------------------
+    //
+    // Off, the whole song, or the section from loop_start to loop_end in score
+    // time. Writable from any thread. The playback thread wraps by itself: it
+    // releases every held key and the pedal, and carries on from the start of
+    // the loop with the clock unbroken, so Speed, transpose and the take stay.
+    enum class Loop : uint8_t { Off, Song, Section };
+    std::atomic<Loop> loop{ Loop::Off };
+    std::atomic<int64_t> loop_start_ns{ 0 };
+    std::atomic<int64_t> loop_end_ns{ 0 };
+    // Wraps so far, for tests.
+    std::atomic<uint64_t> loop_wraps{ 0 };
+
+    // ---- Hold while the game is behind -----------------------------------
+    //
+    // Keystroke output only. While the target window is behind another, the
+    // clock stops and the held keys are let go; once the target is in front
+    // again the song goes on from where it stopped. The target is Roblox while
+    // it runs, else hold_target: the first window other than this app's that
+    // is in front while the song plays, cleared by whoever starts a song. This
+    // app's own window in front holds the song too once there is a target;
+    // until then the song plays on there without key-downs.
+    // Off in a bare player, such as the latency tests' that type for real;
+    // the app's switch for it is on unless the user turns it off.
+    std::atomic<bool> hold_behind{ false };
+    std::atomic<HWND> hold_target{ nullptr };
+    // True while holding; written by the playback thread.
+    std::atomic<bool> held_behind{ false };
+
 private:
     // output_mutex guards midi_output, midi_output_held and live_release_hook,
     // so a target switch cannot race an open or close. It is also taken on the
@@ -409,10 +522,24 @@ private:
     std::array<std::array<uint8_t, 128>, 16> midi_output_held{};
     std::function<void()> live_release_hook;
     mutable std::mutex output_mutex;
+    std::atomic<bool> midi_output_refused_busy{ false };
 
     std::mutex buffer_mutex;
     PlaybackControl playback_control;
-    UINT m_timerResolutionSet{ 0 };
+    // Takes or gives back one hold of the finest timer tick; the first hold
+    // asks Windows for it and the last gives it back.
+    static void hold_timer_resolution(bool hold) noexcept;
+    // Live input is open while its release hook is registered.
+    bool live_timer_held{ false };
+    // A send that came back short is logged once a song: cleared when a song
+    // is loaded or restarted.
+    std::atomic<bool> short_send_logged{ false };
+    // Gives the crash handler (CrashGuard.hpp) the key-ups it sends: every
+    // key the mappings of both layouts type, the sustain key, Shift, Ctrl and
+    // Alt. At the player's making, each start and Panic.
+    void set_crash_key_ups();
+    // play_notes' body, which play_notes guards.
+    void play_song();
     // Dispatch ownership prevents an inaudible track's note-off from releasing
     // another track's note, while allowing releases after a live mute change.
     std::mutex dispatch_mutex;
@@ -421,6 +548,14 @@ private:
     // produce one keypress.
     std::unordered_map<std::string, std::chrono::nanoseconds> last_strike_time;
     std::set<int> sustain_owners;
+    // The MIDI target sends each pedal's value as the file has it. Each track's
+    // latest value is kept with its time, since a late batch runs releases
+    // before presses; the port gets the highest across tracks. sent is -1 when
+    // the port's pedal is unknown.
+    struct PedalTrackValue { std::chrono::nanoseconds time; int value; };
+    std::array<std::unordered_map<int, PedalTrackValue>, 3> pedal_tracks;
+    std::array<int, 3> pedal_sent{ -1, -1, -1 };
+    void send_pedal_to_midi(const NoteEvent& event, int pedal, bool trackEnabled) noexcept;
     double inv_cpu_freq;  // Optional for optimization
     double time_factor;
     // Per instance, not static: each player creates and closes its own timer.
@@ -439,6 +574,26 @@ private:
     void play_notes();
     void prepare_event_queue();
     void execute_note_event(const NoteEvent& event) noexcept;
+    // execute_note_event with dispatch_mutex already held.
+    void execute_note_locked(const NoteEvent& event) noexcept;
+    // execute_note_event for one note, with dispatch_mutex held. A doubled
+    // note is an octave_doubles note: it never strikes a key already down.
+    void dispatch_note_locked(const NoteEvent& event, bool doubled) noexcept;
+    // Plays the events due together, releases, then presses, then releases
+    // of notes struck in the same batch, as one SendInput call on keystrokes.
+    // quiet withholds the presses.
+    void play_batch(const std::vector<NoteEvent*>& batch, bool quiet);
+    // Taps one velocity level for a batch's presses, the loudest that will
+    // be heard, and returns true when the presses are to send none of their
+    // own. Under dispatch_mutex, after the batch's releases.
+    bool send_chord_level(const std::vector<NoteEvent*>& batch) noexcept;
+    bool chord_level = false;   // dispatch_mutex
+    // Sends keystrokes through input_latency::send, or while play_batch
+    // gathers a batch on this thread, adds them to it.
+    UINT send_keys(const INPUT* inputs, size_t count) noexcept;
+    // Notes down on each key, by its mapping: two notes on one key (an octave
+    // double, a fold) release it when the last lets go. Under dispatch_mutex.
+    std::unordered_map<std::string, int> key_holders;
     void handle_sustain_event(const NoteEvent& event);
     size_t find_next_event_index(const std::chrono::nanoseconds& target_time);
     void reset_volume();
@@ -452,8 +607,8 @@ private:
     void pressKey(WORD vk);
     void releaseKey(WORD vk);
     // velocityKey is the velocity tap to send ahead of the note, or 0 for none.
-    // Both go out in one SendInput batch.
-    void press_key(std::string_view note, char velocityKey = 0) noexcept;
+    // Both go out in one SendInput batch. Returns false when nothing was sent.
+    bool press_key(std::string_view note, char velocityKey = 0, bool doubled = false) noexcept;
     // True when a note that is down is typed on this velocity key's own key.
     bool velocity_key_is_held(char velocityKey) noexcept;
     void release_key(std::string_view note) noexcept;
@@ -465,7 +620,7 @@ private:
         std::unordered_map<int, std::unordered_map<int, std::vector<std::chrono::nanoseconds>>>& active_notes);
     void handle_note_on(std::chrono::nanoseconds ctime, int ch, int note, int vel, int trackIndex,
         std::unordered_map<int, std::unordered_map<int, std::vector<std::chrono::nanoseconds>>>& active_notes);
-    void add_sustain_event(std::chrono::nanoseconds time, int channel, int sustainValue, int trackIndex);
+    void add_pedal_event(std::chrono::nanoseconds time, int channel, int pedal, int value, int trackIndex);
     void add_note_event(std::chrono::nanoseconds time, std::string_view note, EventType action, int velocity, int trackIndex);
     void adjust_playback_speed(double factor);
     void arrowsend(WORD scanCode, bool extended);
@@ -486,8 +641,36 @@ private:
     std::mutex tap_mutex;
     std::vector<qm_tap> tap_queue;
     std::atomic<bool> clock_frozen{ false };           // true in Tap mode
+    bool tap_moved = false;   // a tap has played since Tap began, the song started or a loop wrapped
     qm_player performer_host();
     void tap_step(size_t& current_index, size_t buffer_size);
+    // The loop's end in score time, or nullopt when not looping; a song loop
+    // ends after the take's last event.
+    std::optional<std::chrono::nanoseconds> loop_end() const noexcept;
+    // Back to the loop's start. `late` is how far past the end the clock ran,
+    // carried over so the loop keeps time.
+    void wrap_loop(size_t& current_index, std::chrono::nanoseconds late);
+    // Holds or resumes by the window in front; true while holding. `quiet` is
+    // set while this app's own window is in front, when no key goes down.
+    bool hold_while_behind(bool& quiet);
+    // Stops holding with the clock where the hold left it.
+    void end_hold() noexcept;
+    // After a jump (a start or resume, a seek, a loop's wrap, a hold's end)
+    // puts the pedal where the song has it before index: the sustain key goes
+    // down again, or on the MIDI target each pedal's value is sent, merged
+    // over tracks as playing merges it. Called with the keys released.
+    void restore_pedal(size_t index);
+    std::chrono::steady_clock::time_point hold_resume_at{};
+    std::vector<std::pair<std::string, bool>> action_queue;   // id and schedules; guarded by tap_mutex
+    std::atomic<bool> action_pending{ false };
+    void play_actions(size_t current_index);
+    // What an action that schedules put in the take: dropped from note_buffer
+    // by a seek, a loop's wrap or a new take. Until its last event's time the
+    // action's key asks for nothing more.
+    std::vector<NoteEvent*> scheduled;
+    std::unordered_map<std::string, std::chrono::nanoseconds> scheduled_until;
+    void schedule_action(const std::string& id, size_t current_index);
+    void drop_scheduled();
     // Note name with static storage, for keys the take substitutes for the score's.
     static std::string_view stable_note_name(int midi_note);
     TransposeEngine transposeEngine;

@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -141,10 +142,16 @@ enum class Rhythm { SixtyFourth, ThirtySecond, Sixteenth, Eighth, Quarter, Half,
 enum class Place { Start, End, InOrder };
 // Bars: break at each bar and at every tempo or meter change (the original's
 // "realistic"). Beats: break every StyleOptions::beats beats ("manual").
-enum class Breaks { Bars, Beats, None };
+// Phrases (not in the original): as Bars, and also at each rest that ends a
+// phrase; see PhraseGapMs.
+enum class Breaks { Bars, Beats, None, Phrases };
 enum class BpmStyle { Detailed, Simple };
+// Which sustain pedal lines a sheet draws: where it is down, where it is up
+// (for a player whose sustain key is held to lift it), or both in two colours.
+enum class PedalMarks { Off, Normal, Inverted, Both };
 
-struct TimedNote { double seconds = 0; int midi = 0; };
+// end: the release in seconds, below seconds when the score does not say.
+struct TimedNote { double seconds = 0; int midi = 0; double end = -1; };
 struct TempoMark { double seconds = 0; double bpm = 120; };
 struct MeterMark { double seconds = 0; int numerator = 4; };
 
@@ -162,18 +169,19 @@ struct StyleOptions {
     bool bpmChanges = true;
     BpmStyle bpmStyle = BpmStyle::Detailed;
     int minSpeedChange = 10;         // percent; smaller tempo changes get no comment
-    Breaks breaks = Breaks::Bars;
+    Breaks breaks = Breaks::Phrases;
     int beats = 4;
     double missingBpm = 120;         // used before the first tempo mark or when there is none
     int transpose = 0;               // semitones, applied before mapping
-    bool autoTranspose = false;      // search around transpose for the best fit
-    int resilience = 2;              // score margin a transposition needs to replace the current one
+    bool autoTranspose = true;       // search around transpose for the best fit
+    int resilience = 2;              // notes a found transposition must gain on transpose to replace it
     // Section search (not in the original): transposition may change mid-sheet.
     bool autoSections = false;
     int sectionSwitchCost = 12;      // notes a change must bring onto keys to pay off
     double sectionMinSeconds = 8;    // minimum section length
     int sectionRestMs = 250;         // minimum rest before a change
     int sectionRange = 12;           // semitones either side of transpose to try
+    PedalMarks pedalMarks = PedalMarks::Both;
 };
 
 // A span under one transposition, in seconds, both ends inclusive. Each start
@@ -192,6 +200,17 @@ struct StyledItem {
     double ms = 0;                   // onset of the chord's first note
     double msEnd = 0;                // onset of its last note
     double beatMs = 500;             // length of a beat at that onset
+    // The sustain pedal while the chord sounds: 0 up, 1 part way, 2 down.
+    // pedalHeld: it stays down into the next chord, so the gap to it is down
+    // too; otherwise it comes up after this chord, if only to be taken again.
+    int pedal = 0;
+    bool pedalHeld = false;
+    // The keys written for the chord, how many are shifted characters, and
+    // its lowest and highest note after transposition.
+    int keys = 0;
+    int shifted = 0;
+    int low = 0;
+    int high = 0;
 };
 
 struct StyledResult {
@@ -205,6 +224,8 @@ struct StyledResult {
     int transposition = 0; // of the first section
     std::vector<Section> sections;   // runs of one transposition, in order
     bool hasTempo = false;
+    PedalMarks pedalMarks = PedalMarks::Off;   // the lines to draw, Off when the song has no pedal
+    int difficulty = 0;    // 1 to 10, 0 for a sheet with no keys; see Difficulty
 };
 // Invariant: notes + merged + unmapped + hidden == number of input notes.
 
@@ -344,6 +365,13 @@ inline StyledItem RenderChord(const std::vector<Placed>& chord, bool quantized, 
         else if (n.display == n.midi + 1024 && !firstEnd) firstEnd = &n;
     }
     if (isChord) item.segments.push_back({curly ? "{" : "["});
+    const auto press = [&](const Placed& n) {
+        item.low = item.keys ? (std::min)(item.low, n.midi) : n.midi;
+        item.high = item.keys ? (std::max)(item.high, n.midi) : n.midi;
+        ++item.keys;
+        if (OneOf(n.character, kCapitals)) ++item.shifted;
+        ++r.notes;
+    };
     for (const auto& n : chord) {
         if (!n.valid) { item.segments.push_back({"_"}); ++r.unmapped; continue; }
         const bool drawOor = n.outOfRange && o.showOutOfRange;
@@ -355,11 +383,11 @@ inline StyledItem RenderChord(const std::vector<Placed>& chord, bool quantized, 
             std::string text = n.character;
             if (o.outOfRangeMarks && marked) text = o.outOfRangeSeparator + text;
             item.segments.push_back({text, true});
-            ++r.notes;
+            press(n);
             if (o.outOfRangeMarks && &n == lastStart && nonOutOfRange > 0) item.segments.push_back({"'"});
         } else if (!n.outOfRange) {
             item.segments.push_back({n.character});
-            ++r.notes;
+            press(n);
         } else {
             ++r.hidden;
         }
@@ -369,32 +397,47 @@ inline StyledItem RenderChord(const std::vector<Placed>& chord, bool quantized, 
     return item;
 }
 
-inline int TranspositionScore(const std::vector<TimedNote>& notes, int by, const std::map<std::string, std::string>& mapping) {
-    int good = 0, lower = 0, upper = 0;
+// How notes sit on the 61 keys under a transposition: how many land on them,
+// and how many of those are shifted characters.
+struct Fit { long long onKeys = 0; long long shifted = 0; };
+
+inline Fit TranspositionFit(const std::vector<TimedNote>& notes, int by, const std::map<std::string, std::string>& mapping) {
+    Fit fit;
     for (const auto& note : notes) {
         const auto p = Locate(0, note.midi + by, mapping, {});
         if (p.outOfRange || !p.valid) continue;
-        ++good;
-        if (OneOf(p.character, kLowercase)) ++lower; else ++upper;
+        ++fit.onKeys;
+        if (!OneOf(p.character, kLowercase)) ++fit.shifted;
     }
-    return good * 2 + std::abs(upper - lower);
+    return fit;
 }
 
-// The original's best_transposition_for_monochord applied to the whole sheet,
-// searching 11 semitones either way.
+// A note off the keys is lost to a 61-key player; a shifted character is only
+// harder to press. Across the owner's library (3349 files, 2026-09-26) the
+// fewest shifted among the transpositions with the most notes on keys left
+// 26% of notes shifted and 1.6% off the keys; weighing a note off the keys as
+// four shifted characters leaves 11% shifted and 2.0% off.
+inline constexpr long long kShiftedPerNote = 4;
+inline long long FitScore(const Fit& fit) { return fit.onKeys * kShiftedPerNote - fit.shifted; }
+
+// Deviation: the original scores notes on keys twice plus the difference
+// between plain and shifted characters, so a key of mostly shifted characters
+// scores as well as one of mostly plain ones, and it searches stickTo up to
+// eleven above and the negatives of those. Here the best of -11 to 11 by
+// FitScore wins, ties going to the one nearest stickTo, then the lower, and
+// it replaces stickTo only when better by more than resilience notes.
 inline int BestTransposition(const std::vector<TimedNote>& notes, const std::map<std::string, std::string>& mapping, int stickTo, int resilience) {
-    int best = TranspositionScore(notes, stickTo, mapping);
-    std::vector<int> bests{stickTo};
-    const auto consider = [&](int n) {
-        const int score = TranspositionScore(notes, n, mapping);
-        if (score > best + resilience) { best = score; bests = {n}; }
-        else if (score == best) {
-            if (n == 0 && std::find(bests.begin(), bests.end(), 0) != bests.end()) return;
-            bests.push_back(n);
+    const long long kept = FitScore(TranspositionFit(notes, stickTo, mapping));
+    int best = stickTo;
+    long long bestScore = kept;
+    for (int d = 1; d <= 11 + std::abs(stickTo); ++d) {
+        for (const int n : {stickTo - d, stickTo + d}) {
+            if (n < -11 || n > 11) continue;
+            const long long score = FitScore(TranspositionFit(notes, n, mapping));
+            if (score > bestScore) { best = n; bestScore = score; }
         }
-    };
-    for (int i = stickTo; i <= stickTo + 11; ++i) { consider(i); consider(-i); }
-    return bests.front();
+    }
+    return bestScore - kept > resilience * kShiftedPerNote ? best : stickTo;
 }
 
 // ms and msEnd are the first and last onsets in milliseconds.
@@ -415,9 +458,42 @@ inline std::vector<size_t> ChordIndices(const std::vector<TimedNote>& notes, dou
     return indices;
 }
 
-// Per-chord transposition maximizing the summed TranspositionScore minus
-// sectionSwitchCost per change (dynamic programming over chords x candidates).
-// Sections shorter than sectionMinSeconds are disallowed unless they span the
+// The rest before each chord in ms, the first's 0: from when every note
+// struck before it has been released to its first onset, none while one
+// still sounds, so a chord held into the next is no rest. A note whose
+// release is unknown ends at its onset, which makes this the gap from the
+// previous chord's last onset.
+inline std::vector<double> RestsBefore(const std::vector<SearchChord>& chords) {
+    std::vector<double> rests(chords.size(), 0);
+    double sounding = 0;
+    for (size_t k = 0; k < chords.size(); ++k) {
+        if (k > 0) rests[k] = (std::max)(0.0, chords[k].ms - sounding);
+        for (const auto& note : chords[k].notes) sounding = (std::max)(sounding, (std::max)(note.seconds, note.end) * 1000);
+    }
+    return rests;
+}
+
+// The rest that ends a phrase, in ms: at least half a second and 3.2 times
+// the song's median rest between chords (RestsBefore), Velo's rule.
+// Infinite with under two chords. By themselves such rests left a flowing
+// passage as one line of hundreds of chords (Fur Elise 414), so they add to
+// the bar breaks. Across the owner's library (3347 files, 2026-09-27), with
+// notes held by their releases and the sustain pedal (HeldByPedal), phrases
+// add 0.6% more lines than bars and leave Flower Man (Chewie Melodies) at its
+// 83; from onsets alone they added 10.1% and took it to 133, and from
+// releases without the pedal 3.0% and 109.
+inline double PhraseGapMs(const std::vector<double>& rests) {
+    std::vector<double> gaps(rests.size() > 1 ? rests.begin() + 1 : rests.end(), rests.end());
+    if (gaps.empty()) return std::numeric_limits<double>::infinity();
+    std::sort(gaps.begin(), gaps.end());
+    const size_t n = gaps.size();
+    const double median = n % 2 ? gaps[n / 2] : (gaps[n / 2 - 1] + gaps[n / 2]) / 2;
+    return (std::max)(500.0, 3.2 * median);
+}
+
+// Per-chord transposition maximizing the summed FitScore less
+// sectionSwitchCost notes per change (dynamic programming over chords x
+// candidates). Sections shorter than sectionMinSeconds are disallowed unless they span the
 // whole sheet, and a change requires a preceding rest of sectionRestMs.
 // Candidates are ordered nearest-first, lower before higher, and ties keep the
 // earlier one; the editor page's script must use the same order to agree.
@@ -426,13 +502,13 @@ inline std::vector<int> BestSections(const std::vector<SearchChord>& chords, con
     std::vector<int> candidates{o.transpose};
     for (int d = 1; d <= o.sectionRange; ++d) { candidates.push_back(o.transpose - d); candidates.push_back(o.transpose + d); }
     const size_t T = candidates.size();
-    const long long cost = 2LL * o.sectionSwitchCost;
+    const long long cost = o.sectionSwitchCost * kShiftedPerNote;
     const double minMs = o.sectionMinSeconds * 1000, restMs = o.sectionRestMs;
     constexpr long long NONE = -(1LL << 60);
     // prefix[t][k]: score of chords 0..k-1 under candidate t.
     std::vector<std::vector<long long>> prefix(T, std::vector<long long>(n + 1, 0));
     for (size_t t = 0; t < T; ++t)
-        for (size_t k = 0; k < n; ++k) prefix[t][k + 1] = prefix[t][k] + TranspositionScore(chords[k].notes, candidates[t], mapping);
+        for (size_t k = 0; k < n; ++k) prefix[t][k + 1] = prefix[t][k] + FitScore(TranspositionFit(chords[k].notes, candidates[t], mapping));
     // closed[i][t]: best score of chords 0..i whose last section is under t and
     // long enough to end at i; from[i][t] is that section's first chord.
     // open[j][t]: best score before a section under t starting at chord j, with
@@ -564,6 +640,48 @@ inline std::string EscapeHtml(const std::string& text) {
 
 } // namespace detail
 
+// How hard the sheet is to play by hand, 1 to 10, from the keys it writes:
+// its speed (keys a second over the time it is played, rests capped at two
+// seconds, averaged with the busiest ten seconds), its big chords (the size
+// only one chord in a hundred exceeds), its share of shifted characters and
+// its hand jumps (an octave or more between chords under 300 ms apart).
+// Tuned on the owner's library (3349 files, 2026-09-26), each in its best
+// transposition: Sweden 2, Trisha's Lullaby 3, Chopin's Nocturne Op. 9 No. 2
+// 4, Fur Elise 5, Rush E 7, Winter Wind 8, La Campanella 9, with 4 and 5 the
+// commonest and 10 one file in a thousand. 0 when nothing is written. The
+// page's difficulty does the same arithmetic.
+inline int Difficulty(const std::vector<StyledItem>& items) {
+    std::vector<const StyledItem*> chords;
+    for (const auto& item : items)
+        if (item.kind == StyledItem::Kind::Chord && item.keys > 0) chords.push_back(&item);
+    if (chords.empty()) return 0;
+    double keys = 0, shifted = 0, played = 0, jumps = 0, busiest = 0, recent = 0;
+    std::vector<int> sizes;
+    size_t first = 0;
+    for (size_t c = 0; c < chords.size(); ++c) {
+        const auto& chord = *chords[c];
+        keys += chord.keys;
+        shifted += chord.shifted;
+        sizes.push_back(chord.keys);
+        if (c > 0) {
+            const auto& previous = *chords[c - 1];
+            const double gap = chord.ms - previous.msEnd;
+            played += (std::min)(gap, 2000.0);
+            if (gap < 300 && (std::abs(chord.low - previous.low) >= 12 || std::abs(chord.high - previous.high) >= 12)) ++jumps;
+        }
+        recent += chord.keys;
+        while (chord.ms - chords[first]->ms > 10000) recent -= chords[first++]->keys;
+        busiest = (std::max)(busiest, recent / 10);
+    }
+    played = (std::max)(played / 1000, 1.0);
+    std::sort(sizes.begin(), sizes.end());
+    const double big = sizes[(sizes.size() - 1) * 99 / 100];
+    const double speed = (keys / played + busiest) / 2;
+    const auto part = [](double value) { return (std::min)((std::max)(value, 0.0), 1.0); };
+    const double points = part((speed - 2) / 20) * 5.5 + part((big - 1) / 6) * 1.5 + part(shifted / keys / 0.5) + part(jumps / played / 5);
+    return static_cast<int>((std::min)((std::max)(std::lround(1 + points), 1L), 10L));
+}
+
 // sections override any other transposition for chords starting inside them.
 inline StyledResult Style(std::vector<TimedNote> notes, const std::map<std::string, std::string>& mapping,
                           std::vector<TempoMark> tempos = {}, std::vector<MeterMark> meters = {},
@@ -633,6 +751,8 @@ inline StyledResult Style(std::vector<TimedNote> notes, const std::map<std::stri
     double nextBar = 0, penalty = 0;
     std::vector<detail::Placed> current;
     size_t currentChord = 0;
+    const auto rests = detail::RestsBefore(chords);
+    const double phraseGapMs = o.breaks == Breaks::Phrases ? detail::PhraseGapMs(rests) : std::numeric_limits<double>::infinity();
 
     const auto flush = [&] {
         if (current.empty()) return;
@@ -661,7 +781,7 @@ inline StyledResult Style(std::vector<TimedNote> notes, const std::map<std::stri
         current.clear();
     };
     const auto checkBreak = [&](const detail::Placed& first) {
-        if (o.breaks == Breaks::Bars) {
+        if (o.breaks == Breaks::Bars || o.breaks == Breaks::Phrases) {
             const double beat = beatsAt(first.ms / 1000);
             if (scheduled) {
                 scheduled = false;
@@ -698,11 +818,13 @@ inline StyledResult Style(std::vector<TimedNote> notes, const std::map<std::stri
         }
         const auto& note = notes[event.index];
         // Chord membership comes from ChordIndices above. Emit a "Transpose by"
-        // comment before a chord whose transposition differs from the previous one.
+        // comment before a chord whose transposition differs from the previous
+        // one, and a line break before one that follows a phrase's rest.
         const size_t k = chordOf[event.index];
         if (!current.empty() && k != currentChord) flush();
         if (current.empty()) {
             currentChord = k;
+            if (k > 0 && rests[k] >= phraseGapMs) lineBreak();
             if (k > 0 && shifts[k] != shifts[k - 1]) comment("Transpose by: " + std::to_string(-shifts[k]));
         }
         auto placed = detail::Locate(note.seconds * 1000, note.midi + shifts[k], mapping, o);
@@ -720,6 +842,7 @@ inline StyledResult Style(std::vector<TimedNote> notes, const std::map<std::stri
     }
     while (!kept.empty() && kept.back().kind == Kind::Break) kept.pop_back();
     r.items = std::move(kept);
+    r.difficulty = Difficulty(r.items);
 
     std::vector<size_t> written;
     for (size_t i = 0; i < r.items.size(); ++i)
@@ -752,6 +875,111 @@ inline StyledResult Style(std::vector<TimedNote> notes, const std::map<std::stri
     return r;
 }
 
+// The sheet's text as it is copied and saved: its difficulty on a line of its
+// own above it, as its Transpose by line is. The page and the image carry the
+// difficulty in their heading instead.
+inline std::string SheetText(const StyledResult& r) {
+    if (r.difficulty == 0) return r.text;
+    return "Difficulty: " + std::to_string(r.difficulty) + " of 10" + (r.text.empty() ? "" : "\n" + r.text);
+}
+
+// A sustain pedal value (CC64) from one track. Tracks are merged by the
+// deepest, as playback merges them.
+struct PedalChange { double seconds = 0; int value = 0; int track = 0; };
+
+// Where a pedal counts as down, and as all the way down: the MIDI on/off line,
+// with half pedal from a quarter to it. Sampled from the owner's library on
+// 2026-09-25 (563 files, five a folder): a press is held at 127, or 85 from a
+// few converters, and time between 32 and 63 is at most 16% of pedalled time
+// in any file, 0 to 5% in most.
+inline constexpr int kPedalDown = 32, kPedalFull = 64;
+// How long after a chord's onset a pedal pressed counts as pressed with it:
+// pedalling after the chord, so its notes are caught and the last ones let
+// go, is the usual way.
+inline constexpr double kPedalCatchMs = 500;
+// A half value held for less than this is the pedal passing through on its
+// way down or up, not half pedal. In the owner's library (three files a
+// folder, 2026-09-26) nearly every half value lasts under 50 ms, as a press or
+// lift is recorded in steps; files played with half pedal hold it 100 ms to
+// over a second. A chord struck mid-lift was drawn half pedalled.
+inline constexpr double kPedalPassMs = 100;
+
+namespace detail {
+// The pedal over every track, each change of the deepest value in ms. A half
+// value passed through keeps the pedal where it was until it settles.
+inline std::vector<std::pair<double, int>> MergedPedal(std::vector<PedalChange> changes) {
+    std::stable_sort(changes.begin(), changes.end(), [](const auto& a, const auto& b) { return a.seconds < b.seconds; });
+    std::map<int, int> tracks;
+    std::vector<std::pair<double, int>> merged;   // ms, deepest of the tracks
+    for (const auto& change : changes) {
+        tracks[change.track] = change.value;
+        int deepest = 0;
+        for (const auto& [track, value] : tracks) deepest = (std::max)(deepest, value);
+        if (deepest != (merged.empty() ? 0 : merged.back().second)) merged.push_back({change.seconds * 1000, deepest});
+    }
+    for (size_t k = 0; k + 1 < merged.size(); ++k)
+        if (merged[k].second >= kPedalDown && merged[k].second < kPedalFull && merged[k + 1].first - merged[k].first < kPedalPassMs)
+            merged[k].second = k ? merged[k - 1].second : 0;
+    return merged;
+}
+} // namespace detail
+
+// The notes as they sound, for RestsBefore: a key let go while the sustain
+// pedal is down sounds on until the pedal lifts, so a rest under the pedal is
+// none, and a pedal that never lifts holds it to the end. A note whose release
+// is not known is left as it is. The page's heldByPedal must do the same.
+inline std::vector<TimedNote> HeldByPedal(std::vector<TimedNote> notes, const std::vector<PedalChange>& changes) {
+    const auto merged = detail::MergedPedal(changes);
+    if (merged.empty()) return notes;
+    for (auto& note : notes) {
+        if (note.end < note.seconds) continue;
+        const double ms = note.end * 1000;
+        // Past the last change at or before the release.
+        size_t at = 0, to = merged.size();
+        while (at < to) { const size_t mid = (at + to) / 2; if (ms < merged[mid].first) to = mid; else at = mid + 1; }
+        if (at == 0 || merged[at - 1].second < kPedalDown) continue;
+        while (at < merged.size() && merged[at].second >= kPedalDown) ++at;
+        note.end = at < merged.size() ? merged[at].first / 1000 : std::numeric_limits<double>::infinity();
+    }
+    return notes;
+}
+
+// Sets each chord's pedal marks. A chord is pedalled by the deepest the pedal
+// goes from its onset until the next chord or kPedalCatchMs, whichever is
+// sooner. The pedal is held from one pedalled chord to the next unless it came
+// up and went down again between them.
+// Does not change the text. The page's markPedals must do the same arithmetic.
+inline void MarkPedals(StyledResult& r, std::vector<PedalChange> changes, const StyleOptions& o) {
+    r.pedalMarks = PedalMarks::Off;
+    if (o.pedalMarks == PedalMarks::Off || changes.empty()) return;
+    r.pedalMarks = o.pedalMarks;
+    const auto merged = detail::MergedPedal(std::move(changes));
+    std::vector<size_t> chords;
+    for (size_t i = 0; i < r.items.size(); ++i)
+        if (r.items[i].kind == StyledItem::Kind::Chord) chords.push_back(i);
+    std::vector<int> press(chords.size(), 0);
+    size_t at = 0;
+    int value = 0, presses = 0;
+    const auto apply = [&] {
+        if (value < kPedalDown && merged[at].second >= kPedalDown) ++presses;
+        value = merged[at++].second;
+    };
+    for (size_t c = 0; c < chords.size(); ++c) {
+        auto& item = r.items[chords[c]];
+        const double onset = item.ms;
+        const double end = c + 1 < chords.size() ? (std::min)(r.items[chords[c + 1]].ms, onset + kPedalCatchMs) : onset + kPedalCatchMs;
+        while (at < merged.size() && merged[at].first <= onset) apply();
+        int deepest = value;
+        while (at < merged.size() && merged[at].first < end) { apply(); deepest = (std::max)(deepest, value); }
+        item.pedal = deepest >= kPedalFull ? 2 : deepest >= kPedalDown ? 1 : 0;
+        press[c] = presses;
+    }
+    for (size_t c = 0; c + 1 < chords.size(); ++c) {
+        auto& item = r.items[chords[c]];
+        item.pedalHeld = item.pedal != 0 && r.items[chords[c + 1]].pedal != 0 && press[c + 1] == press[c];
+    }
+}
+
 // The original's palette: long notes green through short notes red.
 inline const char* RhythmColour(Rhythm rhythm) {
     switch (rhythm) {
@@ -768,7 +996,35 @@ inline const char* RhythmColour(Rhythm rhythm) {
 }
 
 namespace detail {
-// Sheet markup shared by ToHtml and the editor page.
+// Pedal highlight colours, in hues no note is drawn in: a blue for down and a
+// magenta for up, each a tint of the page's background so the notes read on it.
+inline constexpr const char* kPedalDownColour = "#31406b";
+inline constexpr const char* kPedalUpColour = "#6b3262";
+
+// The highlight behind a stretch of the sheet with the pedal at level (0 up,
+// 1 part way, 2 down), as a style, or empty for none. Part way highlights the
+// lower half of the line. The page's pedalHighlight writes the same.
+inline std::string PedalHighlight(int level, PedalMarks marks) {
+    const bool down = level > 0;
+    if (marks == PedalMarks::Off || (down && marks == PedalMarks::Inverted) || (!down && marks == PedalMarks::Normal)) return {};
+    const std::string colour = down ? kPedalDownColour : kPedalUpColour;
+    return level == 1 ? "background:linear-gradient(transparent 50%," + colour + " 50%)" : "background:" + colour;
+}
+
+// The line above a sheet's picture: its title and its difficulty. The page's
+// heading writes the same.
+inline std::string Heading(const std::string& title, int difficulty) {
+    if (difficulty == 0) return title;
+    return (title.empty() ? "" : title + " \xC2\xB7 ") + "Difficulty " + std::to_string(difficulty) + " of 10";
+}
+
+inline std::string WithPedalHighlight(const std::string& html, int level, PedalMarks marks) {
+    const auto highlight = PedalHighlight(level, marks);
+    return highlight.empty() || html.empty() ? html : "<span style=\"" + highlight + "\">" + html + "</span>";
+}
+
+// Sheet markup shared by ToHtml and the editor page. Under the separator the
+// pedal is the chord's while it is held into the next chord, and up otherwise.
 inline std::string SheetBody(const StyledResult& r) {
     using Kind = StyledItem::Kind;
     std::string html;
@@ -776,13 +1032,16 @@ inline std::string SheetBody(const StyledResult& r) {
         const auto& item = r.items[i];
         if (item.kind == Kind::Chord) {
             html += std::string("<span style=\"color:") + RhythmColour(item.rhythm) + "\">";
+            std::string chord;
             for (const auto& segment : item.segments) {
                 if (segment.outOfRange)
-                    html += "<span style=\"display:inline-flex;justify-content:center;min-width:0.6em;"
-                            "border-bottom:2px solid;font-weight:900\">" + detail::EscapeHtml(segment.text) + "</span>";
-                else html += detail::EscapeHtml(segment.text);
+                    chord += "<span style=\"display:inline-flex;justify-content:center;min-width:0.6em;"
+                             "border-bottom:2px solid;font-weight:900\">" + detail::EscapeHtml(segment.text) + "</span>";
+                else chord += detail::EscapeHtml(segment.text);
             }
-            html += detail::EscapeHtml(item.separator) + "</span>";
+            html += WithPedalHighlight(chord, item.pedal, r.pedalMarks);
+            html += WithPedalHighlight(detail::EscapeHtml(item.separator), item.pedalHeld ? item.pedal : 0, r.pedalMarks);
+            html += "</span>";
         } else if (item.kind == Kind::Comment) {
             html += "<br><span style=\"color:#c8c4cc\">" + detail::EscapeHtml(item.text) + "</span><br>";
         } else {

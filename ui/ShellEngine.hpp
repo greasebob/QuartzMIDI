@@ -38,11 +38,11 @@ struct PerformerControl {
     // Slider displayed as a MIDI note in [low, high] instead of a fraction.
     bool showsNote = false;
     int low = 0, high = 127;
-    // Hidden while the shownWith control is 0, or when the estimate for this
-    // song is negative (noEstimate).
+    // Hidden while the shownWith control is 0 or hidden, or when the estimate
+    // for this song is negative (noEstimate).
     std::string shownWith;
     bool noEstimate = false;
-    std::string estimateName;   // slider: label of the add-on's estimate
+    std::string estimateName;   // slider or choice: label of the add-on's estimate
     double estimate = 0;
     std::string estimates;      // switch: id of the slider whose estimate it disables
     bool remembers = false;     // switch: sliders are stored per song
@@ -57,15 +57,27 @@ struct PerformerTrigger {
     size_t firstKey = 0;
     std::vector<std::string> keyFields, keyDefaults;
 };
+// A performer key that works whatever the trigger, while the song plays.
+struct PerformerAction {
+    std::string id, name, field, keyDefault;
+    bool schedules = false;   // plays through the take, with the clock running
+    size_t key = 0;   // its hotkey index
+};
 struct PerformerSection {
     bool loaded = false, on = false;
     std::string name, tag, config;
-    std::string presetId, presetField;
+    std::string presetId, presetField, presetName;
     std::vector<std::string> presets;
     std::vector<std::map<std::string, double>> presetValues;
     int preset = 0;
     std::vector<PerformerControl> controls;
     std::vector<PerformerTrigger> triggers;
+    std::vector<PerformerAction> actions;
+    // Index of the action owning a hotkey index, or -1.
+    int ActionOfKey(size_t hotkey) const {
+        for (size_t i = 0; i < actions.size(); ++i) if (actions[i].key == hotkey) return static_cast<int>(i);
+        return -1;
+    }
     const PerformerControl* Find(const std::string& id) const {
         for (const auto& control : controls) if (control.id == id) return &control;
         return nullptr;
@@ -81,7 +93,7 @@ struct PerformerSection {
     bool Drawn(const PerformerControl& control) const {
         if (control.noEstimate) return false;
         const auto* with = control.shownWith.empty() ? nullptr : Find(control.shownWith);
-        return !with || with->value != 0;
+        return !with || (with->value != 0 && !with->noEstimate);
     }
     // Index of the trigger owning a hotkey index, or -1.
     int TriggerOfKey(size_t hotkey) const {
@@ -89,6 +101,13 @@ struct PerformerSection {
             if (hotkey >= triggers[i].firstKey && hotkey < triggers[i].firstKey + triggers[i].keyFields.size()) return static_cast<int>(i);
         return -1;
     }
+};
+
+// A key bound to one song: pressing it anywhere loads and plays the song.
+struct SongHotkey {
+    std::filesystem::path song;
+    std::string key;
+    bool operator==(const SongHotkey&) const = default;
 };
 
 struct EngineSnapshot {
@@ -160,6 +179,9 @@ struct EngineSnapshot {
     bool outputMidi = false;
     std::wstring outputDevice;
     std::vector<LiveDevice> outputDevices;
+    // The name of the port the app creates (see NamedMidiPortId), which other
+    // apps list as a MIDI input.
+    std::string outputPortName = "QuartzMIDI";
     double speed = 1.0;
     // Speed slider range; speedMin <= 1 <= speedMax.
     double speedMin = .25, speedMax = 2.0;
@@ -209,7 +231,10 @@ struct EngineSnapshot {
     std::vector<std::string> velocityModifierConflicts;
     double wootingTriggerThreshold = 0.25;
     int wootingShiftAmount = 1;
-    double wootingVelocityScale = 2.0;
+    double wootingVelocitySensitivity = 1.0;
+    int wootingMinVelocity = 1;
+    // Set 1 scancodes of the sustain, sostenuto and soft pedal keys, 0 for none.
+    std::array<int, 3> wootingPedalKeys{0x39, 0, 0};
     // Audio-to-MIDI via tools/mp3-to-midi. conversionStatus is the converter's
     // latest output line; the finished .mid is written to the MIDI folder.
     bool converting = false;
@@ -227,6 +252,53 @@ struct EngineSnapshot {
     bool converterGpuUnsupported = false;
     bool nvidiaCard = false;
     bool settingUp = false;
+    // Loop: 0 off, 1 the song, 2 the section from loopStart to loopEnd, in
+    // seconds of the song. The mode is kept; the section is the song's own.
+    int loop = 0;
+    double loopStart = 0, loopEnd = 0;
+    // Keystrokes stop the song, not only the keys, while the game is behind
+    // another window, and pick it up where it was (see VirtualPianoPlayer::hold_behind).
+    bool holdBehind = true;
+    // The song Next loads, named in the mini window: the one after the open song
+    // in the list followed (SongsFollowed), or the one Shuffle Play has drawn. Empty when it would be
+    // the open song again.
+    std::filesystem::path upNext;
+    // Notes struck in each of kDensitySlices slices of the open song, drawn in
+    // the mini window's seek bar; empty with no song open.
+    std::shared_ptr<const std::vector<uint16_t>> density = std::make_shared<const std::vector<uint16_t>>();
+    // The lists the Files panel shows besides the folder, kept in library.json
+    // beside config.json. Shared, as files is, so a publish copies no list.
+    std::shared_ptr<const LibraryLists> library = std::make_shared<const LibraryLists>();
+    // The list the Files panel shows, which Previous, Next and shuffle follow
+    // when it is the favourites or a playlist: a ListId or a playlist.
+    int openList = kFolderList;
+    // A scan for MIDI files: the folder it reads and how many new files it has
+    // found so far, then, once it ends, those files, each named by its folder.
+    bool scanning = false;
+    std::string scanFolder;
+    size_t scanFound = 0;
+    std::shared_ptr<const std::vector<MidiEntry>> scanResults = std::make_shared<const std::vector<MidiEntry>>();
+    uint64_t scanRevision = 0;
+    // Songs with a key of their own, in the order they were bound. A song
+    // whose file is gone keeps its key. Changes bump hotkeyRevision.
+    std::vector<SongHotkey> songHotkeys;
+    // Applied when a file loads: Transpose moves by the fewest semitones that
+    // put every note on the layout's keys, or the most notes when none can.
+    bool fitToKeys = false;
+    // How many octaves each note sounds in, 1 to 5: itself, then an octave
+    // above, below, two above, two below. A double off the keys is dropped.
+    int octaves = 1;
+    // Set at start when a saved file could not be read, was kept aside as
+    // .damaged and was started again; the status bar shows it once.
+    std::string resetNotice;
+    // An output that went away, or is not back since the last session, waiting
+    // for a scan to list it again: its id and the name it was listed under.
+    // Empty while none waits. On the MIDI target nothing is typed meanwhile.
+    std::wstring outputWaiting;
+    std::string outputWaitingName;
+    // An input waiting the same way, which reopens as it was left.
+    std::wstring liveWaiting;
+    std::string liveWaitingName;
     std::string ActiveVelocityName() const {
         return comparingCurve ? previousPreset.name + (VelocityEdited(previousCurve) ? " (edited)" : "") : VelocityName(curves, curve);
     }
@@ -237,6 +309,8 @@ public:
     enum class Action { Scan, Load, Play, Stop, Mute, Solo, SoloPiano, UnmuteAll, Velocity, Sustain,
                         Pause, TogglePlayPause, Restart, Back10, Forward10, Seek, Speed, Transpose, Remap,
                         LiveScan, LiveOpen, LiveActive, LiveChannel, OutputTarget, OutputScan, OutputOpen,
+                        // key is the new name; an open port is made again under it.
+                        OutputPortName,
                         CopySheet,
                         // Writes midi-converter's editor page to the temp
                         // folder for the panel to open in a browser.
@@ -249,7 +323,12 @@ public:
                         // the built-ins are never deleted.
                         CurveDelete,
                         CurveDuplicate, CurveRename, SustainCutoff, VelocityModifier,
-                        WootingTriggerThreshold, WootingShiftAmount, WootingVelocityScale, EightyEightKeys,
+                        WootingTriggerThreshold, WootingShiftAmount, WootingVelocitySensitivity, WootingMinVelocity,
+                        // track is the pedal (sustain, sostenuto, soft), amount
+                        // its key's set 1 scancode or 0 to unbind. A key another
+                        // pedal has is moved.
+                        WootingPedalKey,
+                        EightyEightKeys,
                         AutoVolumeScan, AutoVolumeCalibrate, AutoVolumeOff, AutoVolumeCancel, ClearLog,
                         PlayCountdown, PlaybackDelay, AcknowledgeTyping,
                         Performer, Shuffle, Previous, Next, SortFiles, MidiConnect, OutRange, SeekStep, SpeedMin, SpeedMax,
@@ -283,7 +362,52 @@ public:
                         // to its estimate). Trigger: track is the trigger index.
                         PerformerPreset, PerformerValue, Trigger,
                         // track indexes kGameKeyMaps; replaces every bind in both layouts.
-                        GameKeyMap };
+                        GameKeyMap,
+                        // Loop: track is the mode (EngineSnapshot::loop); a
+                        // section starts from the position to four bars on.
+                        // LoopStart, LoopEnd: amount is the section's edge in seconds.
+                        Loop, LoopStart, LoopEnd,
+                        // value is the switch.
+                        HoldBehind,
+                        // track indexes the performer's actions; played while the song plays.
+                        PerformerAction,
+                        // Favourite: path is the song, value its star. OpenList:
+                        // amount is the ListId or playlist the panel shows.
+                        Favourite, OpenList,
+                        // NewPlaylist: key is the name, path a first song if any,
+                        // and value opens it. RenamePlaylist and DeletePlaylist:
+                        // amount is the playlist, key the new name.
+                        NewPlaylist, RenamePlaylist, DeletePlaylist,
+                        // amount is a playlist or kQueueList, path the song.
+                        // MoveInList: track is the row it goes before.
+                        AddToList, RemoveFromList, MoveInList,
+                        // Trash: path is a song, moved into the MIDI folder's Trash
+                        // (kTrashFolder). Restore and DeleteForever: path is the file
+                        // in the Trash; deleting sends it to the Recycle Bin.
+                        Trash, Restore, DeleteForever,
+                        // ScanDrives looks below paths for MIDI files not in the
+                        // library, on threads of its own; ScanCancel stops it and
+                        // ScanProgress is its report (generation the scan, key the
+                        // folder read, track the count found, value finished, files
+                        // what it found). AddScanned moves the paths chosen into the
+                        // library folder, and PutBack returns paths moved so, or all
+                        // of them when there are none, to where they came from.
+                        ScanDrives, ScanCancel, ScanProgress, AddScanned, PutBack,
+                        // Stop, then every note key, modifier and the sustain key
+                        // released, and on the MIDI port every note and pedal.
+                        Panic,
+                        // amount is how many 0.1 steps to move Speed; applied as Speed.
+                        SpeedStep,
+                        // SongHotkey: path is the song, key the new name or empty
+                        // to unbind; a key bound elsewhere is moved. PlaySong loads
+                        // the song at path and plays it; one that is gone does nothing.
+                        SongHotkey, PlaySong,
+                        // value is the setting; saved, and reloads the open file as AutoTranspose does.
+                        FitToKeys,
+                        // amount is the octaves each note sounds in, 1 to 5; saved.
+                        Octaves,
+                        // Sends every song in the Trash to the Recycle Bin.
+                        EmptyTrash };
     struct Command {
         Action action;
         std::filesystem::path path;
@@ -301,6 +425,10 @@ public:
         // whenever a device comes or goes, so it cancels no calibration, and
         // when it fails the song plays on and the device stays saved.
         bool automatic = false;
+        // ScanDrives: where to look. AddScanned and PutBack: the files.
+        std::vector<std::filesystem::path> paths;
+        // ScanDrives: folders it passes over, with all below them.
+        std::vector<std::filesystem::path> ignored;
     };
     explicit ShellEngine(std::filesystem::path config, std::shared_ptr<AutoVolumeHost> volumeHost = {},
                          bool requireTypingAcknowledgement = false, ConnectFactory connectFactory = {});
@@ -336,4 +464,7 @@ std::string Utf8(const std::filesystem::path& path);
 // Where sheet files go when no sheets folder has been chosen.
 std::filesystem::path DefaultSheetsFolder(const std::filesystem::path& midiFolder);
 std::string NoteName(int note);
+// The user's Downloads, Desktop, Documents, Music and OneDrive folders that
+// exist, once each: where Scan for MIDI files looks unless told otherwise.
+std::vector<std::filesystem::path> UserScanFolders();
 }

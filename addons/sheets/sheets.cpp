@@ -48,7 +48,7 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
     s.bpmChanges = o.value("bpmChanges", s.bpmChanges);
     s.bpmStyle = static_cast<sheet::BpmStyle>(std::clamp(o.value("bpmStyle", static_cast<int>(s.bpmStyle)), 0, 1));
     s.minSpeedChange = o.value("minSpeedChange", s.minSpeedChange);
-    s.breaks = static_cast<sheet::Breaks>(std::clamp(o.value("breaks", static_cast<int>(s.breaks)), 0, 2));
+    s.breaks = static_cast<sheet::Breaks>(std::clamp(o.value("breaks", static_cast<int>(s.breaks)), 0, 3));
     s.beats = o.value("beats", s.beats);
     s.missingBpm = o.value("missingBpm", s.missingBpm);
     s.transpose = o.value("transpose", s.transpose);
@@ -59,6 +59,11 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
     s.sectionMinSeconds = o.value("sectionMinSeconds", s.sectionMinSeconds);
     s.sectionRestMs = o.value("sectionRestMs", s.sectionRestMs);
     s.sectionRange = o.value("sectionRange", s.sectionRange);
+    // A page saved the day pedal marks were a switch holds true or false.
+    if (const auto marks = o.find("pedalMarks"); marks != o.end() && marks->is_boolean())
+        s.pedalMarks = marks->get<bool>() ? sheet::PedalMarks::Normal : sheet::PedalMarks::Off;
+    else
+        s.pedalMarks = static_cast<sheet::PedalMarks>(std::clamp(o.value("pedalMarks", static_cast<int>(s.pedalMarks)), 0, 3));
     const auto p = data.value("page", Json::object());
     if (p.is_object()) {
         style.look.fontSizePt = std::clamp(p.value("fontSize", style.look.fontSizePt), 4.0, 48.0);
@@ -68,7 +73,8 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
 }
 
 // Notes arrive in seconds ("notes") or in ticks ("ticks") when the file was
-// never loaded by the player; tempo and meter changes are always in ticks.
+// never loaded by the player, as [onset, note] or [onset, note, release];
+// tempo and meter changes are always in ticks.
 sheet::PageInput PageFrom(const Json& json) {
     sheet::PageInput page;
     page.title = json.value("title", "");
@@ -79,16 +85,23 @@ sheet::PageInput PageFrom(const Json& json) {
     std::stable_sort(tempos.begin(), tempos.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
     std::vector<sheet::TickMeter> meters;
     for (const auto& meter : json.value("meters", Json::array())) meters.push_back({meter.at(0).get<uint64_t>(), meter.at(1).get<int>()});
-    for (const auto& note : json.value("notes", Json::array())) page.notes.push_back({note.at(0).get<double>(), note.at(1).get<int>()});
+    for (const auto& note : json.value("notes", Json::array()))
+        page.notes.push_back({note.at(0).get<double>(), note.at(1).get<int>(), note.size() > 2 ? note.at(2).get<double>() : -1.0});
     for (const auto& note : json.value("ticks", Json::array()))
-        page.notes.push_back({sheet::SecondsAtTick(note.at(0).get<uint64_t>(), tempos, division), note.at(1).get<int>()});
+        page.notes.push_back({sheet::SecondsAtTick(note.at(0).get<uint64_t>(), tempos, division), note.at(1).get<int>(),
+                              note.size() > 2 ? sheet::SecondsAtTick(note.at(2).get<uint64_t>(), tempos, division) : -1.0});
+    // Sustain pedal values as [time, value, track], like the notes.
+    for (const auto& pedal : json.value("pedals", Json::array()))
+        page.pedals.push_back({pedal.at(0).get<double>(), pedal.at(1).get<int>(), pedal.at(2).get<int>()});
+    for (const auto& pedal : json.value("pedalTicks", Json::array()))
+        page.pedals.push_back({sheet::SecondsAtTick(pedal.at(0).get<uint64_t>(), tempos, division), pedal.at(1).get<int>(), pedal.at(2).get<int>()});
     page.tempos = sheet::TempoMarksFromTicks(tempos, division);
     page.meters = sheet::MeterMarksFromTicks(meters, tempos, division);
     return page;
 }
 
-template <class Result> Json Counts(const Result& result) {
-    return {{"text", result.text}, {"notes", result.notes}, {"groups", result.groups}, {"merged", result.merged}, {"unmapped", result.unmapped}};
+template <class Result> Json Counts(const Result& result, const std::string& text) {
+    return {{"text", text}, {"notes", result.notes}, {"groups", result.groups}, {"merged", result.merged}, {"unmapped", result.unmapped}};
 }
 
 Json Answer(const Json& request) {
@@ -98,13 +111,15 @@ Json Answer(const Json& request) {
         for (const auto& note : request.value("notes", Json::array())) notes.push_back({note.at(0).get<double>(), note.at(1).get<std::string>()});
         sheet::Options options;
         options.beatSeconds = request.value("beatSeconds", options.beatSeconds);
-        return Counts(sheet::ToVirtualPiano(std::move(notes), request.value("mapping", std::map<std::string, std::string>()), options));
+        const auto result = sheet::ToVirtualPiano(std::move(notes), request.value("mapping", std::map<std::string, std::string>()), options);
+        return Counts(result, result.text);
     }
     if (what == "page") {
         sheet::StyledResult result;
         const auto html = sheet::ToEditorHtml(PageFrom(request.at("page")), &result);
-        auto reply = Counts(result);
+        auto reply = Counts(result, sheet::SheetText(result));
         reply["html"] = html;
+        reply["difficulty"] = result.difficulty;
         return reply;
     }
     if (what == "style") { StyleFromPage(PathOf(request.value("style", ""))); return Json::object(); }
@@ -129,10 +144,11 @@ Json Answer(const Json& request) {
             wrote.push_back(Utf8(path));
         };
         if (outputs.value("page", true)) write(L".html", html);
-        if (outputs.value("text", true)) write(L".txt", result.text);
+        if (outputs.value("text", true)) write(L".txt", sheet::SheetText(result));
         if (outputs.value("image", true)) { auto path = stem; path += L".png"; sheet::SavePng(result, page.title, page.look, path); wrote.push_back(Utf8(path)); }
-        auto reply = Counts(result);
+        auto reply = Counts(result, sheet::SheetText(result));
         reply["wrote"] = std::move(wrote);
+        reply["difficulty"] = result.difficulty;
         return reply;
     }
     throw std::runtime_error("The sheets add-on does not know \"" + what + "\".");

@@ -1,7 +1,10 @@
 // WootingAnalog.cpp: analog key positions turned into MIDI note messages.
 
 #include "WootingAnalog.hpp"
+#include "config.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <string>
 
@@ -92,6 +95,8 @@ std::mutex g_mapMutex;
 std::array<int16_t, 256> g_scanToNote = DefaultWootingScancodeNoteMap();
 WootingAnalogSettings g_settings{};
 std::atomic<bool> g_shiftHeld{ false };
+std::atomic<bool> g_capturing{ false };
+std::atomic<uint16_t> g_captured{ 0 };
 
 } // namespace
 
@@ -185,9 +190,7 @@ WootingAnalogSettings GetWootingAnalogSettings() {
 }
 
 // Velocity comes from key speed as it crosses the trigger; depth is the same
-// for every key at that moment. rate * scale / 100 is wooting-analog-midi's
-// formula, so its Velocity Scale means the same here: at 5, 20 depth units per
-// second (full travel in about 50 ms) is full strength.
+// for every key at that moment. WootingVelocityFor has the curve.
 size_t WootingPollStep(WootingPollState& state,
                        const uint16_t* codes, const float* values, int count,
                        const std::array<int16_t, 256>& noteMap,
@@ -195,9 +198,23 @@ size_t WootingPollStep(WootingPollState& state,
                        double seconds,
                        WootingPollEvent* out, size_t outCapacity) {
     size_t written = 0;
-    const auto emit = [&](bool on, int note, uint8_t velocity) {
-        if (written < outCapacity) out[written++] = {on, static_cast<uint8_t>(note), velocity};
+    const auto emit = [&](bool on, int note, uint8_t velocity, uint8_t controller = 0) {
+        if (written < outCapacity) out[written++] = {on, static_cast<uint8_t>(note), velocity, controller};
     };
+
+    // Pedals first, so a chord struck with the pedal in one poll is caught by it.
+    // A key at rest is absent from the buffer, so no entry is depth 0.
+    static constexpr uint8_t kControllers[3] = { 64, 66, 67 };
+    for (size_t pedal = 0; pedal < 3; ++pedal) {
+        float depth = 0.0f;
+        if (const uint16_t key = settings.pedalKeys[pedal])
+            for (int i = 0; i < count; ++i) if (codes[i] == key) depth = values[i];
+        const uint8_t value = WootingPedalValueFor(depth), last = state.pedalValue[pedal];
+        const bool edge = value == 0 || value == 127;
+        if (value == last || (!edge && std::abs(value - last) < kWootingPedalStep)) continue;
+        state.pedalValue[pedal] = value;
+        emit(true, 0, value, kControllers[pedal]);
+    }
 
     const float release = settings.trigger * settings.releaseFraction;
     std::array<bool, 256> seen{};
@@ -205,17 +222,22 @@ size_t WootingPollStep(WootingPollState& state,
 
     // Read the shift before the note keys so a key struck in the same poll
     // uses it. Keys at rest are absent from the buffer, so no entry means up.
+    // A key chosen as a pedal is only that pedal, even a note key or the shift.
+    const auto pedalKey = [&](uint16_t code) {
+        return std::find(settings.pedalKeys.begin(), settings.pedalKeys.end(), code) != settings.pedalKeys.end();
+    };
     int shift = 0;
-    for (int i = 0; i < count; ++i)
-        if (codes[i] == kWootingShiftScancode && values[i] >= settings.trigger)
-            shift = settings.shiftAmount;
     state.shiftHeld = false;
-    for (int i = 0; i < count; ++i)
-        state.shiftHeld |= codes[i] == kWootingShiftScancode && values[i] >= settings.trigger;
+    if (!pedalKey(kWootingShiftScancode))
+        for (int i = 0; i < count; ++i)
+            if (codes[i] == kWootingShiftScancode && values[i] >= settings.trigger) {
+                shift = settings.shiftAmount;
+                state.shiftHeld = true;
+            }
 
     for (int i = 0; i < count; ++i) {
         const uint16_t code = codes[i];
-        if (code >= 256) continue;
+        if (code >= 256 || pedalKey(code)) continue;
         const int16_t note = noteMap[code];
         if (note < 0) continue;
 
@@ -252,7 +274,8 @@ size_t WootingPollStep(WootingPollState& state,
             const int shifted = note + shift;
             if (shifted < 0 || shifted > 127) continue;
             state.sounding[code] = static_cast<int16_t>(shifted);
-            emit(true, shifted, WootingVelocityFor(depth, from.depth, from.age, settings.velocityScale));
+            emit(true, shifted, WootingVelocityFor(depth, from.depth, from.age,
+                                                   settings.velocitySensitivity, settings.minVelocity));
         }
         else if (state.sounding[code] >= 0 && depth <= release) {
             emit(false, state.sounding[code], 0);
@@ -272,14 +295,46 @@ size_t WootingPollStep(WootingPollState& state,
     return written;
 }
 
-uint8_t WootingVelocityFor(float depth, float previousDepth, double seconds, float velocityScale) {
-    // No elapsed time means no measurement; return a mid-range velocity.
-    if (seconds <= 0.0) return 96;
+uint8_t WootingPedalValueFor(float depth) noexcept {
+    return static_cast<uint8_t>(std::lround(std::clamp(depth, 0.0f, 1.0f) * 127.0f));
+}
+
+WootingAnalogSettings WootingAnalogSettingsFromConfig() {
+    const auto& configured = midi::Config::getInstance().wooting;
+    WootingAnalogSettings settings{static_cast<float>(configured.TRIGGER_THRESHOLD),
+                                   static_cast<float>(configured.RELEASE_FRACTION),
+                                   configured.SHIFT_AMOUNT,
+                                   static_cast<float>(configured.VELOCITY_SENSITIVITY),
+                                   configured.MIN_VELOCITY};
+    settings.pedalKeys = {static_cast<uint16_t>(configured.SUSTAIN_PEDAL_KEY),
+                          static_cast<uint16_t>(configured.SOSTENUTO_PEDAL_KEY),
+                          static_cast<uint16_t>(configured.SOFT_PEDAL_KEY)};
+    return settings;
+}
+
+void WootingBeginKeyCapture() noexcept {
+    g_captured.store(0, std::memory_order_relaxed);
+    g_capturing.store(true, std::memory_order_release);
+}
+
+uint16_t WootingCapturedKey() noexcept { return g_captured.load(std::memory_order_acquire); }
+
+void WootingEndKeyCapture() noexcept {
+    g_capturing.store(false, std::memory_order_release);
+    g_captured.store(0, std::memory_order_relaxed);
+}
+
+uint8_t WootingVelocityFor(float depth, float previousDepth, double seconds,
+                           float sensitivity, int minVelocity) {
+    const int lowest = std::clamp(minVelocity, 1, 127);
+    // No elapsed time is a key that rested just short of the trigger and crept
+    // over it: the gentlest strike there is.
+    if (seconds <= 0.0 || sensitivity <= 0.0f) return static_cast<uint8_t>(lowest);
     const double rate = (static_cast<double>(depth) - static_cast<double>(previousDepth)) / seconds;
-    double scaled = rate * static_cast<double>(velocityScale) / 100.0;
-    if (scaled < 0.0) scaled = 0.0;
-    if (scaled > 1.0) scaled = 1.0;
-    return static_cast<uint8_t>(1 + static_cast<int>(scaled * 126.0));
+    const double gentlest = kWootingFullSpeed / static_cast<double>(sensitivity) / kWootingSpeedRange;
+    if (rate <= gentlest) return static_cast<uint8_t>(lowest);
+    const double x = std::min(1.0, std::log(rate / gentlest) / std::log(kWootingSpeedRange));
+    return static_cast<uint8_t>(lowest + std::lround(x * (127 - lowest)));
 }
 
 bool WootingAnalogAvailable() {
@@ -341,10 +396,14 @@ private:
         Sdk& s = sdk();
         std::array<uint16_t, kMaxKeys> codes{};
         std::array<float, kMaxKeys> values{};
-        // Room for a note off and a note on per key in the buffer, plus a
-        // release for every key that could drop out of it in one poll.
-        std::array<WootingPollEvent, 2 * kMaxKeys + 256> events{};
+        // Room for a note off and a note on per key in the buffer, a release
+        // for every key that could drop out of it in one poll, and the pedals.
+        std::array<WootingPollEvent, 2 * kMaxKeys + 256 + 3> events{};
         WootingPollState state;
+        // Keys past the trigger in the previous poll, so capture takes a key
+        // that goes down after it starts and not one already held.
+        std::array<uint16_t, kMaxKeys> wasDown{};
+        int wasDownCount = 0;
 
         LARGE_INTEGER freq{};
         QueryPerformanceFrequency(&freq);
@@ -359,46 +418,54 @@ private:
             const double dt = static_cast<double>(now.QuadPart - previous.QuadPart) / static_cast<double>(freq.QuadPart);
             previous = now;
 
+            const int read = (std::min)(count, static_cast<int>(kMaxKeys));
             size_t produced = 0;
             {
                 std::lock_guard<std::mutex> lock(g_mapMutex);
-                produced = WootingPollStep(state, codes.data(), values.data(),
-                                           (std::min)(count, static_cast<int>(kMaxKeys)),
+                produced = WootingPollStep(state, codes.data(), values.data(), read,
                                            g_scanToNote, g_settings, dt,
                                            events.data(), events.size());
+                int down = 0;
+                std::array<uint16_t, kMaxKeys> nowDown{};
+                for (int i = 0; i < read; ++i) {
+                    if (values[i] < g_settings.trigger) continue;
+                    nowDown[down++] = codes[i];
+                    const bool held = std::find(wasDown.begin(), wasDown.begin() + wasDownCount, codes[i]) != wasDown.begin() + wasDownCount;
+                    if (!held && g_capturing.load(std::memory_order_acquire)) {
+                        uint16_t none = 0;
+                        g_captured.compare_exchange_strong(none, codes[i], std::memory_order_acq_rel);
+                    }
+                }
+                wasDown = nowDown;
+                wasDownCount = down;
             }
             // Publish before this poll's notes go out, so a key struck with
             // the shift sees it down.
             g_shiftHeld.store(state.shiftHeld, std::memory_order_release);
             // Emit outside the lock: the callback runs the whole injection
             // path, and a settings change must not wait on it.
-            for (size_t i = 0; i < produced; ++i) {
-                if (events[i].on) emitNoteOn(events[i].note, events[i].velocity, static_cast<uint64_t>(now.QuadPart));
-                else emitNoteOff(events[i].note, static_cast<uint64_t>(now.QuadPart));
-            }
+            for (size_t i = 0; i < produced; ++i) emit(events[i], static_cast<uint64_t>(now.QuadPart));
 
             // About 1 kHz: adds well under a millisecond of latency at low CPU cost.
             Sleep(1);
         }
 
         g_shiftHeld.store(false, std::memory_order_release);
-        // An empty poll releases every key still sounding when the device closes.
+        // An empty poll releases every key still sounding and lifts every
+        // pedal when the device closes.
         {
             std::lock_guard<std::mutex> lock(g_mapMutex);
             const size_t produced = WootingPollStep(state, nullptr, nullptr, 0, g_scanToNote,
                                                     g_settings, 0, events.data(), events.size());
-            for (size_t i = 0; i < produced; ++i)
-                if (!events[i].on) emitNoteOff(events[i].note, 0);
+            for (size_t i = 0; i < produced; ++i) emit(events[i], 0);
         }
     }
 
-    void emitNoteOn(uint8_t note, uint8_t velocity, uint64_t timestampQpc) {
-        const uint8_t message[3] = { 0x90, note, velocity };
-        if (m_callback) m_callback(timestampQpc, message, sizeof(message));
-    }
-
-    void emitNoteOff(uint8_t note, uint64_t timestampQpc) {
-        const uint8_t message[3] = { 0x80, note, 0 };
+    void emit(const WootingPollEvent& event, uint64_t timestampQpc) {
+        const uint8_t message[3] = {
+            static_cast<uint8_t>(event.controller ? 0xB0 : event.on ? 0x90 : 0x80),
+            event.controller ? event.controller : event.note,
+            event.velocity };
         if (m_callback) m_callback(timestampQpc, message, sizeof(message));
     }
 

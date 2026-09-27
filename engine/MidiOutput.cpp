@@ -7,6 +7,7 @@
 #include "MidiOutput.hpp"
 
 #include <windows.h>
+#include <mmsystem.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -29,6 +30,12 @@
 namespace {
 
 constexpr wchar_t kWinMMPrefix[] = L"winmm:";
+constexpr wchar_t kNamedPortPrefix[] = L"port:";
+
+bool HasPrefix(const std::wstring& id, const wchar_t* prefix) {
+    const size_t length = wcslen(prefix);
+    return id.size() >= length && id.compare(0, length, prefix) == 0;
+}
 
 // Current callers send at most three bytes. send() drops anything longer
 // instead of truncating it.
@@ -49,6 +56,18 @@ void ensureApartment() {
     }
     catch (winrt::hresult_error const& ex) {
         if (ex.code() != RPC_E_CHANGED_MODE) throw;
+    }
+}
+
+// A port Windows still lists as enabled but will not open is held by another
+// program: a driver without multi-client support gives it to one at a time.
+bool WinRTPortHeld(const std::wstring& id) {
+    try {
+        const auto info = winrt::Windows::Devices::Enumeration::DeviceInformation::CreateFromIdAsync(winrt::hstring(id)).get();
+        return info && info.IsEnabled();
+    }
+    catch (winrt::hresult_error const&) {
+        return false;
     }
 }
 
@@ -78,6 +97,7 @@ public:
 
     bool open(const std::wstring& deviceId) override {
         close();
+        m_busy = false;
         if (deviceId.empty()) return false;
         try {
             ensureApartment();
@@ -86,7 +106,7 @@ public:
         catch (winrt::hresult_error const&) {
             m_port = nullptr;
         }
-        if (!m_port) return false;
+        if (!m_port) { m_busy = WinRTPortHeld(deviceId); return false; }
         // Allocated once so send() never allocates on the note path.
         m_buffer = winrt::Windows::Storage::Streams::Buffer(static_cast<uint32_t>(kMaxMessage));
         m_openedId = deviceId;
@@ -121,11 +141,14 @@ public:
         }
     }
 
+    bool busy() const noexcept override { return m_busy; }
+
 private:
     winrt::Windows::Devices::Midi::IMidiOutPort m_port{ nullptr };
     winrt::Windows::Storage::Streams::Buffer m_buffer{ nullptr };
     std::wstring m_openedId;
     std::mutex m_mutex;
+    bool m_busy = false;
 };
 
 class WinMMMidiOutput final : public IMidiOutput {
@@ -161,7 +184,9 @@ public:
 
     bool open(const std::wstring& deviceId) override {
         close();
+        m_busy = false;
         if (deviceId.empty()) return false;
+        int target = -1;
         try {
             auto port = std::make_unique<RtMidiOut>(RtMidi::Api::WINDOWS_MM, "QuartzMIDI");
             const unsigned count = port->getPortCount();
@@ -172,7 +197,7 @@ public:
             for (unsigned i = 0; i < count; ++i) names.push_back(widen(port->getPortName(i)));
 
             // Fail when the device is missing; never fall back to port 0.
-            const int target = ResolveWinMMPort(deviceId, names);
+            target = ResolveWinMMPort(deviceId, names);
             if (target < 0) return false;
 
             port->openPort(static_cast<unsigned>(target));
@@ -182,9 +207,18 @@ public:
             return true;
         }
         catch (RtMidiError const&) {
+            // WinMM says whether another program holds the port when asked to open it.
+            if (target >= 0) {
+                HMIDIOUT handle = nullptr;
+                const MMRESULT result = midiOutOpen(&handle, static_cast<UINT>(target), 0, 0, CALLBACK_NULL);
+                if (result == MMSYSERR_NOERROR) midiOutClose(handle);
+                m_busy = result == MMSYSERR_ALLOCATED;
+            }
             return false;
         }
     }
+
+    bool busy() const noexcept override { return m_busy; }
 
     void close() override {
         std::lock_guard lock(m_mutex);
@@ -215,11 +249,127 @@ private:
     std::unique_ptr<RtMidiOut> m_out;
     std::wstring m_openedId;
     std::mutex m_mutex;
+    bool m_busy = false;
+};
+
+// teVirtualMIDI's exports, loaded from System32 only, where loopMIDI's
+// installer puts the library.
+struct VirtualMidiApi {
+    using Port = void*;
+    Port (CALLBACK* create)(LPCWSTR name, void* callback, DWORD_PTR instance, DWORD maxSysex, DWORD flags) = nullptr;
+    void (CALLBACK* close)(Port port) = nullptr;
+    BOOL (CALLBACK* send)(Port port, LPBYTE data, DWORD length) = nullptr;
+    explicit operator bool() const noexcept { return create && close && send; }
+};
+
+const VirtualMidiApi& VirtualMidi() {
+    static const VirtualMidiApi api = [] {
+        VirtualMidiApi loaded;
+#ifdef _WIN64
+        const HMODULE dll = LoadLibraryExW(L"teVirtualMIDI64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+#else
+        const HMODULE dll = LoadLibraryExW(L"teVirtualMIDI.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+#endif
+        if (!dll) return loaded;
+        loaded.create = reinterpret_cast<decltype(loaded.create)>(GetProcAddress(dll, "virtualMIDICreatePortEx2"));
+        loaded.close = reinterpret_cast<decltype(loaded.close)>(GetProcAddress(dll, "virtualMIDIClosePort"));
+        loaded.send = reinterpret_cast<decltype(loaded.send)>(GetProcAddress(dll, "virtualMIDISendData"));
+        return loaded;
+    }();
+    return api;
+}
+
+// The driver parses what is sent into whole messages, and the port has only
+// the side other apps read from, so it is not listed as an output.
+constexpr DWORD kParseSent = 2;
+constexpr DWORD kOnlyReadSide = 8;
+
+std::mutex g_ownPortsMutex;
+std::vector<std::wstring> g_ownPorts;
+
+class NamedPortOutput final : public IMidiOutput {
+public:
+    ~NamedPortOutput() override { close(); }
+
+    MidiBackend backend() const noexcept override { return MidiBackend::NamedPort; }
+
+    // The name is the user's, so the port is not found by listing.
+    std::vector<MidiInputDevice> enumerate() override { return {}; }
+
+    bool open(const std::wstring& deviceId) override {
+        close();
+        const std::wstring name = NamedMidiPortName(deviceId);
+        const auto& api = VirtualMidi();
+        if (name.empty() || !api) return false;
+        // Fails when any port already has the name, loopMIDI's included.
+        void* port = api.create(name.c_str(), nullptr, 0, 0, kParseSent | kOnlyReadSide);
+        if (!port) return false;
+        {
+            std::lock_guard owned(g_ownPortsMutex);
+            g_ownPorts.push_back(name);
+        }
+        std::lock_guard lock(m_mutex);
+        m_port = port;
+        m_name = name;
+        m_openedId = deviceId;
+        return true;
+    }
+
+    void close() override {
+        std::lock_guard lock(m_mutex);
+        if (!m_port) return;
+        VirtualMidi().close(m_port);
+        m_port = nullptr;
+        {
+            std::lock_guard owned(g_ownPortsMutex);
+            if (const auto found = std::find(g_ownPorts.begin(), g_ownPorts.end(), m_name); found != g_ownPorts.end())
+                g_ownPorts.erase(found);
+        }
+        m_name.clear();
+        m_openedId.clear();
+    }
+
+    bool isOpen() const noexcept override { return m_port != nullptr; }
+    const std::wstring& openedDeviceId() const noexcept override { return m_openedId; }
+
+    void send(const uint8_t* message, size_t length) override {
+        if (!message || length == 0 || length > kMaxMessage) return;
+        std::lock_guard lock(m_mutex);
+        // Nothing reading the port is not an error; the driver drops the bytes.
+        if (m_port) VirtualMidi().send(m_port, const_cast<LPBYTE>(message), static_cast<DWORD>(length));
+    }
+
+private:
+    void* m_port = nullptr;
+    std::wstring m_name;
+    std::wstring m_openedId;
+    std::mutex m_mutex;
 };
 
 MidiOutputFactory g_factory;
 
 } // namespace
+
+bool NamedMidiPortAvailable() {
+    return static_cast<bool>(VirtualMidi());
+}
+
+std::wstring NamedMidiPortId(const std::wstring& name) {
+    const size_t first = name.find_first_not_of(L" \t");
+    if (first == std::wstring::npos) return {};
+    std::wstring kept = name.substr(first, kNamedMidiPortLength);
+    kept.erase(kept.find_last_not_of(L" \t") + 1);
+    return kNamedPortPrefix + kept;
+}
+
+std::wstring NamedMidiPortName(const std::wstring& deviceId) {
+    return HasPrefix(deviceId, kNamedPortPrefix) ? deviceId.substr(wcslen(kNamedPortPrefix)) : std::wstring();
+}
+
+bool IsOwnMidiPort(const std::wstring& name) {
+    std::lock_guard owned(g_ownPortsMutex);
+    return std::find(g_ownPorts.begin(), g_ownPorts.end(), name) != g_ownPorts.end();
+}
 
 void SetMidiOutputFactory(MidiOutputFactory factory) {
     g_factory = std::move(factory);
@@ -230,10 +380,21 @@ std::unique_ptr<IMidiOutput> CreateMidiOutput(MidiBackend backend) {
         if (auto substituted = g_factory(backend)) return substituted;
     }
     if (backend == MidiBackend::WinMM) return std::make_unique<WinMMMidiOutput>();
+    if (backend == MidiBackend::NamedPort) return std::make_unique<NamedPortOutput>();
     return std::make_unique<WinRTMidiOutput>();
 }
 
+static MidiOutputEnumerator g_enumerator;
+
+void SetMidiOutputEnumerator(MidiOutputEnumerator enumerator) {
+    g_enumerator = std::move(enumerator);
+}
+
 std::vector<MidiInputDevice> EnumerateMidiOutputs() {
+    if (g_enumerator) return g_enumerator();
+    // The engine's presence check lists from a thread of its own.
+    static std::mutex listing;
+    std::lock_guard lock(listing);
     WinRTMidiOutput winrtOutput;
     auto devices = winrtOutput.enumerate();
 
@@ -250,9 +411,8 @@ std::vector<MidiInputDevice> EnumerateMidiOutputs() {
 }
 
 MidiBackend BackendForOutputId(const std::wstring& deviceId) {
-    const size_t prefix = wcslen(kWinMMPrefix);
-    if (deviceId.size() >= prefix && deviceId.compare(0, prefix, kWinMMPrefix) == 0)
-        return MidiBackend::WinMM;
+    if (HasPrefix(deviceId, kWinMMPrefix)) return MidiBackend::WinMM;
+    if (HasPrefix(deviceId, kNamedPortPrefix)) return MidiBackend::NamedPort;
     return MidiBackend::WinRT;
 }
 

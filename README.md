@@ -6,19 +6,23 @@ By BobGrease. Based on [MIDI++](https://github.com/Zephkek/MIDIPlusPlus) by Zeph
 
 ## Features
 
-- Autoplay on 61 or 88 keys, with velocity, sustain, speed and transpose.
-- A MIDI library with folders, search, shuffle, and hotkeys that work from inside the game.
+- Autoplay on 61 or 88 keys, with velocity, sustain, speed, transpose, fold, octaves and loop.
+- Pauses when the game loses focus and picks up where it left off.
+- A MIDI library with folders, search, favourites, playlists, a queue, Trash and a scan for the MIDI files already on the computer.
+- Hotkeys that work from inside the game, for the transport, speed, Panic, the window and any single song, on keys or mouse buttons.
 - Tracks with mute, solo and Solo Piano.
 - The game's key maps: Major, Dorian, Lydian, Locrian, Mixolydian, Minor, Phrygian and Phrygian Dom.
 - Live play from a MIDI keyboard or a Wooting analog keyboard, over Kernel Streaming or WinMM.
 - MIDI output to a port instead of typed keys.
 - A velocity curve editor and AutoVol.
 - Themes with light and dark palettes, an editor, Import and Export.
-- A mini window, Always on top, media keys, Help and a first-start tour.
+- A mini window that stays on top without taking the keyboard from the game.
+- Hiding from screen capture, the taskbar and Alt+Tab.
+- Always on top, media keys, Help and a first-start tour.
 
 ## Add-ons
 
-`QuartzMIDI-v1.0.3.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.0.3.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.0.3-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
+`QuartzMIDI-v1.1.0.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.1.0.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.1.0-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
 
 - `sheets.zip`: a song as a sheet, copied, saved or opened in the sheet editor.
 - `converter.zip`: audio to MIDI, from a file or a link.
@@ -39,7 +43,9 @@ Windows 10 or 11, 64-bit.
 
 QuartzMIDI is a fork of [Zephkek/MIDIPlusPlus](https://github.com/Zephkek/MIDIPlusPlus).
 It uses [RtMidi](https://github.com/thestk/rtmidi), [Dear ImGui](https://github.com/ocornut/imgui), [nlohmann/json](https://github.com/nlohmann/json), [Lucide](https://lucide.dev) icons and [IBM Plex Sans](third_party/fonts/ibm-plex-sans/README.md).
+Tested by Shampoojr, who found most of the bugs, and by Floofy, Gene and Solitrek.
 Prior art: [shizuhaki/miditoqwerty](https://github.com/shizuhaki/miditoqwerty) and [ArijanJ/miditoqwerty](https://github.com/ArijanJ/miditoqwerty).
+Ideas for looping, playlists, the library scan and more came from [Velo](https://github.com/brenucode/velo-midiplayer) by brenu.
 
 ## License
 

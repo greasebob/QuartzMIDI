@@ -177,7 +177,8 @@
         "TRIGGER_THRESHOLD": 0.25,
         "RELEASE_FRACTION": 0.6,
         "SHIFT_AMOUNT": 1,
-        "VELOCITY_SCALE": 2.0
+        "VELOCITY_SENSITIVITY": 1.0,
+        "MIN_VELOCITY": 1
     },
     "MIDI_SETTINGS": {
         "DETECT_DRUMS": true

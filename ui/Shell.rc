@@ -3,3 +3,4 @@
 101 RCDATA "../third_party/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"
 102 RCDATA "../third_party/fonts/ibm-plex-sans/IBMPlexSans-Medium.ttf"
 103 RCDATA "../third_party/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"
+QUARTZCONFIG RCDATA "../x64/Release/config.json"

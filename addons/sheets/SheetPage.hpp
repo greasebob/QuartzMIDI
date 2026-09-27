@@ -36,6 +36,7 @@ struct PageInput {
     StyleOptions options;
     std::vector<Region> regions;
     Look look;
+    std::vector<PedalChange> pedals;               // sustain, in seconds
 };
 
 namespace detail {
@@ -93,6 +94,7 @@ inline std::string JsonOptions(const StyleOptions& o) {
     field("sectionMinSeconds", JsonNumber(o.sectionMinSeconds));
     field("sectionRestMs", std::to_string(o.sectionRestMs));
     field("sectionRange", std::to_string(o.sectionRange));
+    field("pedalMarks", std::to_string(static_cast<int>(o.pedalMarks)));
     return j + "}";
 }
 
@@ -101,7 +103,8 @@ inline std::string JsonOptions(const StyleOptions& o) {
 inline std::string PageJson(const PageInput& in, const std::string& expectedText) {
     std::string j = "{\"title\":" + JsonString(in.title) + ",\"notes\":[";
     for (size_t i = 0; i < in.notes.size(); ++i)
-        j += (i ? "," : "") + std::string("[") + JsonNumber(in.notes[i].seconds) + "," + std::to_string(in.notes[i].midi) + "]";
+        j += (i ? "," : "") + std::string("[") + JsonNumber(in.notes[i].seconds) + "," + std::to_string(in.notes[i].midi) +
+             (in.notes[i].end < in.notes[i].seconds ? std::string() : "," + JsonNumber(in.notes[i].end)) + "]";
     j += "],\"mapping\":{";
     bool first = true;
     for (const auto& [name, key] : in.mapping) {
@@ -118,6 +121,10 @@ inline std::string PageJson(const PageInput& in, const std::string& expectedText
     for (size_t i = 0; i < in.regions.size(); ++i)
         j += (i ? "," : "") + std::string("[") + JsonNumber(in.regions[i].from) + "," + JsonNumber(in.regions[i].to) + "," +
              std::to_string(in.regions[i].semitones) + "," + std::to_string(static_cast<int>(in.regions[i].kind)) + "]";
+    j += "],\"pedals\":[";
+    for (size_t i = 0; i < in.pedals.size(); ++i)
+        j += (i ? "," : "") + std::string("[") + JsonNumber(in.pedals[i].seconds) + "," + std::to_string(in.pedals[i].value) + "," +
+             std::to_string(in.pedals[i].track) + "]";
     j += "],\"options\":" + JsonOptions(in.options) + ",\"page\":{\"fontSize\":" + JsonNumber(in.look.fontSizePt) +
          ",\"lineHeight\":" + JsonNumber(in.look.lineHeightPercent) + "},\"expected\":" + JsonString(expectedText) + "}";
     return j;
@@ -176,13 +183,13 @@ const LOWER = "1234567890qwertyuiopasdfghjklzxcvbnm";
 const LOW_OOR = "1234567890qwert", HIGH_OOR = "yuiopasdfghj";
 const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const COLOURS = ["#9c0f00", "#ff1900", "#daa6a6", "#da7e5a", "#c0c05a", "#9ada5a", "#74da74", "#a3f0a3", "white"];
-const CHORD = 0, BREAK = 1, COMMENT = 2, LONG = 8;
+const CHORD = 0, BREAK = 1, COMMENT = 2, LONG = 8, PHRASES = 3;
 function defaults() {
   return {quantizeMs: 35, sequentialQuantize: true, curlyQuantizes: true, classicChordOrder: false, shifts: 0,
           outOfRangePlace: 2, showOutOfRange: true, outOfRangeMarks: false, outOfRangeSeparator: ":", tempoMarks: false,
-          bpmChanges: true, bpmStyle: 0, minSpeedChange: 10, breaks: 0, beats: 4, missingBpm: 120, transpose: 0,
-          autoTranspose: false, resilience: 2, autoSections: false, sectionSwitchCost: 12, sectionMinSeconds: 8,
-          sectionRestMs: 250, sectionRange: 12};
+          bpmChanges: true, bpmStyle: 0, minSpeedChange: 10, breaks: 3, beats: 4, missingBpm: 120, transpose: 0,
+          autoTranspose: true, resilience: 2, autoSections: false, sectionSwitchCost: 12, sectionMinSeconds: 8,
+          sectionRestMs: 250, sectionRange: 12, pedalMarks: 3};
 }
 function noteName(midi) { return NAMES[midi % 12] + (Math.floor(midi / 12) - 1); }
 function oneOf(character, set) { return character.length === 1 && set.indexOf(character) >= 0; }
@@ -228,7 +235,7 @@ function classicOrder(notes) {
 function sortChord(notes, classic) {
   return classic ? classicOrder(notes) : notes.slice().sort((a, b) => a.display - b.display);
 }
-function item(kind) { return {kind, segments: [], text: "", separator: "", rhythm: LONG, ms: 0, beatMs: 500, msEnd: 0}; }
+function item(kind) { return {kind, segments: [], text: "", separator: "", rhythm: LONG, ms: 0, beatMs: 500, msEnd: 0, keys: 0, shifted: 0, low: 0, high: 0}; }
 function renderChord(chord, quantized, o, r) {
   const it = item(CHORD);
   const nonOutOfRange = chord.filter(n => !n.outOfRange).length;
@@ -242,6 +249,13 @@ function renderChord(chord, quantized, o, r) {
     else if (n.display === n.midi + 1024 && !firstEnd) firstEnd = n;
   }
   if (isChord) it.segments.push({text: curly ? "{" : "[", oor: false});
+  const press = n => {
+    it.low = it.keys ? Math.min(it.low, n.midi) : n.midi;
+    it.high = it.keys ? Math.max(it.high, n.midi) : n.midi;
+    it.keys++;
+    if (oneOf(n.character, CAPS)) it.shifted++;
+    r.notes++;
+  };
   for (const n of chord) {
     if (!n.valid) { it.segments.push({text: "_", oor: false}); r.unmapped++; continue; }
     const drawOor = n.outOfRange && o.showOutOfRange;
@@ -252,11 +266,11 @@ function renderChord(chord, quantized, o, r) {
       let text = n.character;
       if (o.outOfRangeMarks && marked) text = o.outOfRangeSeparator + text;
       it.segments.push({text, oor: true});
-      r.notes++;
+      press(n);
       if (o.outOfRangeMarks && n === lastStart && nonOutOfRange > 0) it.segments.push({text: "'", oor: false});
     } else if (!n.outOfRange) {
       it.segments.push({text: n.character, oor: false});
-      r.notes++;
+      press(n);
     } else {
       r.hidden++;
     }
@@ -265,29 +279,29 @@ function renderChord(chord, quantized, o, r) {
   r.groups++;
   return it;
 }
-function transpositionScore(notes, by, mapping) {
-  let good = 0, lower = 0, upper = 0;
+function transpositionFit(notes, by, mapping) {
+  const fit = {onKeys: 0, shifted: 0};
   for (const note of notes) {
     const p = locate(0, note.midi + by, mapping, defaults());
     if (p.outOfRange || !p.valid) continue;
-    good++;
-    if (oneOf(p.character, LOWER)) lower++; else upper++;
+    fit.onKeys++;
+    if (!oneOf(p.character, LOWER)) fit.shifted++;
   }
-  return good * 2 + Math.abs(upper - lower);
+  return fit;
 }
+const SHIFTED_PER_NOTE = 4;
+function fitScore(fit) { return fit.onKeys * SHIFTED_PER_NOTE - fit.shifted; }
 function bestTransposition(notes, mapping, stickTo, resilience) {
-  let best = transpositionScore(notes, stickTo, mapping);
-  let bests = [stickTo];
-  const consider = n => {
-    const score = transpositionScore(notes, n, mapping);
-    if (score > best + resilience) { best = score; bests = [n]; }
-    else if (score === best) {
-      if (n === 0 && bests.indexOf(0) >= 0) return;
-      bests.push(n);
+  const kept = fitScore(transpositionFit(notes, stickTo, mapping));
+  let best = stickTo, bestScore = kept;
+  for (let d = 1; d <= 11 + Math.abs(stickTo); ++d) {
+    for (const n of [stickTo - d, stickTo + d]) {
+      if (n < -11 || n > 11) continue;
+      const score = fitScore(transpositionFit(notes, n, mapping));
+      if (score > bestScore) { best = n; bestScore = score; }
     }
-  };
-  for (let i = stickTo; i <= stickTo + 11; ++i) { consider(i); consider(-i); }
-  return bests[0];
+  }
+  return bestScore - kept > resilience * SHIFTED_PER_NOTE ? best : stickTo;
 }
 function chordIndices(notes, quantizeMs) {
   const indices = new Array(notes.length).fill(0);
@@ -300,17 +314,36 @@ function chordIndices(notes, quantizeMs) {
   }
   return indices;
 }
+// sheet::detail::RestsBefore.
+function restsBefore(chords) {
+  const rests = new Array(chords.length).fill(0);
+  let sounding = 0;
+  for (let k = 0; k < chords.length; ++k) {
+    if (k > 0) rests[k] = Math.max(0, chords[k].ms - sounding);
+    for (const n of chords[k].notes) sounding = Math.max(sounding, Math.max(n.seconds, n.end) * 1000);
+  }
+  return rests;
+}
+// sheet::detail::PhraseGapMs.
+function phraseGapMs(rests) {
+  const gaps = rests.slice(1);
+  if (!gaps.length) return Infinity;
+  gaps.sort((a, b) => a - b);
+  const n = gaps.length;
+  const median = n % 2 ? gaps[(n - 1) / 2] : (gaps[n / 2 - 1] + gaps[n / 2]) / 2;
+  return Math.max(500, 3.2 * median);
+}
 function bestSections(chords, mapping, o) {
   const n = chords.length;
   const candidates = [o.transpose];
   for (let d = 1; d <= o.sectionRange; ++d) { candidates.push(o.transpose - d); candidates.push(o.transpose + d); }
   const T = candidates.length;
-  const cost = 2 * o.sectionSwitchCost;
+  const cost = o.sectionSwitchCost * SHIFTED_PER_NOTE;
   const minMs = o.sectionMinSeconds * 1000, restMs = o.sectionRestMs;
   const NONE = -Infinity;
   const prefix = candidates.map(() => new Array(n + 1).fill(0));
   for (let t = 0; t < T; ++t)
-    for (let k = 0; k < n; ++k) prefix[t][k + 1] = prefix[t][k] + transpositionScore(chords[k].notes, candidates[t], mapping);
+    for (let k = 0; k < n; ++k) prefix[t][k + 1] = prefix[t][k] + fitScore(transpositionFit(chords[k].notes, candidates[t], mapping));
   const closed = [], open = [], from = [], before = [];
   for (let i = 0; i < n; ++i) { closed.push(new Array(T).fill(NONE)); open.push(new Array(T).fill(NONE)); from.push(new Array(T).fill(0)); before.push(new Array(T).fill(0)); }
   const running = new Array(T).fill(NONE), runningFrom = new Array(T).fill(0);
@@ -410,12 +443,41 @@ function tidyLines(text) {
 }
 )js"
 R"js(
+// sheet::Difficulty.
+function difficulty(items) {
+  const chords = items.filter(it => it.kind === CHORD && it.keys > 0);
+  if (!chords.length) return 0;
+  let keys = 0, shifted = 0, played = 0, jumps = 0, busiest = 0, recent = 0, first = 0;
+  const sizes = [];
+  for (let c = 0; c < chords.length; ++c) {
+    const chord = chords[c];
+    keys += chord.keys;
+    shifted += chord.shifted;
+    sizes.push(chord.keys);
+    if (c > 0) {
+      const previous = chords[c - 1];
+      const gap = chord.ms - previous.msEnd;
+      played += Math.min(gap, 2000);
+      if (gap < 300 && (Math.abs(chord.low - previous.low) >= 12 || Math.abs(chord.high - previous.high) >= 12)) ++jumps;
+    }
+    recent += chord.keys;
+    while (chord.ms - chords[first].ms > 10000) recent -= chords[first++].keys;
+    busiest = Math.max(busiest, recent / 10);
+  }
+  played = Math.max(played / 1000, 1);
+  sizes.sort((a, b) => a - b);
+  const big = sizes[Math.floor((sizes.length - 1) * 99 / 100)];
+  const speed = (keys / played + busiest) / 2;
+  const part = value => Math.min(Math.max(value, 0), 1);
+  const points = part((speed - 2) / 20) * 5.5 + part((big - 1) / 6) * 1.5 + part(shifted / keys / 0.5) + part(jumps / played / 5);
+  return Math.min(Math.max(Math.round(1 + points), 1), 10);
+}
 const NOTES_SHIFTED = 0, TRANSPOSE = 1;
 function applyRegions(notes, regions) {
   return notes.map(n => {
     let midi = n.midi;
     for (const region of regions) if (region.kind !== TRANSPOSE && n.seconds >= region.from && n.seconds <= region.to) midi += region.semitones;
-    return {seconds: n.seconds, midi};
+    return {seconds: n.seconds, midi, end: n.end === undefined ? -1 : n.end};
   });
 }
 function transposeSections(regions) { return regions.filter(r => r.kind === TRANSPOSE); }
@@ -466,6 +528,8 @@ function style(notesIn, mapping, temposIn, metersIn, o, sections) {
   let bpm = o.missingBpm, previousBpm = 0, haveTempo = false, scheduled = false, numerator = 4;
   const START = 0, UNSET = 1, SET = 2;
   let next = START, nextBar = 0, penalty = 0, current = [], currentChord = 0;
+  const rests = restsBefore(chords);
+  const phraseGap = o.breaks === PHRASES ? phraseGapMs(rests) : Infinity;
   const flush = () => {
     if (!current.length) return;
     let quantized = false;
@@ -490,7 +554,7 @@ function style(notesIn, mapping, temposIn, metersIn, o, sections) {
     current = [];
   };
   const checkBreak = first => {
-    if (o.breaks === 0) {
+    if (o.breaks === 0 || o.breaks === PHRASES) {
       const beat = beatsAt(first.ms / 1000);
       if (scheduled) {
         scheduled = false;
@@ -529,6 +593,7 @@ function style(notesIn, mapping, temposIn, metersIn, o, sections) {
     if (current.length && k !== currentChord) flush();
     if (!current.length) {
       currentChord = k;
+      if (k > 0 && rests[k] >= phraseGap) lineBreak();
       if (k > 0 && shifts[k] !== shifts[k - 1]) comment("Transpose by: " + (-shifts[k]));
     }
     const placed = locate(note.seconds * 1000, note.midi + shifts[k], mapping, o);
@@ -544,6 +609,7 @@ function style(notesIn, mapping, temposIn, metersIn, o, sections) {
   }
   while (kept.length && kept[kept.length - 1].kind === BREAK) kept.pop();
   r.items = kept;
+  r.difficulty = difficulty(r.items);
   const written = [];
   r.items.forEach((it, i) => { if (it.kind === CHORD) written.push(i); });
   for (let c = 0; c < written.length; ++c) {
@@ -566,6 +632,88 @@ function style(notesIn, mapping, temposIn, metersIn, o, sections) {
   r.text = tidyLines(text);
   return r;
 }
+const PEDAL_DOWN = 32, PEDAL_FULL = 64, PEDAL_CATCH_MS = 500, PEDAL_PASS_MS = 100;
+// sheet::detail::MergedPedal.
+function mergedPedal(changesIn) {
+  const changes = changesIn.slice().sort((a, b) => a.seconds - b.seconds);
+  const tracks = new Map(), merged = [];
+  for (const change of changes) {
+    tracks.set(change.track, change.value);
+    let deepest = 0;
+    for (const value of tracks.values()) deepest = Math.max(deepest, value);
+    if (deepest !== (merged.length ? merged[merged.length - 1].value : 0)) merged.push({ms: change.seconds * 1000, value: deepest});
+  }
+  for (let k = 0; k + 1 < merged.length; ++k)
+    if (merged[k].value >= PEDAL_DOWN && merged[k].value < PEDAL_FULL && merged[k + 1].ms - merged[k].ms < PEDAL_PASS_MS)
+      merged[k].value = k ? merged[k - 1].value : 0;
+  return merged;
+}
+// sheet::HeldByPedal.
+function heldByPedal(notes, changes) {
+  const merged = mergedPedal(changes);
+  if (!merged.length) return notes;
+  return notes.map(n => {
+    if (n.end < n.seconds) return n;
+    const ms = n.end * 1000;
+    let at = 0, to = merged.length;
+    while (at < to) { const mid = Math.floor((at + to) / 2); if (ms < merged[mid].ms) to = mid; else at = mid + 1; }
+    if (at === 0 || merged[at - 1].value < PEDAL_DOWN) return n;
+    while (at < merged.length && merged[at].value >= PEDAL_DOWN) ++at;
+    return {seconds: n.seconds, midi: n.midi, end: at < merged.length ? merged[at].ms / 1000 : Infinity};
+  });
+}
+// sheet::MarkPedals.
+const PEDAL_OFF = 0, PEDAL_NORMAL = 1, PEDAL_INVERTED = 2;
+function markPedals(r, changesIn, o) {
+  for (const it of r.items) { it.pedal = 0; it.pedalHeld = false; }
+  r.pedalMarks = PEDAL_OFF;
+  if (o.pedalMarks === PEDAL_OFF || !changesIn.length) return;
+  r.pedalMarks = o.pedalMarks;
+  const merged = mergedPedal(changesIn);
+  const chords = [];
+  r.items.forEach((it, i) => { if (it.kind === CHORD) chords.push(i); });
+  const press = new Array(chords.length).fill(0);
+  let at = 0, value = 0, presses = 0;
+  const apply = () => {
+    if (value < PEDAL_DOWN && merged[at].value >= PEDAL_DOWN) ++presses;
+    value = merged[at++].value;
+  };
+  for (let c = 0; c < chords.length; ++c) {
+    const it = r.items[chords[c]];
+    const onset = it.ms;
+    const end = c + 1 < chords.length ? Math.min(r.items[chords[c + 1]].ms, onset + PEDAL_CATCH_MS) : onset + PEDAL_CATCH_MS;
+    while (at < merged.length && merged[at].ms <= onset) apply();
+    let deepest = value;
+    while (at < merged.length && merged[at].ms < end) { apply(); deepest = Math.max(deepest, value); }
+    it.pedal = deepest >= PEDAL_FULL ? 2 : deepest >= PEDAL_DOWN ? 1 : 0;
+    press[c] = presses;
+  }
+  for (let c = 0; c + 1 < chords.length; ++c) {
+    const it = r.items[chords[c]];
+    it.pedalHeld = it.pedal !== 0 && r.items[chords[c + 1]].pedal !== 0 && press[c + 1] === press[c];
+  }
+}
+// sheet::detail::PedalHighlight and WithPedalHighlight.
+function pedalHighlight(level, marks) {
+  const down = level > 0;
+  if (marks === PEDAL_OFF || (down && marks === PEDAL_INVERTED) || (!down && marks === PEDAL_NORMAL)) return "";
+  const colour = down ? "#31406b" : "#6b3262";
+  return level === 1 ? "background:linear-gradient(transparent 50%," + colour + " 50%)" : "background:" + colour;
+}
+function withPedalHighlight(html, level, marks) {
+  const highlight = pedalHighlight(level, marks);
+  return !highlight || !html ? html : '<span style="' + highlight + '">' + html + "</span>";
+}
+// sheet::detail::Heading.
+function heading(title, level) {
+  if (!level) return title;
+  return (title ? title + " · " : "") + "Difficulty " + level + " of 10";
+}
+// sheet::SheetText.
+function sheetText(r) {
+  if (!r.difficulty) return r.text;
+  return "Difficulty: " + r.difficulty + " of 10" + (r.text ? "\n" + r.text : "");
+}
 function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -577,8 +725,11 @@ function toHtml(r) {
     const it = r.items[i];
     if (it.kind === CHORD) {
       html += '<span class="chord" data-i="' + i + '" style="color:' + COLOURS[it.rhythm] + '">';
-      for (const s of it.segments) html += s.oor ? '<span class="oor">' + escapeHtml(s.text) + "</span>" : escapeHtml(s.text);
-      html += escapeHtml(it.separator) + "</span>";
+      let chord = "";
+      for (const s of it.segments) chord += s.oor ? '<span class="oor">' + escapeHtml(s.text) + "</span>" : escapeHtml(s.text);
+      html += withPedalHighlight(chord, it.pedal || 0, r.pedalMarks || PEDAL_OFF);
+      html += withPedalHighlight(escapeHtml(it.separator), it.pedalHeld ? it.pedal : 0, r.pedalMarks || PEDAL_OFF);
+      html += "</span>";
     } else if (it.kind === COMMENT) {
       html += '<br><span class="comment">' + escapeHtml(it.text) + "</span><br>";
     } else {
@@ -588,7 +739,7 @@ function toHtml(r) {
   }
   return html;
 }
-return {defaults, applyRegions, transposeSections, style, toHtml, escapeHtml, NOTES_SHIFTED, TRANSPOSE};
+return {defaults, applyRegions, heldByPedal, transposeSections, style, markPedals, toHtml, escapeHtml, heading, sheetText, NOTES_SHIFTED, TRANSPOSE};
 })();
 /*SHEET-CORE-END*/
 )js";
@@ -604,13 +755,16 @@ const STORE = "midipp.sheet.style";
 const remembered = () => { try { return JSON.parse(localStorage.getItem(STORE) || "null"); } catch (e) { return null; } };
 const stored = data.saved ? null : remembered();
 const options = Object.assign(SheetCore.defaults(), data.options, stored && stored.options || {});
+// Pedal marks were a switch for a day; on was the one line under the pedal.
+if (typeof options.pedalMarks === "boolean") options.pedalMarks = options.pedalMarks ? 1 : 0;
 const page = Object.assign({fontSize: 10, lineHeight: 135}, data.page || {}, stored && stored.page || {});
 function remember() { try { localStorage.setItem(STORE, JSON.stringify({options, page})); } catch (e) {} }
 const unpackRegion = r => ({from: r[0], to: r[1], semitones: r[2], kind: r[3] || SheetCore.NOTES_SHIFTED});
 let regions = data.regions.map(unpackRegion);
-const notes = data.notes.map(n => ({seconds: n[0], midi: n[1]}));
+const notes = data.notes.map(n => ({seconds: n[0], midi: n[1], end: n.length > 2 ? n[2] : -1}));
 const tempos = data.tempos.map(t => ({seconds: t[0], bpm: t[1]}));
 const meters = data.meters.map(m => ({seconds: m[0], numerator: m[1]}));
+const pedals = (data.pedals || []).map(p => ({seconds: p[0], value: p[1], track: p[2]}));
 const $ = id => document.getElementById(id);
 let result = null;
 const time = seconds => {
@@ -625,7 +779,8 @@ const shiftAt = seconds => {
   return result.transposition;
 };
 function draw() {
-  result = SheetCore.style(SheetCore.applyRegions(notes, regions), data.mapping, tempos, meters, options, SheetCore.transposeSections(regions));
+  result = SheetCore.style(SheetCore.heldByPedal(SheetCore.applyRegions(notes, regions), pedals), data.mapping, tempos, meters, options, SheetCore.transposeSections(regions));
+  SheetCore.markPedals(result, pedals, options);
   const sheet = $("sheet");
   sheet.innerHTML = SheetCore.toHtml(result);
   sheet.style.fontSize = page.fontSize + "pt";
@@ -639,6 +794,7 @@ function draw() {
   if (result.merged) count += " " + result.merged + " shared notes merged.";
   if (result.unmapped) count += " " + result.unmapped + " unmapped.";
   if (result.hidden) count += " " + result.hidden + " out of range left out.";
+  if (result.difficulty) count += " Difficulty " + result.difficulty + " of 10.";
   if (result.sections.length > 1) count += " Transposed in " + result.sections.length + " sections.";
   else if (result.transposition) count += " Transposed " + signed(result.transposition) + ".";
   $("count").textContent = count;
@@ -679,6 +835,7 @@ function draw() {
   $("beats-row").style.display = options.breaks === 1 ? "" : "none";
   $("sections-row").style.display = options.autoTranspose ? "" : "none";
   $("sections-rows").style.display = options.autoTranspose && options.autoSections ? "" : "none";
+  $("pedal-rows").style.display = pedals.length ? "" : "none";
 }
 $("keep").onclick = () => {
   regions = regions.filter(r => r.kind !== SheetCore.TRANSPOSE)
@@ -786,7 +943,7 @@ function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text).then(() => true, fallback);
   return Promise.resolve(fallback());
 }
-$("copy").onclick = () => copyText(result.text).then(ok => {
+$("copy").onclick = () => copyText(SheetCore.sheetText(result)).then(ok => {
   const button = $("copy");
   button.textContent = ok ? "Copied" : "Clipboard is busy";
   setTimeout(() => { button.textContent = "Copy sheet"; }, 1500);
@@ -835,7 +992,8 @@ function sheetImage() {
   const css = "font-family:Verdana,sans-serif;font-size:" + page.fontSize + "pt;line-height:" + page.lineHeight + "%;color:#fff;" +
     "white-space:pre-wrap;background:#2D2A32;padding:16px;box-sizing:border-box;width:" + (width + 32) + "px;margin:0";
   const rules = ".oor{display:inline-flex;justify-content:center;min-width:.6em;border-bottom:2px solid;font-weight:900}.comment{color:#c8c4cc}";
-  const body = '<div style="color:#aaa4b3;margin-bottom:1.35em">' + SheetCore.escapeHtml(data.title || "") + "</div>" + sheet.innerHTML.replace(/<br>/g, "<br/>");
+  const body = '<div style="color:#aaa4b3;margin-bottom:1.35em">' + SheetCore.escapeHtml(SheetCore.heading(data.title || "", result.difficulty)) + "</div>" +
+    sheet.innerHTML.replace(/<br>/g, "<br/>");
   const probe = document.createElement("div");
   probe.setAttribute("style", css + ";position:absolute;left:-100000px;top:0");
   probe.innerHTML = "<style>" + rules + "</style>" + body;
@@ -872,7 +1030,7 @@ draw();
 // midi-converter have drifted, which is a bug here.
 if (typeof data.expected === "string") {
   const written = data.regions.map(unpackRegion);
-  const check = SheetCore.style(SheetCore.applyRegions(notes, written), data.mapping, tempos, meters,
+  const check = SheetCore.style(SheetCore.heldByPedal(SheetCore.applyRegions(notes, written), pedals), data.mapping, tempos, meters,
                                 Object.assign(SheetCore.defaults(), data.options), SheetCore.transposeSections(written)).text;
   if (check !== data.expected) {
     console.error("The page's sheet differs from the app's. Expected:\n" + data.expected + "\nGot:\n" + check);
@@ -904,7 +1062,8 @@ inline std::vector<Section> TransposeSections(const PageInput& in) {
 // script redraws on load and checks against it. If rendered is non-null it
 // receives that rendering (for the counts).
 inline std::string ToEditorHtml(const PageInput& in, StyledResult* rendered = nullptr) {
-    const auto initial = Style(ShiftedNotes(in), in.mapping, in.tempos, in.meters, in.options, TransposeSections(in));
+    auto initial = Style(HeldByPedal(ShiftedNotes(in), in.pedals), in.mapping, in.tempos, in.meters, in.options, TransposeSections(in));
+    MarkPedals(initial, in.pedals, in.options);
     if (rendered) *rendered = initial;
     std::string html = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>" + detail::EscapeHtml(in.title) +
         "</title><style>" + detail::kPageCss + "</style></head><body>\n"
@@ -927,13 +1086,13 @@ inline std::string ToEditorHtml(const PageInput& in, StyledResult* rendered = nu
         "<label class=\"row\"><span>Mention tempo changes</span><input type=\"checkbox\" data-key=\"bpmChanges\"></label>"
         "<label class=\"col\"><span>Tempo change wording</span><select data-key=\"bpmStyle\"><option value=\"0\">Detailed</option><option value=\"1\">Arrows</option></select></label>"
         "<label class=\"col\"><span>Smallest tempo change mentioned</span><div class=\"range\"><input type=\"range\" min=\"0\" max=\"100\" step=\"1\" data-key=\"minSpeedChange\" data-format=\"%%\"><output></output></div></label>"
-        "<label class=\"col\"><span>Line breaks</span><select data-key=\"breaks\"><option value=\"0\">Every bar</option><option value=\"1\">Every few beats</option><option value=\"2\">None</option></select></label>"
+        "<label class=\"col\"><span>Line breaks</span><select data-key=\"breaks\"><option value=\"0\">Every bar</option><option value=\"3\">Every bar and phrase</option><option value=\"1\">Every few beats</option><option value=\"2\">None</option></select></label>"
         "<label class=\"col\" id=\"beats-row\"><span>Beats per line</span><div class=\"range\"><input type=\"range\" min=\"1\" max=\"32\" step=\"1\" data-key=\"beats\" data-format=\"% beats\"><output></output></div></label>"
         "<label class=\"col\"><span>Tempo when the file names none</span><div class=\"range\"><input type=\"range\" min=\"20\" max=\"400\" step=\"1\" data-key=\"missingBpm\" data-format=\"% BPM\"><output></output></div></label>\n"
         "<h2>Transposition</h2>"
         "<label class=\"col\"><span>Transpose</span><div class=\"range\"><input type=\"range\" min=\"-24\" max=\"24\" step=\"1\" data-key=\"transpose\" data-format=\"% semitones\"><output></output></div></label>"
         "<label class=\"row\"><span>Find the best transposition</span><input type=\"checkbox\" data-key=\"autoTranspose\"></label>"
-        "<label class=\"col\"><span>Keep Transpose unless better by</span><div class=\"range\"><input type=\"range\" min=\"0\" max=\"20\" step=\"1\" data-key=\"resilience\"><output></output></div></label>"
+        "<label class=\"col\"><span>Keep Transpose unless better by</span><div class=\"range\"><input type=\"range\" min=\"0\" max=\"20\" step=\"1\" data-key=\"resilience\" data-format=\"% notes\"><output></output></div></label>"
         "<div id=\"sections-row\"><label class=\"row\"><span>Change transposition part-way</span><input type=\"checkbox\" data-key=\"autoSections\"></label>"
         "</div>"
         "<div id=\"sections-rows\">"
@@ -942,6 +1101,9 @@ inline std::string ToEditorHtml(const PageInput& in, StyledResult* rendered = nu
         "<label class=\"col\"><span>Rest before a switch</span><div class=\"range\"><input type=\"range\" min=\"0\" max=\"2000\" step=\"50\" data-key=\"sectionRestMs\" data-format=\"% ms\"><output></output></div></label>"
         "<label class=\"col\"><span>Search range</span><div class=\"range\"><input type=\"range\" min=\"1\" max=\"24\" step=\"1\" data-key=\"sectionRange\" data-format=\"% semitones either way\"><output></output></div></label>"
         "</div>\n"
+        "<div id=\"pedal-rows\"><h2>Pedal</h2>"
+        "<label class=\"col\"><span>Pedal marks</span><select data-key=\"pedalMarks\"><option value=\"3\">Both</option>"
+        "<option value=\"1\">Normal</option><option value=\"2\">Inverted</option><option value=\"0\">Off</option></select></label></div>\n"
         "<h2>Sections</h2><ul id=\"sections\"></ul><button id=\"keep\">Keep these sections</button>\n"
         "<h2>Page</h2>"
         "<label class=\"col\"><span>Text size</span><div class=\"range\"><input type=\"range\" min=\"6\" max=\"24\" step=\"1\" data-key=\"fontSize\" data-page=\"1\" data-format=\"% pt\"><output></output></div></label>"
