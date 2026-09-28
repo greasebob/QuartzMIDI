@@ -1162,6 +1162,7 @@ void Panels::LoadPreferences(const std::filesystem::path& path) {
         preferences.autoSolo = value("autoSoloPiano", false);
         preferences.alwaysOnTop = value("alwaysOnTop", false);
         preferences.mediaKeys = value("mediaKeys", true);
+        preferences.blockAltF4 = value("blockAltF4", true);
         preferences.hideFromTaskbar = value("hideFromTaskbar", false);
         preferences.opacity = std::clamp(value("opacity", 100), 40, 100);
         preferences.converterCpu = std::clamp(value("converterCpu", 75), 25, 100);
@@ -1215,6 +1216,7 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
                         {"midiFolder", Utf8(preferences.folder)},
                         {"song", Utf8(preferences.lastSong)},
                         {"alwaysOnTop", preferences.alwaysOnTop}, {"mediaKeys", preferences.mediaKeys},
+                        {"blockAltF4", preferences.blockAltF4},
                         {"opacity", preferences.opacity}, {"converterCpu", preferences.converterCpu},
                         {"convertPlaylist", convertPlaylist_}, {"timingSource", timingSource_},
                         {"folders", preferences.folders}, {"openFolder", browse_}, {"mini", miniMode},
@@ -2885,6 +2887,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     section("Hotkeys");
     if (revealSettingsHotkeys) ImGui::SetScrollHereY(0.f);
     SettingSwitch("Media keys", preferences.mediaKeys, nullptr, fonts, design, dpi);
+    SettingSwitch("Block Alt+F4 while playing", preferences.blockAltF4, nullptr, fonts, design, dpi);
     {
         // Action, its key as a keycap, and a button to unbind it. When armed, the cap
         // is empty inside the accent ring, as in Key Mapping. A key held by another

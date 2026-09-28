@@ -57,7 +57,8 @@ namespace {
 //
 // Windows matches hotkeys against the modifiers this app injects (Shift for
 // black keys, Alt for velocity, Ctrl for 88 keys), so while typing each key is
-// also registered under every Shift/Ctrl/Alt combination. Alt+F4 is never taken.
+// also registered under every Shift/Ctrl/Alt combination. Alt+F4 is taken only
+// with the Block Alt+F4 switch on.
 constexpr int kModifierMixes = 8;   // bit 0 Shift, bit 1 Ctrl, bit 2 Alt
 constexpr int kHotkeyIdStride = 32; // id = place + 1 + stride * mix
 static_assert(shell::kHotkeys < kHotkeyIdStride);
@@ -95,6 +96,7 @@ struct Registered {
     bool rawKeyboard = false;
     bool typing = false;
     bool media = false;
+    bool blockAltF4 = false;
     bool any = false;
 };
 // What WM_INPUT fires, owned by the message loop's thread like WM_HOTKEY.
@@ -138,7 +140,7 @@ void UnregisterHotkeys(HWND hwnd, Registered& done) {
 // input instead; one that cannot be read either is reported through
 // Registered::held, not treated as fatal.
 void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, shell::kHotkeys>& names,
-                     const std::vector<shell::SongHotkey>& songs, bool typing, bool media) {
+                     const std::vector<shell::SongHotkey>& songs, bool typing, bool media, bool blockAltF4) {
     UnregisterHotkeys(hwnd, done);
     const auto modifiersOf = [](int mix) {
         return static_cast<UINT>(MOD_NOREPEAT | (mix & 1 ? MOD_SHIFT : 0) | (mix & 2 ? MOD_CONTROL : 0) | (mix & 4 ? MOD_ALT : 0));
@@ -146,7 +148,7 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
     // Registers `vk` under id base + stride * mix; true when it went in unmodified.
     const auto take = [&](int vk, int base, int stride, uint8_t& mixes) {
         for (int mix = 0; vk != 0 && mix < (typing ? kModifierMixes : 1); ++mix) {
-            if (vk == VK_F4 && (mix & 4)) continue;
+            if (!shell::RegistersMix(vk, mix, blockAltF4)) continue;
             if (RegisterHotKey(hwnd, base + stride * mix, modifiersOf(mix), static_cast<UINT>(vk))) mixes |= static_cast<uint8_t>(1u << mix);
         }
         return (mixes & 1) != 0;
@@ -188,6 +190,7 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
     done.names = names;
     done.typing = typing;
     done.media = media;
+    done.blockAltF4 = blockAltF4;
     done.any = true;
 }
 
@@ -939,9 +942,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                         : snapshot->trigger == 0 || snapshot->performer.TriggerOfKey(i) != snapshot->trigger;
                 for (size_t i = 0; i < shell::kHotkeys; ++i) if (resting[i]) wanted[i].clear();
                 const bool media = panels.preferences.mediaKeys;
+                const bool blockAltF4 = panels.preferences.blockAltF4;
                 if (!hotkeys.any || wanted != hotkeys.names || snapshot->songHotkeys != hotkeys.songs ||
-                    typing != hotkeys.typing || media != hotkeys.media) {
-                    RegisterHotkeys(hwnd, hotkeys, wanted, snapshot->songHotkeys, typing, media);
+                    typing != hotkeys.typing || media != hotkeys.media || blockAltF4 != hotkeys.blockAltF4) {
+                    RegisterHotkeys(hwnd, hotkeys, wanted, snapshot->songHotkeys, typing, media, blockAltF4);
                     panels.songKeysAvailable = hotkeys.songHeld;
                     panels.stopHotkeyAvailable = hotkeys.held[3];
                     for (size_t i = 0; i < shell::kHotkeys; ++i) {

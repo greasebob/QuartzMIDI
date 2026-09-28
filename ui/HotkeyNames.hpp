@@ -63,6 +63,13 @@ inline constexpr std::pair<const char*, int> kNamedKeys[]{
 // A mouse side button, which RegisterHotKey cannot take; the shell reads it as raw input.
 inline constexpr bool IsMouseHotkey(int vk) { return vk == VK_XBUTTON1 || vk == VK_XBUTTON2; }
 
+// Whether the shell registers `vk` under modifier mix `mix` (1 Shift, 2 Ctrl,
+// 4 Alt). Alt+F4 is left to Windows unless `blockAltF4`: while playing, velocity
+// holds Alt, so an F4 hotkey pressed then would close the game.
+inline constexpr bool RegistersMix(int vk, int mix, bool blockAltF4) {
+    return blockAltF4 || !(vk == VK_F4 && (mix & 4));
+}
+
 // A key another program has registered cannot be registered again, so the shell
 // reads it as raw input instead, and the press still reaches the game. Whether
 // a raw press of `vk` held with modifier mix `mix` (1 Shift, 2 Ctrl, 4 Alt)

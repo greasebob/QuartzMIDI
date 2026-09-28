@@ -37,6 +37,9 @@ struct Preferences {
     // Media play/previous/next/stop keys act as hotkeys too; off leaves them to
     // the media player.
     bool mediaKeys = true;
+    // While playing, a hotkey on F4 is also taken with Alt held, so an F4 that
+    // lands on a velocity tap's Alt reaches no window as Alt+F4.
+    bool blockAltF4 = true;
     // Not persisted: the window starts closed every run.
     bool keyMappingOpen = false;
     bool alwaysOnTop = false;
