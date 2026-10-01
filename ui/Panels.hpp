@@ -116,6 +116,13 @@ public:
     // Hotkey being rebound in Settings, or -1. The shell unregisters the hotkeys,
     // polls for the key and sends the rebind.
     int hotkeyCapture = -1;
+    // Set when the greyed Hide from taskbar switch arms the Show/hide window
+    // capture, so the key it takes turns the switch on. The shell clears it
+    // once that capture ends.
+    bool hideOnShowHideKey = false;
+    // A key taken that way turns the switch on only once it registers; a key
+    // another program holds leaves it off. Cleared when Settings closes.
+    bool hideOnceShowHideWorks = false;
     // Song whose own key is being captured, from its menu in MIDI Files or its
     // row in Settings, or empty. Cleared when neither is drawn any more.
     std::filesystem::path songHotkeyCapture;
@@ -319,8 +326,6 @@ private:
     bool sheetPending_ = false;
     char convertLink_[1024]{};
     bool convertPlaylist_ = false;
-    // Which converter install (CPU or NVIDIA) is running.
-    bool installNvidia_ = false;
     // Whether the last frame drew the Convert popover's moving progress bar; a
     // conversion with the popover closed has nothing that moves on its own.
     bool convertBarDrawn_ = false;
@@ -335,12 +340,22 @@ private:
     // get caps; the rest collapse to "+N".
     float DrawTransportHints(ImDrawList* draw, const skin::Skin& s, float dpi, ImVec2 origin, const EngineSnapshot& state,
                              size_t tapCaps = kAddonHotkeys, bool performerOnly = false) const;
-    bool aboutRevealed_ = false;
+    // One frame: scroll Settings to the Show/hide window row just armed.
+    bool revealShowHideKey_ = false;
     bool volumeWasOpen_ = false;
     GameWindow volumeWindow_;
     void SettingsControl(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, float);
     void DrawMini(HWND, const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, ImVec2);
     void DrawStatus(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, float, float);
+    // The update chip's label for a top strip with `room` before its utility
+    // buttons: the version alone when the full label would squeeze the device
+    // pill, and empty with no newer release to offer.
+    std::string UpdateLabel(float room, const skin::Skin&, float dpi) const;
+    // The position and length right-aligned at `right`, with a looped section's
+    // bounds before them while there is room after `left`.
+    void TimeReadout(ImDrawList*, const EngineSnapshot&, bool section, float left, float right, float y, const skin::Skin&) const;
+    // A looped section's start and end, following a handle while it is dragged.
+    std::string SectionBounds(const EngineSnapshot&) const;
     // The armed capture's ring over the last item: the accent, or just after a
     // refused key the warning colour with a tint of it inside.
     void CaptureRing(ImDrawList* draw, const skin::Skin& s, float dpi) const;

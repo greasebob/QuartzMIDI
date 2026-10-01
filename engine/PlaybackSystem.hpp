@@ -314,6 +314,9 @@ public:
     // owner registers a reset here so a target switch clears that state in the
     // same call that releases the keys.
     void set_live_release_hook(std::function<void()> hook);
+    // Live input takes a hold of the finest timer tick while its device is
+    // open and gives it back when it closes; the player gives back any left.
+    void hold_live_timer(bool hold) noexcept;
 
     // Windows' finest timer tick is asked for only while it is needed: while
     // a song plays and while live input is open, over every player. This is
@@ -529,8 +532,8 @@ private:
     // Takes or gives back one hold of the finest timer tick; the first hold
     // asks Windows for it and the last gives it back.
     static void hold_timer_resolution(bool hold) noexcept;
-    // Live input is open while its release hook is registered.
-    bool live_timer_held{ false };
+    // Holds live input has taken with hold_live_timer.
+    std::atomic<int> live_timer_holds{ 0 };
     // A send that came back short is logged once a song: cleared when a song
     // is loaded or restarted.
     std::atomic<bool> short_send_logged{ false };
@@ -660,6 +663,9 @@ private:
     // down again, or on the MIDI target each pedal's value is sent, merged
     // over tracks as playing merges it. Called with the keys released.
     void restore_pedal(size_t index);
+    // Lets the pedal go and nothing else, for a Tap loop's wrap, where the
+    // keys a tap holds are the tap's to let go.
+    void release_pedal();
     std::chrono::steady_clock::time_point hold_resume_at{};
     std::vector<std::pair<std::string, bool>> action_queue;   // id and schedules; guarded by tap_mutex
     std::atomic<bool> action_pending{ false };

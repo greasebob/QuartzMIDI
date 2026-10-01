@@ -17,8 +17,8 @@ std::string Utf8(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(text.data()), text.size()};
 }
 
-// Parsed from the page's <script id="sheet-data"> JSON: "options" and "page".
-struct SheetStyle { sheet::StyleOptions options; sheet::Look look; };
+// Parsed from the page's <script id="sheet-data"> JSON: "options", "page" and "look".
+struct SheetStyle { sheet::StyleOptions options; sheet::Look look; sheet::Header header; };
 
 SheetStyle StyleFromPage(const std::filesystem::path& page) {
     std::ifstream file(page, std::ios::binary);
@@ -31,10 +31,11 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
     Json data;
     try { data = Json::parse(html.substr(start + open.size(), end - start - open.size())); }
     catch (const std::exception&) { throw std::runtime_error(Utf8(page.filename()) + " is not a page saved from the sheet editor."); }
+    if (!data.is_object()) throw std::runtime_error(Utf8(page.filename()) + " is not a page saved from the sheet editor.");
     SheetStyle style;
     auto& s = style.options;
-    const auto o = data.value("options", Json::object());
-    if (!o.is_object()) return style;
+    auto o = data.value("options", Json::object());
+    if (!o.is_object()) o = Json::object();
     s.quantizeMs = o.value("quantizeMs", s.quantizeMs);
     s.sequentialQuantize = o.value("sequentialQuantize", s.sequentialQuantize);
     s.curlyQuantizes = o.value("curlyQuantizes", s.curlyQuantizes);
@@ -69,7 +70,64 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
         style.look.fontSizePt = std::clamp(p.value("fontSize", style.look.fontSizePt), 4.0, 48.0);
         style.look.lineHeightPercent = std::clamp(p.value("lineHeight", style.look.lineHeightPercent), 80.0, 400.0);
     }
+    // Each part of the look on its own: one of the wrong kind keeps its default.
+    const auto l = data.value("look", Json::object());
+    if (l.is_object()) {
+        auto& look = style.look;
+        const auto number = [&](const char* key, int fallback, int low, int high) {
+            const auto it = l.find(key);
+            return it != l.end() && it->is_number() ? std::clamp(static_cast<int>(it->get<double>()), low, high) : fallback;
+        };
+        const auto colour = [&](const char* key, std::string& into) {
+            const auto it = l.find(key);
+            if (it != l.end() && it->is_string() && sheet::IsLookColour(it->get<std::string>())) into = it->get<std::string>();
+        };
+        look.theme = number("theme", look.theme, 0, 3);
+        look.ground = static_cast<sheet::Look::Ground>(number("ground", look.ground, 0, 2));
+        look.fit = static_cast<sheet::Look::Fit>(number("fit", look.fit, 0, 1));
+        look.dim = number("dim", look.dim, 0, 100);
+        look.grain = number("grain", look.grain, 0, 100);
+        look.font = static_cast<sheet::Look::Font>(number("font", look.font, 0, 2));
+        if (const auto it = l.find("oneColour"); it != l.end() && it->is_boolean()) look.oneColour = it->get<bool>();
+        colour("background", look.background);
+        colour("text", look.text);
+        colour("comment", look.comment);
+        colour("heading", look.heading);
+        colour("pedalDown", look.pedalDown);
+        colour("pedalUp", look.pedalUp);
+        if (const auto it = l.find("rhythm"); it != l.end() && it->is_array())
+            for (size_t i = 0; i < look.rhythm.size() && i < it->size(); ++i)
+                if ((*it)[i].is_string() && sheet::IsLookColour((*it)[i].get<std::string>())) look.rhythm[i] = (*it)[i].get<std::string>();
+        if (const auto it = l.find("image"); it != l.end() && it->is_string() && it->get<std::string>().rfind("data:image/", 0) == 0) look.image = it->get<std::string>();
+    }
+    // Which header lines show. The song's own text stays with its song.
+    const auto h = data.value("header", Json::object());
+    if (h.is_object()) {
+        auto& header = style.header;
+        const auto flag = [&](const char* key, bool& into) { if (const auto it = h.find(key); it != h.end() && it->is_boolean()) into = it->get<bool>(); };
+        flag("title", header.title);
+        flag("subtitle", header.subtitle);
+        flag("artist", header.artist);
+        flag("arranger", header.arranger);
+        flag("tempo", header.tempo);
+        flag("key", header.key);
+        flag("difficulty", header.difficulty);
+        flag("date", header.date);
+        flag("centre", header.centre);
+        if (const auto it = h.find("arrangerName"); it != h.end() && it->is_string()) header.arrangerName = it->get<std::string>();
+    }
     return style;
+}
+
+void ApplyStyle(sheet::PageInput& page, const SheetStyle& style) {
+    page.options = style.options;
+    page.look = style.look;
+    page.header = style.header;
+}
+
+// The sheet's text with the header the style asks for.
+std::string TextOf(const sheet::PageInput& page, const sheet::StyledResult& result) {
+    return sheet::SheetText(result, page.header, sheet::FileSongText(page), sheet::FactsOf(page), page.title);
 }
 
 // Notes arrive in seconds ("notes") or in ticks ("ticks") when the file was
@@ -115,9 +173,14 @@ Json Answer(const Json& request) {
         return Counts(result, result.text);
     }
     if (what == "page") {
+        // Drawn with the style page the files are saved with, so the editor
+        // opens on what Save sheet files writes.
+        auto page = PageFrom(request.at("page"));
+        const auto stylePage = request.value("style", "");
+        if (!stylePage.empty()) { ApplyStyle(page, StyleFromPage(PathOf(stylePage))); page.styled = true; }
         sheet::StyledResult result;
-        const auto html = sheet::ToEditorHtml(PageFrom(request.at("page")), &result);
-        auto reply = Counts(result, sheet::SheetText(result));
+        const auto html = sheet::ToEditorHtml(page, &result);
+        auto reply = Counts(result, TextOf(page, result));
         reply["html"] = html;
         reply["difficulty"] = result.difficulty;
         return reply;
@@ -127,7 +190,7 @@ Json Answer(const Json& request) {
         // Writes <stem>.html/.txt/.png; the page is rendered once and supplies the text.
         auto page = PageFrom(request.at("page"));
         const auto stylePage = request.value("style", "");
-        if (!stylePage.empty()) { const auto style = StyleFromPage(PathOf(stylePage)); page.options = style.options; page.look = style.look; }
+        if (!stylePage.empty()) ApplyStyle(page, StyleFromPage(PathOf(stylePage)));
         const auto stem = PathOf(request.at("stem").get<std::string>());
         const auto outputs = request.value("outputs", Json::object());
         std::error_code ignored;
@@ -144,9 +207,13 @@ Json Answer(const Json& request) {
             wrote.push_back(Utf8(path));
         };
         if (outputs.value("page", true)) write(L".html", html);
-        if (outputs.value("text", true)) write(L".txt", sheet::SheetText(result));
-        if (outputs.value("image", true)) { auto path = stem; path += L".png"; sheet::SavePng(result, page.title, page.look, path); wrote.push_back(Utf8(path)); }
-        auto reply = Counts(result, sheet::SheetText(result));
+        if (outputs.value("text", true)) write(L".txt", TextOf(page, result));
+        if (outputs.value("image", true)) {
+            auto path = stem; path += L".png";
+            sheet::SavePng(result, {sheet::HeadingLines(result, page.header, sheet::FileSongText(page), sheet::FactsOf(page)), page.header.centre}, page.look, path);
+            wrote.push_back(Utf8(path));
+        }
+        auto reply = Counts(result, TextOf(page, result));
         reply["wrote"] = std::move(wrote);
         reply["difficulty"] = result.difficulty;
         return reply;

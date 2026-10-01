@@ -22,7 +22,7 @@ By BobGrease. Based on [MIDI++](https://github.com/Zephkek/MIDIPlusPlus) by Zeph
 
 ## Add-ons
 
-`QuartzMIDI-v1.1.1.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.1.1.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.1.1-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
+`QuartzMIDI-v1.2.0.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.2.0.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.2.0-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
 
 - `sheets.zip`: a song as a sheet, copied, saved or opened in the sheet editor.
 - `converter.zip`: audio to MIDI, from a file or a link.
@@ -45,6 +45,7 @@ QuartzMIDI is a fork of [Zephkek/MIDIPlusPlus](https://github.com/Zephkek/MIDIPl
 It uses [RtMidi](https://github.com/thestk/rtmidi), [Dear ImGui](https://github.com/ocornut/imgui), [nlohmann/json](https://github.com/nlohmann/json), [Lucide](https://lucide.dev) icons and [IBM Plex Sans](third_party/fonts/ibm-plex-sans/README.md).
 Tested by Shampoojr, who found most of the bugs, and by Floofy, Gene and Solitrek.
 Prior art: [shizuhaki/miditoqwerty](https://github.com/shizuhaki/miditoqwerty) and [ArijanJ/miditoqwerty](https://github.com/ArijanJ/miditoqwerty).
+The converter runs [Transkun](https://github.com/Yujia-Yan/Transkun) by Yujia Yan through the ONNX export from [Justagwas/Pianoscribe](https://github.com/Justagwas/Pianoscribe).
 Ideas for looping, playlists, the library scan and more came from [Velo](https://github.com/brenucode/velo-midiplayer) by brenu.
 
 ## License

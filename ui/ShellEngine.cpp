@@ -6,6 +6,7 @@
 #include "MidiOutput.hpp"
 #include "WootingAnalog.hpp"
 #include "../engine/AddonHost.hpp"
+#include "../engine/CrashGuard.hpp"
 #include "AddonKey.hpp"
 #include "Bundle.hpp"
 #include "SavedFiles.hpp"
@@ -365,11 +366,6 @@ bool WatchFolder(const std::filesystem::path& root, HANDLE directory, std::stop_
 
 // library.json: the favourites by path and the list the panel shows.
 std::filesystem::path PathFromText(const std::string& text) { return std::filesystem::path(std::u8string(text.begin(), text.end())); }
-nlohmann::json PathsToJson(const std::vector<std::filesystem::path>& paths) {
-    auto list = nlohmann::json::array();
-    for (const auto& path : paths) list.push_back(Utf8(path));
-    return list;
-}
 // A saved file's entries are read one by one, and one of the wrong kind is
 // left out alone, setting damaged.
 std::vector<std::filesystem::path> PathsFromJson(const nlohmann::json& json, const char* key, bool& damaged) {
@@ -403,10 +399,13 @@ std::vector<MovedSong> MovedFromJson(const nlohmann::json& json, const char* key
         else damaged = true;
     return songs;
 }
-nlohmann::json MovedToJson(const std::vector<MovedSong>& songs) {
-    auto list = nlohmann::json::array();
-    for (const auto& song : songs) list.push_back({{"file", Utf8(song.file)}, {"origin", Utf8(song.origin)}});
-    return list;
+// Whether a song in the Trash is gone for good: its file is not there while the
+// folder holding the Trash is, so its drive is too. Not knowing counts as there.
+bool TrashGone(const std::filesystem::path& file) {
+    std::error_code error;
+    if (std::filesystem::exists(file, error) || error) return false;
+    const auto above = file.parent_path().parent_path();
+    return !above.empty() && std::filesystem::is_directory(above, error) && !error;
 }
 // Sends files to the Recycle Bin in one operation, never deleting them outright:
 // where the bin cannot take them, Windows asks first. On a thread of its own,
@@ -596,29 +595,54 @@ void RunScan(std::shared_ptr<ScanLine> line, uint64_t id, std::vector<std::files
     });
     line->Report(std::move(finished));
 }
-void ReadLibrary(const nlohmann::json& json, LibraryLists& lists, int& openList, bool& damaged) {
+// Songs in the MIDI folder are kept by their path in it, below "folder", so
+// the lists follow the folder when it moves; files from before kept whole paths.
+void ReadLibrary(const nlohmann::json& json, LibraryLists& lists, int& openList, std::filesystem::path& root, bool& damaged) {
+    if (const auto folder = json.find("folder"); folder != json.end() && !folder->is_string()) damaged = true;
+    root = PathFromText(TextOf(json, "folder"));
+    const auto whole = [&](std::filesystem::path& path) { if (!root.empty() && path.is_relative()) path = root / path; };
     lists.favourites = PathsFromJson(json, "favourites", damaged);
     lists.queue = PathsFromJson(json, "queue", damaged);
-    // A song emptied from the Trash folder by hand is gone.
     lists.trash = MovedFromJson(json, "trash", damaged);
-    std::erase_if(lists.trash, [](const MovedSong& song) { std::error_code gone; return !std::filesystem::is_regular_file(song.file, gone); });
     lists.scanned = MovedFromJson(json, "scanned", damaged);
     if (const auto playlists = json.find("playlists"); playlists != json.end() && !playlists->is_array()) damaged = true;
     else if (playlists != json.end())
         for (const auto& each : *playlists)
             if (const auto name = TextOf(each, "name"); !name.empty()) lists.playlists.push_back({name, PathsFromJson(each, "songs", damaged)});
             else damaged = true;
+    for (auto& song : lists.favourites) whole(song);
+    for (auto& song : lists.queue) whole(song);
+    for (auto& playlist : lists.playlists) for (auto& song : playlist.songs) whole(song);
+    for (auto& song : lists.trash) { whole(song.file); whole(song.origin); }
+    for (auto& song : lists.scanned) { whole(song.file); whole(song.origin); }
+    lists.Deduplicate();
+    // A song emptied from the Trash folder by hand is gone; one on a drive not
+    // there now keeps its record, and where it came from, for when it is back.
+    std::erase_if(lists.trash, [](const MovedSong& song) { return TrashGone(song.file); });
     const auto open = json.find("open");
     if (open != json.end() && !open->is_number_integer()) damaged = true;
     const int shown = open != json.end() && open->is_number_integer() ? open->get<int>() : kFolderList;
     openList = ListShown(lists, shown) ? shown : kFolderList;
 }
-nlohmann::json WriteLibrary(const LibraryLists& lists, int openList) {
+nlohmann::json WriteLibrary(const LibraryLists& lists, int openList, const std::filesystem::path& root) {
+    const auto text = [&](const std::filesystem::path& path) { const auto rest = Below(path, root); return Utf8(rest.empty() ? path : rest); };
+    const auto paths = [&](const std::vector<std::filesystem::path>& songs) {
+        auto list = nlohmann::json::array();
+        for (const auto& song : songs) list.push_back(text(song));
+        return list;
+    };
+    const auto moved = [&](const std::vector<MovedSong>& songs) {
+        auto list = nlohmann::json::array();
+        for (const auto& song : songs) list.push_back({{"file", text(song.file)}, {"origin", text(song.origin)}});
+        return list;
+    };
     auto playlists = nlohmann::json::array();
-    for (const auto& playlist : lists.playlists) playlists.push_back({{"name", playlist.name}, {"songs", PathsToJson(playlist.songs)}});
-    return {{"favourites", PathsToJson(lists.favourites)}, {"playlists", std::move(playlists)},
-            {"queue", PathsToJson(lists.queue)}, {"trash", MovedToJson(lists.trash)}, {"scanned", MovedToJson(lists.scanned)},
-            {"open", openList}};
+    for (const auto& playlist : lists.playlists) playlists.push_back({{"name", playlist.name}, {"songs", paths(playlist.songs)}});
+    nlohmann::json json{{"favourites", paths(lists.favourites)}, {"playlists", std::move(playlists)},
+                        {"queue", paths(lists.queue)}, {"trash", moved(lists.trash)}, {"scanned", moved(lists.scanned)},
+                        {"open", openList}};
+    if (!root.empty()) json["folder"] = Utf8(root);
+    return json;
 }
 
 std::mutex addonsMutex;
@@ -665,6 +689,9 @@ ShellEngine::~ShellEngine() {
 }
 
 void ShellEngine::Send(Command command) {
+    // Panic lets the keys go at once, on the caller's thread: the worker may
+    // be parsing a song for seconds. Its own sweep follows in order.
+    if (command.action == Action::Panic) crash::ReleaseKeys();
     { std::lock_guard lock(mutex_); commands_.push_back(std::move(command)); }
     wake_.notify_one();
 }
@@ -908,28 +935,59 @@ void ShellEngine::Run(std::stop_token stop) {
                 }
         }
     }
+    // Each value is read on its own: one of the wrong kind falls back to its
+    // default alone, named in the log and the status bar, and the values
+    // around it still load.
+    std::vector<std::string> unreadSettings;
+    const auto setting = [&]<typename T>(const nlohmann::json& json, const std::string& key, T fallback) {
+        bool wrong = false;
+        auto value = SavedValue(json, key.c_str(), std::move(fallback), wrong);
+        if (wrong) unreadSettings.push_back(key);
+        return value;
+    };
+    // A member holding settings of its own, or null where it is missing or not an object.
+    const auto group = [&](const char* key) -> const nlohmann::json* {
+        const auto found = configJson.find(key);
+        if (found == configJson.end()) return nullptr;
+        if (!found->is_object()) { unreadSettings.push_back(key); return nullptr; }
+        return &*found;
+    };
+    // A string member, or null.
+    const auto textAt = [](const nlohmann::json& json, const char* key) -> const std::string* {
+        if (!json.is_object()) return nullptr;
+        const auto found = json.find(key);
+        return found != json.end() && found->is_string() ? found->get_ptr<const std::string*>() : nullptr;
+    };
+    // Song keys that could not be read are written back as they were, and a
+    // list of them that is not a list is never written over.
+    std::vector<nlohmann::json> unreadSongHotkeys;
+    bool songHotkeysUnread = false;
+    std::filesystem::path songKeysRoot;
     try {
         std::ifstream stream(config_);
         configJson = nlohmann::json::parse(stream);
         if (!configJson.is_object()) throw std::runtime_error("config.json is not a JSON object.");
         configLoaded = true;
-        state.eightyEightKeys = configJson.value("SHELL_88_KEYS", true);
+        state.eightyEightKeys = setting(configJson, "SHELL_88_KEYS", true);
         // Read mappings before any field a hand-edited file might break;
         // without them the player's mappings are cleared and no note types.
         state.keyMappings = configJson.at("KEY_MAPPINGS").at(state.eightyEightKeys ? "FULL" : "LIMITED").get<decltype(state.keyMappings)>();
-        state.outRange = configJson.value("SHELL_OUT_RANGE", false);
-        state.playbackDelay = std::clamp(configJson.value("SHELL_PLAYBACK_DELAY", 3), 0, 10);
-        state.seekStep = std::clamp(configJson.value("SHELL_SEEK_STEP", 10), 1, 60);
+    } catch (const std::exception& error) { state.error = error.what(); }
+    if (configLoaded) try {
+        state.outRange = setting(configJson, "SHELL_OUT_RANGE", false);
+        state.playbackDelay = std::clamp(setting(configJson, "SHELL_PLAYBACK_DELAY", 3), 0, 10);
+        state.seekStep = std::clamp(setting(configJson, "SHELL_SEEK_STEP", 10), 1, 60);
         // The player accepts speeds from 0.05 to 8.
-        state.speedMin = std::clamp(configJson.value("SHELL_SPEED_MIN", .25), .05, 1.0);
-        state.speedMax = std::clamp(configJson.value("SHELL_SPEED_MAX", 2.0), 1.0, 8.0);
-        state.shuffle = configJson.value("SHELL_SHUFFLE", false);
-        state.loop = std::clamp(configJson.value("SHELL_LOOP", 0), 0, 2);
-        state.holdBehind = configJson.value("SHELL_HOLD_BEHIND", true);
-        if (const auto keys = configJson.find("HOTKEY_SETTINGS"); keys != configJson.end() && keys->is_object())
+        state.speedMin = std::clamp(setting(configJson, "SHELL_SPEED_MIN", .25), .05, 1.0);
+        state.speedMax = std::clamp(setting(configJson, "SHELL_SPEED_MAX", 2.0), 1.0, 8.0);
+        state.shuffle = setting(configJson, "SHELL_SHUFFLE", false);
+        state.loop = std::clamp(setting(configJson, "SHELL_LOOP", 0), 0, 2);
+        state.holdBehind = setting(configJson, "SHELL_HOLD_BEHIND", true);
+        if (const auto keys = configJson.find("HOTKEY_SETTINGS"); keys != configJson.end() && !keys->is_object()) unreadSettings.push_back("HOTKEY_SETTINGS");
+        else if (keys != configJson.end())
             for (size_t i = 0; i < kHotkeys; ++i) {
                 if (hotkeyFields[i].empty()) continue;
-                state.hotkeys[i] = keys->value(hotkeyFields[i], hotkeyDefaults[i]);
+                state.hotkeys[i] = setting(*keys, hotkeyFields[i], hotkeyDefaults[i]);
                 // A key the app types, saved before capture passed over it, is unbound.
                 if (const int vk = NameToVK(state.hotkeys[i]); vk != 0 && IsNoteKey(vk, state.keyMappings)) {
                     state.hotkeys[i].clear();
@@ -940,46 +998,57 @@ void ShellEngine::Run(std::stop_token stop) {
                 if (keys->contains(hotkeyFields[i])) continue;
                 for (size_t j = 0; j < kHotkeys; ++j)
                     if (j != i && !hotkeyFields[j].empty() && keys->contains(hotkeyFields[j]) &&
-                        NameToVK(keys->value(hotkeyFields[j], std::string())) == NameToVK(state.hotkeys[i]))
+                        NameToVK(TextOf(*keys, hotkeyFields[j].c_str())) == NameToVK(state.hotkeys[i]))
                         state.hotkeys[i].clear();
             }
-        // A song's key the app types, or one another action or song holds, is dropped.
-        if (const auto songs = configJson.find("SHELL_SONG_HOTKEYS"); songs != configJson.end() && songs->is_array())
+        // A song's key the app types, or one another action or song holds, is
+        // dropped. A song in the MIDI folder is kept by its path in it, as in library.json.
+        songKeysRoot = PathFromText(setting(configJson, "SHELL_SONG_HOTKEYS_FOLDER", std::string()));
+        if (const auto songs = configJson.find("SHELL_SONG_HOTKEYS"); songs != configJson.end() && !songs->is_array()) {
+            songHotkeysUnread = true;
+            unreadSettings.push_back("SHELL_SONG_HOTKEYS");
+        } else if (songs != configJson.end())
             for (const auto& each : *songs) {
-                if (!each.is_object()) continue;
-                SongHotkey bound{PathFromJson(each, "song"), each.value("key", std::string())};
+                const auto* song = textAt(each, "song");
+                const auto* key = textAt(each, "key");
+                if (!song || !key) {
+                    if (unreadSongHotkeys.empty()) unreadSettings.push_back("SHELL_SONG_HOTKEYS");
+                    unreadSongHotkeys.push_back(each);
+                    continue;
+                }
+                SongHotkey bound{PathFromText(*song), *key};
+                if (!songKeysRoot.empty() && !bound.song.empty() && bound.song.is_relative()) bound.song = songKeysRoot / bound.song;
                 const int vk = NameToVK(bound.key);
                 const auto holds = [&](const std::string& key) { return NameToVK(key) == vk; };
                 if (bound.song.empty() || vk == 0 || IsNoteKey(vk, state.keyMappings) ||
                     std::any_of(state.hotkeys.begin(), state.hotkeys.end(), holds) ||
-                    std::any_of(state.songHotkeys.begin(), state.songHotkeys.end(), [&](const SongHotkey& other) { return holds(other.key) || other.song == bound.song; }))
+                    std::any_of(state.songHotkeys.begin(), state.songHotkeys.end(), [&](const SongHotkey& other) { return holds(other.key) || SamePath(other.song, bound.song); }))
                     continue;
                 state.songHotkeys.push_back(std::move(bound));
             }
-        state.sheetsFolder = PathFromJson(configJson, "SHELL_SHEETS_FOLDER");
-        state.sheetStylePage = PathFromJson(configJson, "SHELL_SHEET_STYLE_PAGE");
-        if (configJson.contains("SHELL_SHEET_FILES") && configJson["SHELL_SHEET_FILES"].is_object()) {
-            const auto& files = configJson["SHELL_SHEET_FILES"];
-            state.sheetImage = files.value("image", true);
-            state.sheetTextFile = files.value("text", true);
-            state.sheetPageFile = files.value("page", true);
+        state.sheetsFolder = PathFromText(setting(configJson, "SHELL_SHEETS_FOLDER", std::string()));
+        state.sheetStylePage = PathFromText(setting(configJson, "SHELL_SHEET_STYLE_PAGE", std::string()));
+        if (const auto* files = group("SHELL_SHEET_FILES")) {
+            state.sheetImage = setting(*files, "image", true);
+            state.sheetTextFile = setting(*files, "text", true);
+            state.sheetPageFile = setting(*files, "page", true);
         }
-        if (configJson.contains("MIDI_SETTINGS")) state.detectDrums = configJson["MIDI_SETTINGS"].value("DETECT_DRUMS", true);
-        if (configJson.contains("AUTO_TRANSPOSE")) state.autoTranspose = configJson["AUTO_TRANSPOSE"].value("ENABLED", false);
-        state.fitToKeys = configJson.value("SHELL_FIT_TO_KEYS", false);
-        state.octaves = std::clamp(configJson.value("SHELL_OCTAVES", 1), 1, 5);
-        state.fileSort = static_cast<FileSort>(std::clamp(configJson.value("SHELL_FILE_SORT", 0), 0, 2));
-        state.descendingFiles = configJson.value("SHELL_FILE_DESCENDING", false);
+        if (const auto* midi = group("MIDI_SETTINGS")) state.detectDrums = setting(*midi, "DETECT_DRUMS", true);
+        if (const auto* transpose = group("AUTO_TRANSPOSE")) state.autoTranspose = setting(*transpose, "ENABLED", false);
+        state.fitToKeys = setting(configJson, "SHELL_FIT_TO_KEYS", false);
+        state.octaves = std::clamp(setting(configJson, "SHELL_OCTAVES", 1), 1, 5);
+        state.fileSort = static_cast<FileSort>(std::clamp(setting(configJson, "SHELL_FILE_SORT", 0), 0, 2));
+        state.descendingFiles = setting(configJson, "SHELL_FILE_DESCENDING", false);
         // Upstream's TIMING_VARIATION, NOTE_SKIP_CHANCE and EXTRA_DELAY keys are
         // ignored and left in the file.
         // Performer values live under section.config. Without the add-on they
         // are left untouched in the file.
         if (section.loaded) {
-            const auto found = configJson.find(section.config);
-            const auto saved = found != configJson.end() && found->is_object() ? *found : nlohmann::json::object();
-            section.on = saved.value("ENABLED", false);
+            const auto* found = group(section.config.c_str());
+            const auto saved = found ? *found : nlohmann::json::object();
+            section.on = setting(saved, "ENABLED", false);
             if (!section.presets.empty())
-                section.preset = std::clamp(saved.value(section.presetField, 0), 0, static_cast<int>(section.presets.size()) - 1);
+                section.preset = std::clamp(setting(saved, section.presetField, 0), 0, static_cast<int>(section.presets.size()) - 1);
             applyPreset();
             for (auto& control : section.controls) {
                 const auto value = saved.find(control.field);
@@ -994,28 +1063,44 @@ void ShellEngine::Run(std::stop_token stop) {
         }
         for (const auto& control : section.controls) if (control.remembers) state.rememberPerSong = control.value != 0;
         // Triggers belong to the performer; with it off the trigger is the clock.
-        state.trigger = section.on ? std::clamp(configJson.value("SHELL_TRIGGER", 0), 0, std::max(0, static_cast<int>(section.triggers.size()) - 1)) : 0;
+        state.trigger = section.on ? std::clamp(setting(configJson, "SHELL_TRIGGER", 0), 0, std::max(0, static_cast<int>(section.triggers.size()) - 1)) : 0;
         // Session state from the last run. Devices are reopened later, once a
         // player exists.
-        if (const auto session = configJson.find("SHELL_SESSION"); session != configJson.end() && session->is_object()) {
-            state.velocity = session->value("velocity", true);
-            state.sustain = session->value("sustain", true);
-            state.liveChannel = std::clamp(session->value("liveChannel", -1), -1, 15);
-            state.speed = std::clamp(session->value("speed", 1.0), state.speedMin, state.speedMax);
+        if (const auto* session = group("SHELL_SESSION")) {
+            state.velocity = setting(*session, "velocity", true);
+            state.sustain = setting(*session, "sustain", true);
+            state.liveChannel = std::clamp(setting(*session, "liveChannel", -1), -1, 15);
+            state.speed = std::clamp(setting(*session, "speed", 1.0), state.speedMin, state.speedMax);
         }
-        state.velocityModifier = configJson.value("VELOCITY_MODIFIER", std::string("alt"));
+        state.velocityModifier = setting(configJson, "VELOCITY_MODIFIER", std::string("alt"));
         if (state.velocityModifier != "alt" && state.velocityModifier != "ctrl" && state.velocityModifier != "shift") {
             state.velocityModifier = "alt";
-            throw std::runtime_error("VELOCITY_MODIFIER must be alt, ctrl or shift.");
+            state.error = "VELOCITY_MODIFIER must be alt, ctrl or shift.";
         }
     } catch (const std::exception& error) { state.error = error.what(); }
+    if (!unreadSettings.empty()) {
+        std::string names;
+        for (const auto& name : unreadSettings) names += (names.empty() ? "" : ", ") + name;
+        ShellLog::Instance().Append("[settings] " + Utf8(config_.filename()) + ": " + names + " could not be read; the defaults are used.\n");
+        if (state.error.empty()) state.error = "Some settings could not be read, and their defaults are used: " + names + ".";
+    }
     const auto touchConfig = [&] {
         configDirty = true;
         configDue = std::chrono::steady_clock::now() + configSettle;
     };
+    // Song keys that could not be read go back as they were; a list of them
+    // that was not a list is left alone, and keys bound meanwhile last until
+    // the app closes.
     const auto saveSongHotkeys = [&] {
+        if (songHotkeysUnread) return;
         auto& saved = configJson["SHELL_SONG_HOTKEYS"] = nlohmann::json::array();
-        for (const auto& bound : state.songHotkeys) saved.push_back({{"song", Utf8(bound.song)}, {"key", bound.key}});
+        for (const auto& bound : state.songHotkeys) {
+            const auto rest = Below(bound.song, songKeysRoot);
+            saved.push_back({{"song", Utf8(rest.empty() ? bound.song : rest)}, {"key", bound.key}});
+        }
+        for (const auto& unread : unreadSongHotkeys) saved.push_back(unread);
+        if (songKeysRoot.empty()) configJson.erase("SHELL_SONG_HOTKEYS_FOLDER");
+        else configJson["SHELL_SONG_HOTKEYS_FOLDER"] = Utf8(songKeysRoot);
         touchConfig();
     };
     // Per-song settings keyed by file name. Kept out of config.json because it
@@ -1024,13 +1109,28 @@ void ShellEngine::Run(std::stop_token stop) {
     nlohmann::json songsJson = nlohmann::json::object();
     bool songsDirty = false;
     // A saved file read only in part is kept aside as .damaged and saved again
-    // with what it held, and the status bar says so.
+    // with what it held, and the status bar says so. Until a copy is kept, the
+    // file is never saved over; each save tries to keep it first. False when
+    // it could not be kept yet.
     const auto damagedFile = [&](const std::filesystem::path& path, const std::string& notice) {
         const auto aside = SetAside(path);
         ShellLog::Instance().Append("[settings] " + Utf8(path.filename()) + " could not be read whole" +
-                                    (aside.empty() ? std::string() : "; kept as " + Utf8(aside.filename())) + ".\n");
+                                    (aside.empty() ? "; it could not be kept aside, so it is not saved over until it can be"
+                                                   : "; kept as " + Utf8(aside.filename())) + ".\n");
         state.resetNotice += (state.resetNotice.empty() ? "" : " ") + notice;
         configDue = std::chrono::steady_clock::now();
+        return !aside.empty();
+    };
+    // Set while a damaged file waits to be kept aside before it is saved over.
+    bool songsAside = false, libraryAside = false;
+    // Keeps a damaged file aside, if it still waits to be, before it is saved over.
+    const auto keptAside = [](bool& waiting, const std::filesystem::path& path) {
+        if (!waiting) return true;
+        const auto aside = SetAside(path);
+        if (aside.empty()) return false;
+        ShellLog::Instance().Append("[settings] " + Utf8(path.filename()) + " kept as " + Utf8(aside.filename()) + ".\n");
+        waiting = false;
+        return true;
     };
     {
         // Every setting is a number; a song's entry of another kind, or a
@@ -1045,7 +1145,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (value.is_number()) kept[field] = value;
                     else damaged = true;
             }
-        if (damaged) { songsDirty = true; damagedFile(songsPath, "Some song settings could not be read."); }
+        if (damaged) { songsDirty = true; songsAside = !damagedFile(songsPath, "Some song settings could not be read."); }
     }
     // Favourites, playlists, the queue and the Trash by path, in library.json
     // for the same reason. Trashed songs wait in the MIDI folder's Trash, a
@@ -1064,15 +1164,17 @@ void ShellEngine::Run(std::stop_token stop) {
     // Where the Trash was kept before, beside the config, lost with the app's folder.
     const auto oldTrash = config_.parent_path() / "Trash";
     bool libraryDirty = false;
+    // The MIDI folder library.json keeps its songs below; empty until a file or a scan names one.
+    std::filesystem::path libraryRoot;
     {
         bool damaged = false;
         const auto saved = ReadSaved(libraryPath, damaged);
         if (saved.is_object()) {
             auto lists = std::make_shared<LibraryLists>();
-            ReadLibrary(saved, *lists, state.openList, damaged);
+            ReadLibrary(saved, *lists, state.openList, libraryRoot, damaged);
             state.library = std::move(lists);
         }
-        if (damaged) { libraryDirty = true; damagedFile(libraryPath, "Some favourites and playlists could not be read."); }
+        if (damaged) { libraryDirty = true; libraryAside = !damagedFile(libraryPath, "Some favourites and playlists could not be read."); }
     }
     const auto touchLibrary = [&] {
         libraryDirty = true;
@@ -1087,6 +1189,13 @@ void ShellEngine::Run(std::stop_token stop) {
         // An emptied queue closes, and the panel shows the folder again.
         if (!ListShown(*state.library, state.openList)) state.openList = kFolderList;
         touchLibrary();
+    };
+    // A song gone from the Trash for good leaves the lists, unless a song now at
+    // its path, or another in the Trash from there, still has them.
+    const auto forgetTrashed = [](LibraryLists& lists, const MovedSong& song) {
+        std::error_code error;
+        if (std::filesystem::exists(song.origin, error) || error || lists.Trashed(song.origin)) return;
+        lists.Forget(song.origin);
     };
     // A song in the Trash folder that no record names, since library.json lost
     // it, is listed again. Where it came from was lost with the record, so
@@ -1130,22 +1239,28 @@ void ShellEngine::Run(std::stop_token stop) {
     // Runs at the settle deadline, before anything rereads config.json, and on
     // shutdown. Each file reaches the disk before it replaces the old one
     // (WriteDurably), so a power cut leaves the one or the other whole; the
-    // debounce keeps that wait to one per burst of edits.
+    // debounce keeps that wait to one per burst of edits. Each file is tried
+    // whatever became of the others, and what failed is thrown together.
     const auto flushConfig = [&] {
+        std::string failed;
+        const auto fail = [&](const char* why) { failed += (failed.empty() ? "" : " ") + std::string(why); };
         if (songsDirty) {
-            if (!WriteDurably(songsPath, songsJson.dump(1) + '\n')) throw std::runtime_error("Cannot save the song settings.");
-            songsDirty = false;
+            if (!keptAside(songsAside, songsPath)) fail("Cannot save the song settings until the damaged songs.json is kept aside.");
+            else if (WriteDurably(songsPath, songsJson.dump(1) + '\n')) songsDirty = false;
+            else fail("Cannot save the song settings.");
         }
         if (libraryDirty) {
-            if (!WriteDurably(libraryPath, WriteLibrary(*state.library, state.openList).dump(1) + '\n'))
-                throw std::runtime_error("Cannot save the favourites and playlists.");
-            libraryDirty = false;
+            if (!keptAside(libraryAside, libraryPath)) fail("Cannot save the favourites and playlists until the damaged library.json is kept aside.");
+            else if (WriteDurably(libraryPath, WriteLibrary(*state.library, state.openList, libraryRoot).dump(1) + '\n')) libraryDirty = false;
+            else fail("Cannot save the favourites and playlists.");
         }
-        if (!configDirty) return;
         // Never overwrite a config that failed to parse.
-        if (!configLoaded) throw std::runtime_error("The configuration was not loaded, so it cannot be saved.");
-        if (!WriteDurably(config_, configJson.dump(4) + '\n')) throw std::runtime_error("Cannot save the configuration.");
-        configDirty = false;
+        if (configDirty && !configLoaded) fail("The configuration was not loaded, so it cannot be saved.");
+        else if (configDirty) {
+            if (WriteDurably(config_, configJson.dump(4) + '\n')) configDirty = false;
+            else fail("Cannot save the configuration.");
+        }
+        if (!failed.empty()) throw std::runtime_error(failed);
     };
     Publish(state);
     const auto stopPlayback = [&] {
@@ -1224,7 +1339,55 @@ void ShellEngine::Run(std::stop_token stop) {
     const auto atEstimate = [&] {
         return std::any_of(section.controls.begin(), section.controls.end(), [](const auto& control) { return !control.isSwitch && control.value < 0; });
     };
-    const auto songKey = [&] { return Utf8(state.loaded.filename()); };
+    // A song's settings in songs.json are kept under its path in the MIDI
+    // folder, or its whole path outside it; files from before kept them under
+    // its file name alone, which a song of that name still reads.
+    const auto songKey = [&](const std::filesystem::path& song) {
+        const auto rest = Below(song, state.folder);
+        return Utf8(rest.empty() ? song : rest);
+    };
+    // The settings kept for `song`, or null. One kept under its path in other
+    // letter case moves to its key; with `own`, one kept under its file name
+    // is copied to its key, and a song with none gets an empty entry.
+    const auto songSettings = [&](const std::filesystem::path& song, bool own) -> nlohmann::json* {
+        const auto key = songKey(song);
+        if (const auto found = songsJson.find(key); found != songsJson.end()) return found->is_object() ? &*found : nullptr;
+        const auto path = PathFromText(key);
+        for (auto each = songsJson.begin(); each != songsJson.end(); ++each)
+            if (SamePath(PathFromText(each.key()), path)) {
+                auto settings = std::move(*each);
+                songsJson.erase(each);
+                songsDirty = true;
+                auto& moved = songsJson[key] = std::move(settings);
+                return moved.is_object() ? &moved : nullptr;
+            }
+        const auto named = songsJson.find(Utf8(song.filename()));
+        if (!own) return named != songsJson.end() && named->is_object() ? &*named : nullptr;
+        auto settings = named != songsJson.end() && named->is_object() ? *named : nlohmann::json::object();
+        return &(songsJson[key] = std::move(settings));
+    };
+    // A song moved from `from` to `to` takes its star, lists, key and settings
+    // along; a copy of it shares its star, playlists and settings, the queue
+    // and the key staying with the song they were given to.
+    const auto followSong = [&](LibraryLists& lists, const std::filesystem::path& from, const std::filesystem::path& to, bool copy) {
+        if (from == to) return;
+        if (copy) lists.Copied(from, to);
+        else lists.Renamed(from, to);
+        bool keys = false;
+        if (!copy)
+            for (auto& bound : state.songHotkeys)
+                if (SamePath(bound.song, from)) { bound.song = to; keys = true; }
+        if (keys) { saveSongHotkeys(); ++state.hotkeyRevision; }
+        const auto key = songKey(to);
+        if (songsJson.contains(key)) return;
+        const auto* settings = songSettings(from, false);
+        if (!settings) return;
+        auto kept = *settings;
+        if (!copy) songsJson.erase(songKey(from));
+        songsJson[key] = std::move(kept);
+        songsDirty = true;
+        configDue = std::chrono::steady_clock::now() + configSettle;
+    };
     // Load the open song's saved settings when per-song memory is on.
     const auto recallSong = [&] {
         // Reset estimate-driven sliders. One whose estimate is disabled holds a
@@ -1232,8 +1395,8 @@ void ShellEngine::Run(std::stop_token stop) {
         for (auto& control : section.controls)
             if (!control.isSwitch && !control.isChoice && !control.estimateName.empty() && section.Estimated(control)) control.value = -1;
         if (!state.rememberPerSong || state.loaded.empty()) return;
-        const auto found = songsJson.find(songKey());
-        if (found == songsJson.end() || !found->is_object()) return;
+        const auto* found = songSettings(state.loaded, false);
+        if (!found) return;
         if (section.loaded) {
             if (!section.presets.empty())
                 section.preset = std::clamp(found->value(section.presetField, section.preset), 0, static_cast<int>(section.presets.size()) - 1);
@@ -1265,8 +1428,9 @@ void ShellEngine::Run(std::stop_token stop) {
         }
         // Only performer settings are stored per song.
         if (perSong && section.loaded) {
-            auto& song = songsJson[songKey()];
-            if (!song.is_object()) song = nlohmann::json::object();
+            auto* kept = songSettings(state.loaded, true);
+            if (!kept) kept = &(songsJson[songKey(state.loaded)] = nlohmann::json::object());
+            auto& song = *kept;
             {
                 if (!section.presets.empty()) song[section.presetField] = section.preset;
                 for (const auto& control : section.controls) {
@@ -1370,7 +1534,9 @@ void ShellEngine::Run(std::stop_token stop) {
     const auto ensurePlayer = [&] {
         if (!player) {
             // The player parses config.json itself; flush pending edits first.
-            flushConfig();
+            // Only config.json has to reach the disk; another file that could
+            // not is tried again at the next flush and reported then.
+            try { flushConfig(); } catch (const std::exception&) { if (configDirty) throw; }
             player = std::make_unique<VirtualPianoPlayer>(false, config_);
             player->enable_velocity_keypress = state.velocity;
             player->currentSustainMode = state.sustain ? SustainMode::SPACE_DOWN : SustainMode::IG;
@@ -1547,10 +1713,6 @@ void ShellEngine::Run(std::stop_token stop) {
         state.youtubeSignedIn = install.SignedIn();
         state.converterInstalled = install.Found();
         state.converterCanSetUp = install.CanSetUp();
-        state.converterGpu = install.gpu;
-        state.converterCanSwitch = install.CanSwitch();
-        state.converterGpuUnsupported = install.gpuUnsupported;
-        state.nvidiaCard = audio_to_midi::HasNvidiaCard();
     };
     readConverter();
     Publish(state);
@@ -1804,13 +1966,20 @@ void ShellEngine::Run(std::stop_token stop) {
         return state.openList == kFavouritesList ? std::any_of(files.begin(), files.end(), [&](const MidiEntry& file) {
             return state.library->Favourite(file.path); }) : listed && !listed->empty();
     };
+    // Its last song is the last still on disk, so one trashed or deleted after
+    // the open one does not send it round to its first.
     const auto listEnds = [&](const std::vector<MidiEntry>& files) {
-        return !state.shuffle && listHeld(files) && !files.empty() && files.back().path == state.loaded;
+        if (state.shuffle || !listHeld(files)) return false;
+        std::error_code gone;
+        const auto last = std::find_if(files.rbegin(), files.rend(), [&](const MidiEntry& file) {
+            return SamePath(file.path, state.loaded) || std::filesystem::is_regular_file(file.path, gone); });
+        return last == files.rend() || SamePath(last->path, state.loaded);
     };
     const auto listPlaysOn = [&] {
         const auto files = SongsFollowed(*state.files, state.loaded, *state.library, state.openList);
-        return listHeld(files) && !listEnds(files) &&
-               std::any_of(files.begin(), files.end(), [&](const MidiEntry& file) { return file.path != state.loaded; });
+        std::error_code gone;
+        return listHeld(files) && !listEnds(files) && std::any_of(files.begin(), files.end(), [&](const MidiEntry& file) {
+            return !SamePath(file.path, state.loaded) && std::filesystem::is_regular_file(file.path, gone); });
     };
     const auto chooseNext = [&] {
         std::filesystem::path next = firstQueued();
@@ -2025,9 +2194,8 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (command.path.empty()) break;
                     editLibrary([&](LibraryLists& lists) {
                         auto& songs = lists.favourites;
-                        const auto found = std::find(songs.begin(), songs.end(), command.path);
-                        if (command.value && found == songs.end()) songs.push_back(command.path);
-                        if (!command.value && found != songs.end()) songs.erase(found);
+                        if (command.value && !lists.Favourite(command.path)) songs.push_back(command.path);
+                        if (!command.value) std::erase_if(songs, [&](const std::filesystem::path& song) { return SamePath(song, command.path); });
                     });
                     break;
                 case Action::OpenList: {
@@ -2084,28 +2252,29 @@ void ShellEngine::Run(std::stop_token stop) {
                     // Its stars and playlists wait for a Restore, which puts it back where it was.
                     editLibrary([&](LibraryLists& lists) {
                         lists.trash.push_back({target, command.path});
-                        std::erase(lists.queue, command.path);
+                        std::erase_if(lists.queue, [&](const std::filesystem::path& song) { return SamePath(song, command.path); });
                     });
                     break;
                 }
                 case Action::Restore:
                 case Action::DeleteForever: {
                     const auto found = std::find_if(state.library->trash.begin(), state.library->trash.end(),
-                                                    [&](const MovedSong& song) { return song.file == command.path; });
+                                                    [&](const MovedSong& song) { return SamePath(song.file, command.path); });
                     if (found == state.library->trash.end()) break;
                     const auto song = *found;
                     if (command.action == Action::DeleteForever) {
                         if (!Recycle({song.file})) throw std::runtime_error(Utf8(song.origin.filename()) + " was kept: it could not go to the Recycle Bin.");
-                        editLibrary([&](LibraryLists& lists) { std::erase(lists.trash, song); lists.Forget(song.origin); });
+                        editLibrary([&](LibraryLists& lists) { std::erase(lists.trash, song); forgetTrashed(lists, song); });
                         break;
                     }
-                    // Back to its folder, made again if it went; beside a file that took its name meanwhile.
+                    // Back to its folder, made again if it went; beside a file that took its name meanwhile,
+                    // which keeps its own place in the lists while the restored song joins it there.
                     std::error_code error;
                     std::filesystem::create_directories(song.origin.parent_path(), error);
                     const auto target = FreeName(song.origin);
                     if (!MoveFileExW(song.file.c_str(), target.c_str(), MOVEFILE_COPY_ALLOWED))
                         throw std::runtime_error("Cannot restore " + Utf8(song.origin.filename()) + " to its folder.");
-                    editLibrary([&](LibraryLists& lists) { std::erase(lists.trash, song); lists.Renamed(song.origin, target); });
+                    editLibrary([&](LibraryLists& lists) { std::erase(lists.trash, song); followSong(lists, song.origin, target, true); });
                     if (!state.folder.empty()) Send({Action::Scan, state.folder, 0, 0, true});
                     break;
                 }
@@ -2116,16 +2285,20 @@ void ShellEngine::Run(std::stop_token stop) {
                     std::vector<std::filesystem::path> files;
                     for (const auto& song : songs) if (std::error_code gone; std::filesystem::exists(song.file, gone)) files.push_back(song.file);
                     if (!files.empty()) Recycle(files);
-                    size_t kept = 0;
+                    // One on a drive not there now waits for it.
+                    size_t kept = 0, away = 0;
                     editLibrary([&](LibraryLists& lists) {
                         for (const auto& song : songs) {
                             if (std::error_code gone; std::filesystem::exists(song.file, gone)) { ++kept; continue; }
+                            if (!TrashGone(song.file)) { ++away; continue; }
                             std::erase(lists.trash, song);
-                            lists.Forget(song.origin);
+                            forgetTrashed(lists, song);
                         }
                     });
                     if (kept) throw std::runtime_error(std::to_string(kept) + (kept == 1 ? " song was kept: it" : " songs were kept: they") +
                                                        " could not go to the Recycle Bin.");
+                    if (away) throw std::runtime_error(std::to_string(away) + (away == 1 ? " song was kept: its drive is" : " songs were kept: their drive is") +
+                                                       " not there.");
                     break;
                 }
                 case Action::ScanDrives: {
@@ -2195,7 +2368,11 @@ void ShellEngine::Run(std::stop_token stop) {
                         if (!MoveFileExW(file.c_str(), target.c_str(), MOVEFILE_COPY_ALLOWED)) { ++failed; continue; }
                         moved.push_back({target, file});
                     }
-                    editLibrary([&](LibraryLists& lists) { lists.scanned.insert(lists.scanned.end(), moved.begin(), moved.end()); });
+                    // A starred, listed or keyed song found outside takes all that along.
+                    editLibrary([&](LibraryLists& lists) {
+                        lists.scanned.insert(lists.scanned.end(), moved.begin(), moved.end());
+                        for (const auto& song : moved) followSong(lists, song.origin, song.file, false);
+                    });
                     auto left = std::make_shared<std::vector<MidiEntry>>();
                     for (const auto& found : *state.scanResults)
                         if (std::none_of(moved.begin(), moved.end(), [&](const MovedSong& song) { return song.origin == found.path; })) left->push_back(found);
@@ -2208,7 +2385,8 @@ void ShellEngine::Run(std::stop_token stop) {
                 case Action::PutBack: {
                     std::vector<MovedSong> songs;
                     for (const auto& song : state.library->scanned)
-                        if (command.paths.empty() || std::find(command.paths.begin(), command.paths.end(), song.file) != command.paths.end()) songs.push_back(song);
+                        if (command.paths.empty() || std::any_of(command.paths.begin(), command.paths.end(), [&](const std::filesystem::path& path) { return SamePath(path, song.file); }))
+                            songs.push_back(song);
                     size_t failed = 0;
                     std::vector<std::pair<MovedSong, std::filesystem::path>> returned;
                     for (const auto& song : songs) {
@@ -2222,12 +2400,12 @@ void ShellEngine::Run(std::stop_token stop) {
                         returned.push_back({song, target});
                     }
                     editLibrary([&](LibraryLists& lists) {
-                        for (const auto& [song, target] : returned) { std::erase(lists.scanned, song); lists.Renamed(song.file, target); }
+                        for (const auto& [song, target] : returned) { std::erase(lists.scanned, song); followSong(lists, song.file, target, false); }
                     });
                     if (!returned.empty()) {
                         auto kept = std::make_shared<std::vector<MidiEntry>>();
                         for (const auto& file : *state.files)
-                            if (std::none_of(returned.begin(), returned.end(), [&](const auto& back) { return back.first.file == file.path; })) kept->push_back(file);
+                            if (std::none_of(returned.begin(), returned.end(), [&](const auto& back) { return SamePath(back.first.file, file.path); })) kept->push_back(file);
                         state.files = std::move(kept);
                         if (!state.folder.empty()) Send({Action::Scan, state.folder, 0, 0, true});
                     }
@@ -2241,9 +2419,9 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (command.path.empty() || !state.library->Songs(list)) break;
                     editLibrary([&](LibraryLists& lists) {
                         auto& songs = *lists.Songs(list);
-                        const auto found = std::find(songs.begin(), songs.end(), command.path);
-                        if (command.action == Action::AddToList && found == songs.end()) songs.push_back(command.path);
-                        if (command.action == Action::RemoveFromList && found != songs.end()) songs.erase(found);
+                        const auto same = [&](const std::filesystem::path& song) { return SamePath(song, command.path); };
+                        if (command.action == Action::AddToList && std::none_of(songs.begin(), songs.end(), same)) songs.push_back(command.path);
+                        if (command.action == Action::RemoveFromList) std::erase_if(songs, same);
                         if (command.action == Action::MoveInList) MoveSong(songs, command.path, command.track);
                     });
                     break;
@@ -2326,7 +2504,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (!command.key.empty() && IsNoteKey(NameToVK(command.key), state.keyMappings)) break;
                     if (!command.key.empty() && command.key.rfind("VK_", 0) != 0) command.key.insert(0, "VK_");
                     auto& songs = state.songHotkeys;
-                    const auto of = [&] { return std::find_if(songs.begin(), songs.end(), [&](const SongHotkey& bound) { return bound.song == command.path; }); };
+                    const auto of = [&] { return std::find_if(songs.begin(), songs.end(), [&](const SongHotkey& bound) { return SamePath(bound.song, command.path); }); };
                     if (of() != songs.end() ? of()->key == command.key : command.key.empty()) break;
                     // One key, one action: an app hotkey or another song holding it lets go.
                     if (const int vk = NameToVK(command.key); vk != 0) {
@@ -2335,7 +2513,7 @@ void ShellEngine::Run(std::stop_token stop) {
                             state.hotkeys[i].clear();
                             configJson["HOTKEY_SETTINGS"][hotkeyFields[i]] = std::string();
                         }
-                        std::erase_if(songs, [&](const SongHotkey& bound) { return bound.song != command.path && NameToVK(bound.key) == vk; });
+                        std::erase_if(songs, [&](const SongHotkey& bound) { return !SamePath(bound.song, command.path) && NameToVK(bound.key) == vk; });
                     }
                     if (const auto found = of(); command.key.empty()) songs.erase(found);
                     else if (found != songs.end()) found->key = command.key;
@@ -2394,10 +2572,46 @@ void ShellEngine::Run(std::stop_token stop) {
                         return FileBefore(a, b, state.fileSort, state.descendingFiles);
                     });
                     // The same files again keep the list the panel already shows.
-                    if (*files != *state.files) state.files = std::move(files);
+                    const bool changed = *files != *state.files;
+                    if (changed) state.files = std::move(files);
                     rescanOwed = false;
                     if (!command.value) {
                         state.folder = command.path;
+                        // A MIDI folder that moved takes its songs' lists, records and keys along
+                        // (LibraryLists::Rebased); files from before take it as theirs.
+                        if (libraryRoot != state.folder) {
+                            const auto from = libraryRoot;
+                            editLibrary([&](LibraryLists& lists) { lists.Rebased(from, state.folder); });
+                            libraryRoot = state.folder;
+                            if (*state.library != LibraryLists{}) touchLibrary();
+                        }
+                        if (songKeysRoot != state.folder) {
+                            for (auto& bound : state.songHotkeys) {
+                                const auto rest = songKeysRoot.empty() ? std::filesystem::path() : Below(bound.song, songKeysRoot);
+                                std::error_code error;
+                                if (!rest.empty() && (SamePath(songKeysRoot, state.folder) || std::filesystem::exists(state.folder / rest, error)))
+                                    bound.song = state.folder / rest;
+                            }
+                            songKeysRoot = state.folder;
+                            if (!state.songHotkeys.empty()) { saveSongHotkeys(); ++state.hotkeyRevision; }
+                        }
+                    }
+                    // Songs listed or keyed in other letter case than their files
+                    // take the files' own, as the panel matches them exactly.
+                    if ((changed || !command.value) && !state.files->empty()) {
+                        std::unordered_map<std::wstring, std::filesystem::path> actual;
+                        actual.reserve(state.files->size());
+                        for (const auto& file : *state.files) actual.emplace(PathKey(file.path), file.path);
+                        editLibrary([&](LibraryLists& lists) { lists.Recased(actual); });
+                        bool keys = false;
+                        for (auto& bound : state.songHotkeys)
+                            if (const auto found = actual.find(PathKey(bound.song)); found != actual.end() && found->second != bound.song) {
+                                bound.song = found->second;
+                                keys = true;
+                            }
+                        if (keys) { saveSongHotkeys(); ++state.hotkeyRevision; }
+                    }
+                    if (!command.value) {
                         watchLibrary(state.folder);
                         moveOldTrash();
                         recoverTrash();
@@ -2410,12 +2624,12 @@ void ShellEngine::Run(std::stop_token stop) {
                     // Shuffle Play, load its first song still on disk, which then
                     // leaves the queue. The rest follow the list shown (SongsFollowed),
                     // and a playlist or Favourites shown goes on at a song's end without it too.
-                    const bool queued = command.action == Action::Next && !state.library->queue.empty();
+                    const bool queued = command.action == Action::Next && !firstQueued().empty();
                     if (command.amount == 1 && (!shuffleAdvancePending || (!state.shuffle && !queued && !listPlaysOn()))) break;
                     if (command.generation != state.generation) break;
                     std::error_code gone;
                     // Queued songs gone from disk leave the queue.
-                    if (queued)
+                    if (command.action == Action::Next && !state.library->queue.empty())
                         editLibrary([&](LibraryLists& lists) {
                             std::erase_if(lists.queue, [&](const std::filesystem::path& song) { return !std::filesystem::is_regular_file(song, gone); });
                         });
@@ -2595,9 +2809,12 @@ void ShellEngine::Run(std::stop_token stop) {
                     applyLoop();
                     player->midiFileSelected = true;
                     state.loaded = command.path;
-                    // A queued song opened any other way has had its turn.
-                    if (std::find(state.library->queue.begin(), state.library->queue.end(), command.path) != state.library->queue.end())
-                        editLibrary([&](LibraryLists& lists) { lists.queue.erase(std::find(lists.queue.begin(), lists.queue.end(), command.path)); });
+                    // A queued song opened any other way has had its turn; one
+                    // reloaded for a setting has not.
+                    if (!sameFile && LibraryLists::Holds(state.library->queue, command.path))
+                        editLibrary([&](LibraryLists& lists) {
+                            std::erase_if(lists.queue, [&](const std::filesystem::path& song) { return SamePath(song, command.path); });
+                        });
                     score = player->score();
                     if (!sameFile) recallSong();
                     estimateSong();
@@ -3078,9 +3295,8 @@ void ShellEngine::Run(std::stop_token stop) {
                 case Action::ConverterSetUp: {
                     if (state.converting) break;
                     const auto install = converterInstall();
-                    // value asks for the GPU build; over an install it swaps the build.
-                    if (!install.CanSetUp() && !install.CanSwitch()) { readConverter(); break; }
-                    const bool started = converter.Start(audio_to_midi::SetupCommandLine(install.setup, command.value), reportConversion);
+                    if (!install.CanSetUp()) { readConverter(); break; }
+                    const bool started = converter.Start(audio_to_midi::SetupCommandLine(install.setup), reportConversion);
                     state.settingUp = state.converting = started;
                     state.signingIn = false;
                     state.conversionFailed = !started;
@@ -3092,7 +3308,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     using Kind = audio_to_midi::Status::Kind;
                     const auto kind = static_cast<Kind>(command.track);
                     if (kind == Kind::Text) {
-                        // Raw Transkun output goes to the log only.
+                        // Plain converter output goes to the log only.
                         ShellLog::Instance().Append("[convert] " + command.key + "\n");
                         break;
                     }
@@ -3106,8 +3322,6 @@ void ShellEngine::Run(std::stop_token stop) {
                     }
                     state.converting = false;
                     state.conversionFailed = kind == Kind::Error;
-                    // A conversion may have found the GPU build cannot run on the card.
-                    if (!state.settingUp && !state.signingIn) readConverter();
                     if (state.settingUp) {
                         // Setup is resumable; downloaded packages are kept.
                         state.settingUp = false;
@@ -3174,7 +3388,8 @@ void ShellEngine::Run(std::stop_token stop) {
                     if (!player || state.loaded.empty()) break;
                     // Write the self-contained editor page to %TEMP%\QuartzMIDI sheets
                     // for the panel to open; nothing is written to the MIDI folder.
-                    const auto answer = AskSheets(sheetsCall, {{"do", "page"}, {"page", playerPage()}});
+                    // It opens with the style page Save sheet files uses.
+                    const auto answer = AskSheets(sheetsCall, {{"do", "page"}, {"page", playerPage()}, {"style", Utf8(state.sheetStylePage)}});
                     state.sheetSaved.clear();
                     state.sheetFilesSaved.clear();
                     if (answer.value("notes", size_t{0}) > 0) {
@@ -3646,7 +3861,7 @@ void ShellEngine::Run(std::stop_token stop) {
                     else state.position = state.duration;
                     // Shuffle Play draws the next song, and a queued song or the next in a playlist or
                     // Favourites shown comes next without it; a song on Loop plays on, and its end is never reached.
-                    if (!failed && state.loop == 0 &&((state.shuffle && !state.files->empty()) || !state.library->queue.empty() || listPlaysOn())) {
+                    if (!failed && state.loop == 0 &&((state.shuffle && !state.files->empty()) || !firstQueued().empty() || listPlaysOn())) {
                         shuffleAdvancePending = true;
                         Send({Action::Next, {}, state.generation, 0, loadAutoSolo, 1});
                     }
@@ -3739,8 +3954,9 @@ void ShellEngine::Run(std::stop_token stop) {
     stopPlayback();
     stopLive();
     stopConnect();
-    // Flush pending edits. Failures can't be reported at shutdown; the atomic
-    // rename leaves the previous config intact.
-    try { flushConfig(); } catch (const std::exception&) {}
+    // Flush pending edits. A failure can't reach the status bar at shutdown, so
+    // the log keeps it; the atomic rename leaves the previous file intact.
+    try { flushConfig(); }
+    catch (const std::exception& error) { ShellLog::Instance().Append(std::string("[settings] at exit: ") + error.what() + "\n"); }
 }
 }

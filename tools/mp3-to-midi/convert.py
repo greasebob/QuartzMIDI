@@ -1,8 +1,9 @@
 """Audio to MIDI for QuartzMIDI: a file, a link or a playlist in, .mid files out.
 
 The app runs this as a child process. Transcription uses the Transkun model,
-as LioK251's mp3converter does (MIT, see README.md in this folder); links are
-downloaded with yt-dlp and FFmpeg first.
+as LioK251's mp3converter does (MIT, see README.md in this folder), on ONNX
+Runtime with DirectML (transcribe.py); links are downloaded with yt-dlp and
+FFmpeg first.
 
 Status protocol, one line per status on stdout:
 
@@ -12,15 +13,19 @@ Status protocol, one line per status on stdout:
     finished: <summary of a playlist run>
     error: <reason for stopping>
 
-Other lines (Transkun progress, skipped videos) are plain log text.
+Other lines (skipped videos, a GPU that could not load the model) are plain
+log text.
 """
 
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
+
+# setup.ps1's Python runs isolated (its ._pth file), so it never puts this
+# script's folder, where transcribe.py is, on the import path.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def say(kind, text):
@@ -132,49 +137,6 @@ def playlist_entries(link):
     return info.get("title") or "the playlist", entries
 
 
-# Written beside this script when the installed CUDA build has no code for the
-# card; the app then offers to set the GPU build up again. setup.ps1 removes it.
-GPU_UNSUPPORTED = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gpu-unsupported")
-
-
-def runs_on(arch_list, major, minor):
-    """Whether a CUDA build compiled for arch_list runs on a card of compute
-    capability major.minor: machine code for the same major version at or below
-    its minor, the rule PyTorch's own compatibility warning uses."""
-    card = major * 10 + minor
-    for arch in arch_list:
-        kind, _, number = arch.partition("_")
-        if kind == "sm" and number.isdigit() and int(number) // 10 == major and int(number) <= card:
-            return True
-    return False
-
-
-def device(choice):
-    if choice != "auto":
-        return choice
-    import warnings
-
-    import torch
-
-    if not torch.cuda.is_available():
-        return "cpu"
-    # PyTorch warns on stderr when the card is too new for the build; the
-    # check below says so once, in the app's terms.
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        major, minor = torch.cuda.get_device_capability(0)
-        name = torch.cuda.get_device_name(0)
-    if runs_on(torch.cuda.get_arch_list(), major, minor):
-        if os.path.exists(GPU_UNSUPPORTED):
-            os.remove(GPU_UNSUPPORTED)
-        return "cuda"
-    with open(GPU_UNSUPPORTED, "w", encoding="utf-8") as marker:
-        marker.write(name + "\n")
-    print(f"The GPU install has no code for the {name} (compute capability {major}.{minor}); using the CPU.",
-          flush=True)
-    return "cpu"
-
-
 def reason_for(failure):
     # yt-dlp has already printed its own "ERROR: " line; strip the prefix.
     reason = str(failure).removeprefix("ERROR: ") or type(failure).__name__
@@ -195,19 +157,16 @@ def convert_one(source, out_dir, choice, work, prefix=""):
             raise RuntimeError(f"The file does not exist: {source}")
         audio, title = source, os.path.splitext(os.path.basename(source))[0]
 
+    import transcribe
+
     target = unique_path(out_dir, clean_stem(title))
     partial = os.path.join(work, "transcribed.mid")
-    chosen = device(choice)
-    say("step", f"{prefix}Transcribing on the {'GPU' if chosen == 'cuda' else chosen.upper()}; a song takes a few minutes")
-    # Transkun reports progress on stderr; merge it into stdout as log text.
-    result = subprocess.run(
-        [sys.executable, "-m", "transkun.transcribe", audio, partial, "--device", chosen],
-        stdout=sys.stdout,
-        stderr=subprocess.STDOUT,
-        **cpu_limits(),
-    )
-    if result.returncode != 0 or not os.path.exists(partial):
-        raise RuntimeError(f"Transkun stopped with exit code {result.returncode}.")
+    say("step", f"{prefix}Transcribing")
+
+    def progress(done, total, gpu):
+        say("step", f"{prefix}Transcribing on the {'GPU' if gpu else 'CPU'}, {done * 100 // total}%")
+
+    transcribe.write_midi(transcribe.transcribe(audio, choice, cpu_threads(), progress), partial)
     shutil.move(partial, target)
     return target
 
@@ -215,17 +174,17 @@ def convert_one(source, out_dir, choice, work, prefix=""):
 CPU_SHARE = 100  # percent of cores a transcription may use (--cpu)
 
 
-def cpu_limits():
-    """subprocess.run kwargs that cap PyTorch's thread pools (OMP/MKL) and, below
-    100%, run the child at below-normal priority."""
+def cpu_threads():
+    """The threads a transcription may use. Below 100% this process also drops
+    to below-normal priority."""
     if CPU_SHARE >= 100:
-        return {}
-    threads = max(1, round((os.cpu_count() or 1) * CPU_SHARE / 100))
-    env = dict(os.environ, OMP_NUM_THREADS=str(threads), MKL_NUM_THREADS=str(threads))
-    limits = {"env": env}
+        return os.cpu_count() or 1
     if os.name == "nt":
-        limits["creationflags"] = subprocess.BELOW_NORMAL_PRIORITY_CLASS
-    return limits
+        import ctypes
+
+        kernel = ctypes.windll.kernel32
+        kernel.SetPriorityClass(kernel.GetCurrentProcess(), 0x4000)  # BELOW_NORMAL_PRIORITY_CLASS
+    return max(1, round((os.cpu_count() or 1) * CPU_SHARE / 100))
 
 
 def convert_playlist(link, out_dir, choice, work):
@@ -265,7 +224,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("source", help="an audio file, or an http(s) link")
     parser.add_argument("--out-dir", required=True, help="the folder the .mid files are written to")
-    parser.add_argument("--device", default="auto", help="auto, cpu or cuda")
+    parser.add_argument("--device", default="auto", help="auto (the GPU through DirectML when there is one) or cpu")
     parser.add_argument("--playlist", action="store_true",
                         help="for a link inside a playlist, convert every video in it")
     parser.add_argument("--cpu", type=int, default=100,
@@ -285,8 +244,7 @@ def main():
     if not is_link(args.source):
         args.source = os.path.abspath(args.source)
     os.chdir(here)
-    # Transkun's libraries warn about their own deprecations on every run; in
-    # the app's log they read as errors, so the transcription runs without them.
+    # Library deprecation warnings read as errors in the app's log.
     os.environ["PYTHONWARNINGS"] = "ignore"
     for tool in ("ffmpeg", "deno"):
         bundled = os.path.join(here, tool)
@@ -297,7 +255,7 @@ def main():
         return 2
     for tool in ("ffmpeg", "ffprobe"):
         if shutil.which(tool) is None:
-            say("error", f"{tool} is not installed, and Transkun needs it to read audio.")
+            say("error", f"{tool} is not installed, and the converter needs it to read audio.")
             return 2
 
     work = tempfile.mkdtemp(prefix="midipp-convert-")

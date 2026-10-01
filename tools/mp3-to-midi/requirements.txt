@@ -2,56 +2,25 @@
 # every package it needs is listed here and nothing arrives by resolution.
 #
 # The set is what a conversion, a link download and the sign-in window
-# actually import. Transkun also declares matplotlib, seaborn, pandas,
-# tensorboard, ncls, sox and torch-optimizer, and torch declares filelock,
-# fsspec, jinja2 and networkx; inference imports none of them, so they are
-# left out (about 230 MB). sympy is imported, so it is in.
+# actually import. onnxruntime-directml also declares flatbuffers, protobuf
+# and sympy; a transcription imports none of them, so they are left out.
 #
-# PyTorch is the CPU build from PyTorch's index; requirements-cu130.txt or
-# requirements-cu126.txt swaps in a CUDA build.
---extra-index-url https://download.pytorch.org/whl/cpu
+# onnxruntime-directml runs the model on any DirectX 12 GPU, NVIDIA, AMD or
+# Intel, and on the CPU when there is none.
 
 # Transcription
-torch==2.14.0+cpu \
-    --hash=sha256:738cd9237bf63443a5e5f9652e5115f7b0510b089636a43d4011e9fccede714f
-torchaudio==2.11.0+cpu \
-    --hash=sha256:95d517bd1a0a28dacd1c37550ced95cab64f3a7a4ef9b8219b41049388a71163
-transkun==2.0.1 \
-    --hash=sha256:7d7f5bf88b0d21f7da0415b089cff3bcbcbdda04e1a3c9719964947942c859fe
-moduleconf==0.1.4 \
-    --hash=sha256:47fd48f5cd566e3ab198106a66dfbe63e4b9eae924f8db58d66df7aba25e5c39
-pretty_midi==0.2.11.post0 \
-    --hash=sha256:a3e2321736245a9c92259716d85a4762f16b7bde2f591fb0dba95bdb6e793d8a
-mido==1.3.3 \
-    --hash=sha256:01033c9b10b049e4436fca2762194ca839b09a4334091dd3c34e7f4ae674fd8a
-pydub==0.25.1 \
-    --hash=sha256:65617e33033874b59d87db603aa1ed450633288aefead953b30bded59cb599a6
-soxr==1.1.0 \
-    --hash=sha256:6ae2a174bffea94e8ead857dad85999d3f49f091774dbad5b046c0417d7092f4
-mir_eval==0.8.2 \
-    --hash=sha256:114cda33d8e17408c170598e0b36ed0d71ff4a2fee8eaf9e165b58ecf1c87170
-decorator==5.3.1 \
-    --hash=sha256:f47fe6fdbd2edd623ecfe36875d37aba411624e2670dd395dddae1358689bb3c
-tqdm==4.70.1 \
-    --hash=sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73
-colorama==0.4.6 \
-    --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
+onnxruntime-directml==1.24.4 \
+    --hash=sha256:f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614
 numpy==2.5.2 \
     --hash=sha256:28ac63476ec7651484215ee7fa15a1f78b57c14621f01e392afe17b9a1390ce4
 scipy==1.18.1 \
     --hash=sha256:5e4d44984abc0020154ea81b247adeddcc3ac5527b975ff798bd1ba0adc513c2
-sympy==1.14.0 \
-    --hash=sha256:e091cc3e99d2141a0ba2847328f5479b05d94a6635cb96148ccb3f34671bd8f5
-mpmath==1.3.0 \
-    --hash=sha256:a0b2b9fe80bbcd81a6647ff13108738cfb482d481d826cc0e02f5b35e5c88d2c
-setuptools==78.1.0 \
-    --hash=sha256:3e386e96793c8702ae83d17b853fb93d3e09ef82ec62722e61da5cd22376dcd8
+mido==1.3.3 \
+    --hash=sha256:01033c9b10b049e4436fca2762194ca839b09a4334091dd3c34e7f4ae674fd8a
 packaging==26.3 \
     --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
-six==1.17.0 \
-    --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274
-importlib_resources==7.1.0 \
-    --hash=sha256:1bd7b48b4088eddb2cd16382150bb515af0bd2c70128194392725f82ad2c96a1
+setuptools==78.1.0 \
+    --hash=sha256:3e386e96793c8702ae83d17b853fb93d3e09ef82ec62722e61da5cd22376dcd8
 typing_extensions==4.16.0 \
     --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
 

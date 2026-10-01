@@ -414,14 +414,17 @@ void MIDI2Key::OpenDevice(const std::wstring& deviceId) {
     }
     if (lastFailed == deviceId) lastFailed.clear();
     m_selectedDevice = deviceId;
+    if (m_player && !m_timerHeld) { m_player->hold_live_timer(true); m_timerHeld = true; }
     m_sensing.store(false, std::memory_order_relaxed);
     m_sensingWatch = std::jthread([this](std::stop_token token) {
         using namespace std::chrono;
         while (!token.stop_requested()) {
-            std::this_thread::sleep_for(50ms);
+            std::this_thread::sleep_for(20ms);
             if (!m_sensing.load(std::memory_order_acquire)) continue;
             const auto silent = steady_clock::now().time_since_epoch().count() - m_lastHeard.load(std::memory_order_acquire);
-            if (steady_clock::duration(silent) < 300ms) continue;
+            // A device sends it at most 300 ms apart, and one sending right at
+            // that with a little jitter is still there.
+            if (steady_clock::duration(silent) < 370ms) continue;
             // Until the device sends Active Sensing again.
             m_sensing.store(false, std::memory_order_relaxed);
             LetGo();
@@ -468,6 +471,7 @@ void MIDI2Key::CloseDevice() {
         m_input.reset();
     }
     m_selectedDevice.clear();
+    if (m_timerHeld) { m_player->hold_live_timer(false); m_timerHeld = false; }
 }
 
 void MIDI2Key::Quiesce() {

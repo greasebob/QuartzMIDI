@@ -11,12 +11,12 @@ build makes a key on this PC, in build\addon-key, and signs the add-on
 with it: tools\sign-addon.ps1, which the two projects run.
 
 Convert audio to MIDI: double-click tools\mp3-to-midi\setup.cmd, once.
-For the GPU build, which only an NVIDIA card can use: setup.cmd -Nvidia.
 
 It runs setup.ps1 beside it, which fetches python.org's embeddable Python
-3.12, pip, FFmpeg and Deno from their publishers, each checked against the
-SHA256 in pins.psd1, and installs the packages pinned in requirements.txt
-from PyPI. All of it lands in tools\mp3-to-midi, about 1.2 GB. No Python
+3.12, pip, FFmpeg, Deno and Transkun's model from their publishers, each
+checked against the SHA256 in pins.psd1, and installs the packages pinned
+in requirements.txt from PyPI. All of it lands in tools\mp3-to-midi, about
+610 MB, and runs on any DirectX 12 GPU, or the CPU without one. No Python
 has to be installed, and one that is installed is left alone. Nothing comes
 from a QuartzMIDI download, and the script is short enough to read.
 

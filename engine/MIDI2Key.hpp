@@ -54,6 +54,9 @@ private:
     std::unique_ptr<IMidiInput> m_input;
     std::wstring m_selectedDevice;
     bool m_busy = false;
+    // Whether this object holds the player's live timer tick: from the
+    // device's open to its close.
+    bool m_timerHeld = false;
     // Whether the sustain pedal last read as down, for the cutoff's hysteresis.
     std::atomic<bool> m_pedalDown{false};
 

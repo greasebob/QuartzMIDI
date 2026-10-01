@@ -2,6 +2,7 @@
 #include "InputHeader.h"
 #include <iostream>
 #include <cstring>
+#include <thread>
 
 namespace {
     static const uint8_t div12[128] = {
@@ -194,11 +195,10 @@ void MIDIConnect::ReleaseHeld() {
 }
 
 void MIDIConnect::SetActive(bool active) {
-    bool wasActive = m_isActive.load(std::memory_order_relaxed);
-    m_isActive.store(active, std::memory_order_release);
-
-    if (active && !wasActive) {
-    }
+    m_isActive.store(active, std::memory_order_seq_cst);
+    if (active) return;
+    while (m_inFlight.load(std::memory_order_seq_cst) != 0) std::this_thread::yield();
+    ReleaseHeld();
 }
 
 void MIDIConnect::ReleaseAllNumpadKeys() {
@@ -218,7 +218,9 @@ void MIDIConnect::ReleaseAllNumpadKeys() {
 void MIDIConnect::HandleMessage(uint64_t timestampQpc, const uint8_t* data, size_t length)
 {
     if (!data || length < 3) return;
-    if (!m_isActive.load(std::memory_order_relaxed)) return;
+    m_inFlight.fetch_add(1, std::memory_order_seq_cst);
+    struct Leave { std::atomic<int>& count; ~Leave() { count.fetch_sub(1, std::memory_order_seq_cst); } } leave{m_inFlight};
+    if (!m_isActive.load(std::memory_order_seq_cst)) return;
     if (data[1] > 127 || data[2] > 127) return;
 
     const uint8_t status = data[0];

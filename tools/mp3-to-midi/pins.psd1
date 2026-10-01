@@ -8,6 +8,12 @@
                      Sha256 = '4ACBED6DD1C744B0376E3B1CF57CE906F9DC9E95E68824584C8099A63025A3C3' }
     Pip         = @{ Url = 'https://files.pythonhosted.org/packages/f3/6e/1736e5b4ae2b778ef2f81c47d797de9f891d4d8acb047a24ca37a60294dd/pip-26.2.1-py3-none-any.whl'
                      Sha256 = '71138ADF1F4CA900CDB7D289C21B7494329F2332B6D85F0E1C42108C0384ED3E' }
+    # Transkun's "2.0" checkpoint (MIT, Yujia Yan) exported to ONNX by
+    # Pianoscribe, from Pianoscribe's publisher: a zip of scorer.onnx,
+    # attributes.onnx, frontend.npz, manifest.json and LICENSE.txt.
+    Model       = @{ Url = 'https://downloads.justagwas.com/pianoscribe/PianoModel.pianoscribe'
+                     Sha256 = 'BD7C3835288100E07AB4433EC690539685496790D1CBA42E66501B36C6A85790'
+                     Name = 'PianoModel-1.0.1.zip' }
     Ffmpeg     = @{ Url = 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.zip'
                      Sha256 = 'FEC81AE03971D9DD4BE3EBE02E263BD2EC1D789483F931BDBA5F5715E65DA2E9' }
     Deno        = @{ Url = 'https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-pc-windows-msvc.zip'

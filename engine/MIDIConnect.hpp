@@ -30,6 +30,8 @@ public:
     inline const std::wstring& GetSelectedDevice() const { return m_selectedDevice; }
     // Whether the last OpenDevice failed because another program holds the port.
     inline bool Busy() const { return m_busy; }
+    // Off, the notes and pedal the game was told are on are turned off, as the
+    // note-offs that follow are no longer passed on.
     void SetActive(bool active);
     void ReleaseAllNumpadKeys();
     // Tells the game every note it was told is on is off, and lifts the pedal
@@ -73,6 +75,9 @@ private:
     // The notes the game was told are on, and whether the pedal is down.
     std::array<std::atomic<bool>, 128> m_held{};
     std::atomic<bool> m_pedalDown{false};
+    // Callbacks inside HandleMessage, so turning off waits out one that read
+    // the switch still on before letting go of what it held.
+    std::atomic<int> m_inFlight{0};
 
     static HANDLE s_mmcssHandle;
     static DWORD s_mmcssTaskIndex;

@@ -246,11 +246,6 @@ struct EngineSnapshot {
     bool youtubeSignedIn = false;
     bool converterInstalled = false;
     bool converterCanSetUp = false;
-    // Installed on PyTorch's CUDA build, and able to be set up again as the other.
-    bool converterGpu = false;
-    bool converterCanSwitch = false;
-    bool converterGpuUnsupported = false;
-    bool nvidiaCard = false;
     bool settingUp = false;
     // Loop: 0 off, 1 the song, 2 the section from loopStart to loopEnd, in
     // seconds of the song. The mode is kept; the section is the song's own.

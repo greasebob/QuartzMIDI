@@ -3,8 +3,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -195,7 +198,9 @@ inline std::string StoredKey(wchar_t typed) {
 // layout, but the layout names the key a hotkey is: on AZERTY the M position
 // is the comma key, and a comma hotkey took C7 from the game. layoutVK gives
 // the virtual key the layout sends for a scan code.
-template <class KeyMappings, class LayoutVK> bool IsNoteKey(int vk, const KeyMappings& keyMappings, LayoutVK layoutVK) {
+// characterVK gives the virtual key the layout types a character with.
+template <class KeyMappings, class LayoutVK, class CharacterVK>
+bool IsNoteKey(int vk, const KeyMappings& keyMappings, LayoutVK layoutVK, CharacterVK characterVK) {
     if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) return true;
     if (vk == VK_SPACE || vk == VK_LEFT || vk == VK_RIGHT || vk == VK_UP || vk == VK_DOWN) return true;
     for (const unsigned char scan : kTypedScans) if (static_cast<int>(layoutVK(scan)) == vk) return true;
@@ -205,13 +210,34 @@ template <class KeyMappings, class LayoutVK> bool IsNoteKey(int vk, const KeyMap
         KeyPosition position;
         if (key.empty()) continue;
         if (UsPosition(key.back(), position) ? static_cast<int>(layoutVK(position.scan)) == vk
-                                             : (VkKeyScanW(static_cast<unsigned char>(key.back())) & 0xff) == vk) return true;
+                                             : static_cast<int>(characterVK(static_cast<unsigned char>(key.back()))) == vk) return true;
     }
     return false;
 }
-// Under the keyboard layout in use.
+template <class KeyMappings, class LayoutVK> bool IsNoteKey(int vk, const KeyMappings& keyMappings, LayoutVK layoutVK) {
+    return IsNoteKey(vk, keyMappings, layoutVK, [](unsigned char character) { return VkKeyScanW(character) & 0xff; });
+}
+// The thread of the app's window, 0 for the calling thread. Each thread has a
+// keyboard layout of its own, and the one the user switches is the window's:
+// the engine's worker keeps the layout it started with.
+inline std::atomic<DWORD> g_layoutThread{0};
+inline HKL UiLayout() { return GetKeyboardLayout(g_layoutThread.load(std::memory_order_relaxed)); }
+// Under `layout`.
+template <class KeyMappings> bool IsNoteKeyOn(int vk, const KeyMappings& keyMappings, HKL layout) {
+    return IsNoteKey(vk, keyMappings, [layout](unsigned char scan) { return static_cast<int>(MapVirtualKeyExW(scan, MAPVK_VSC_TO_VK_EX, layout)); },
+                     [layout](unsigned char character) { return VkKeyScanExW(character, layout) & 0xff; });
+}
+// Under the layout of the app's window, from any thread.
 template <class KeyMappings> bool IsNoteKey(int vk, const KeyMappings& keyMappings) {
-    return IsNoteKey(vk, keyMappings, [](unsigned char scan) { return static_cast<int>(MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)); });
+    return IsNoteKeyOn(vk, keyMappings, UiLayout());
+}
+// The virtual key registered for a bound key: none while the layout in use
+// makes it a key the app types (`typed`, IsNoteKey), whose typing would fire
+// it and take the note from the game. The binding is kept for when the layout
+// changes back.
+template <class Typed> int RegisteredVK(const std::string& name, Typed typed) {
+    const int vk = NameToVK(name);
+    return vk != 0 && !IsMouseHotkey(vk) && typed(vk) ? 0 : vk;
 }
 
 // Captures the next key for a rebind by polling (with hotkeys unregistered),
@@ -249,6 +275,58 @@ private:
     std::array<bool, 256> held_{};
     bool refused_ = false;
 };
+
+// A key read as raw input fires once per press, not on its auto-repeat. What is
+// down is read from the keyboard (`down`, GetAsyncKeyState in the app) each time
+// reading starts: a key released while nothing read it sent no release, and
+// would swallow its next press.
+class RawKeyEdges {
+public:
+    template <class Down> void Start(Down down) {
+        for (int vk = 0; vk < 256; ++vk) down_[vk] = vk != 0 && down(vk);
+    }
+    // True for a press of a key that was up.
+    bool Fires(int vk, bool pressed) {
+        if (vk <= 0 || vk >= 256) return false;
+        const bool fires = pressed && !down_[vk];
+        down_[vk] = pressed;
+        return fires;
+    }
+private:
+    std::array<bool, 256> down_{};
+};
+
+// The show/hide key: a hidden or minimized window is shown, one in front is
+// hidden, and one on screen that another program's window covers, as the game
+// does, is brought in front, so one press always shows it.
+enum class ShowHide { Show, Raise, Hide };
+inline constexpr ShowHide ShowHideMove(bool onScreen, bool inFront) {
+    return !onScreen ? ShowHide::Show : inFront ? ShowHide::Hide : ShowHide::Raise;
+}
+// A window's visible rectangle, without the invisible resize border, so windows
+// side by side do not meet.
+inline bool VisibleBounds(HWND window, RECT& bounds) {
+    return SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof(bounds))) || GetWindowRect(window, &bounds);
+}
+// Whether a window above `window` covers part of it: shown, not minimized,
+// cloaked or click-through, and not `ignored` (the app's own). A topmost window
+// over one that is not, as the taskbar or an overlay, is passed over: coming
+// in front would not clear it.
+template <class Ignored> bool Covered(HWND window, Ignored ignored) {
+    RECT own{};
+    if (!VisibleBounds(window, own)) return false;
+    const bool topmost = (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    for (HWND above = GetWindow(window, GW_HWNDPREV); above; above = GetWindow(above, GW_HWNDPREV)) {
+        if (!IsWindowVisible(above) || IsIconic(above) || ignored(above)) continue;
+        const auto style = GetWindowLongPtrW(above, GWL_EXSTYLE);
+        if ((style & WS_EX_TRANSPARENT) || (!topmost && (style & WS_EX_TOPMOST))) continue;
+        BOOL cloaked = FALSE;
+        if (SUCCEEDED(DwmGetWindowAttribute(above, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) continue;
+        RECT theirs{}, meet{};
+        if (VisibleBounds(above, theirs) && IntersectRect(&meet, &own, &theirs)) return true;
+    }
+    return false;
+}
 
 // Display label for a key. OEM keys are positional, so they show the character
 // the current keyboard layout maps there.

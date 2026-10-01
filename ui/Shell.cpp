@@ -97,10 +97,15 @@ struct Registered {
     bool typing = false;
     bool media = false;
     bool blockAltF4 = false;
+    // The layout and key map the keys were checked against: a key the app types
+    // under them is left out, and a change checks every key again.
+    HKL layout = nullptr;
+    uint64_t mappingRevision = 0;
     bool any = false;
 };
 // What WM_INPUT fires, owned by the message loop's thread like WM_HOTKEY.
 const Registered* g_registered = nullptr;
+shell::RawKeyEdges g_rawKeys;
 
 bool ReadRawMouse(HWND hwnd, bool on) {
     const RAWINPUTDEVICE mouse{0x01, 0x02, static_cast<DWORD>(on ? RIDEV_INPUTSINK : RIDEV_REMOVE), on ? hwnd : nullptr};
@@ -140,8 +145,11 @@ void UnregisterHotkeys(HWND hwnd, Registered& done) {
 // input instead; one that cannot be read either is reported through
 // Registered::held, not treated as fatal.
 void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, shell::kHotkeys>& names,
-                     const std::vector<shell::SongHotkey>& songs, bool typing, bool media, bool blockAltF4) {
+                     const std::vector<shell::SongHotkey>& songs, bool typing, bool media, bool blockAltF4,
+                     const std::map<std::string, std::string>& keyMappings, uint64_t mappingRevision) {
     UnregisterHotkeys(hwnd, done);
+    const HKL layout = shell::UiLayout();
+    const auto typed = [&](int vk) { return shell::IsNoteKeyOn(vk, keyMappings, layout); };
     const auto modifiersOf = [](int mix) {
         return static_cast<UINT>(MOD_NOREPEAT | (mix & 1 ? MOD_SHIFT : 0) | (mix & 2 ? MOD_CONTROL : 0) | (mix & 4 ? MOD_ALT : 0));
     };
@@ -154,7 +162,7 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
         return (mixes & 1) != 0;
     };
     for (size_t i = 0; i < shell::kHotkeys; ++i) {
-        const int vk = shell::NameToVK(names[i]);
+        const int vk = shell::RegisteredVK(names[i], typed);
         if (shell::IsMouseHotkey(vk)) { done.mouse[vk == VK_XBUTTON1 ? 0 : 1] = static_cast<int>(i); continue; }
         done.held[i] = take(vk, static_cast<int>(i) + 1, kHotkeyIdStride, done.mixes[i]);
         if (vk != 0 && !done.held[i]) done.rawKeys.push_back({vk, i});
@@ -163,7 +171,7 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
     done.songMixes.assign(songs.size(), 0);
     done.songHeld.assign(songs.size(), false);
     for (size_t i = 0; i < songs.size() && i < kMostSongHotkeys; ++i) {
-        const int vk = shell::NameToVK(songs[i].key);
+        const int vk = shell::RegisteredVK(songs[i].key, typed);
         if (shell::IsMouseHotkey(vk)) { done.mouse[vk == VK_XBUTTON1 ? 0 : 1] = static_cast<int>(shell::kHotkeys + i); continue; }
         done.songHeld[i] = take(vk, kSongIdBase + static_cast<int>(i) * kModifierMixes, 1, done.songMixes[i]);
         if (vk != 0 && !done.songHeld[i]) done.rawKeys.push_back({vk, shell::kHotkeys + i});
@@ -181,6 +189,7 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
         }
     }
     if (!done.rawKeys.empty()) {
+        g_rawKeys.Start([](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; });
         done.rawKeyboard = ReadRawKeyboard(hwnd, true);
         for (const auto& [vk, bound] : done.rawKeys) {
             if (bound < shell::kHotkeys) done.held[bound] = done.rawKeyboard;
@@ -191,6 +200,8 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
     done.typing = typing;
     done.media = media;
     done.blockAltF4 = blockAltF4;
+    done.layout = layout;
+    done.mappingRevision = mappingRevision;
     done.any = true;
 }
 
@@ -199,10 +210,48 @@ HWND g_window = nullptr;
 // ImGui's own windows hidden with the main window, shown again with it.
 std::vector<HWND> g_hiddenViewports;
 
-// The show/hide key: a window on screen hides, with ImGui's windows of its
-// own; a hidden or minimized one comes back in front.
+bool OfThisProcess(HWND window) {
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    return process == GetCurrentProcessId();
+}
+
+// Brings the full window in front with the keyboard. Windows lets a program
+// take the foreground after its own input, as a hotkey is (WM_HOTKEY), but not
+// after raw input, which a mouse side button and a key another program took
+// are read as; joined to the input of the thread in front, the app may. No key
+// is sent for it: the game reads Alt as velocity. Refused all the same, the
+// window still comes above the one in front, without the keyboard.
+void TakeForeground(HWND hwnd) {
+    const HWND front = GetForegroundWindow();
+    if (front == hwnd) return;
+    const DWORD self = GetCurrentThreadId(), frontThread = front ? GetWindowThreadProcessId(front, nullptr) : 0;
+    const bool joined = frontThread != 0 && frontThread != self && AttachThreadInput(self, frontThread, TRUE);
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    if (joined) AttachThreadInput(self, frontThread, FALSE);
+    if (GetForegroundWindow() != hwnd && !(GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST)) {
+        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+// The show/hide key (shell::ShowHideMove): a window in front hides, with
+// ImGui's windows of its own; one the game covers comes in front; a hidden or
+// minimized one comes back in front. In front is the app's own window having
+// the keyboard, or nothing another program shows covering it.
 void ShowOrHide(HWND hwnd) {
-    if (IsWindowVisible(hwnd) && !IsIconic(hwnd)) {
+    const bool mini = g_panels && g_panels->miniMode;
+    const bool onScreen = IsWindowVisible(hwnd) && !IsIconic(hwnd);
+    const HWND front = GetForegroundWindow();
+    const bool inFront = onScreen && ((front && OfThisProcess(front)) || !shell::Covered(hwnd, OfThisProcess));
+    switch (shell::ShowHideMove(onScreen, inFront)) {
+    case shell::ShowHide::Raise:
+        // Mini comes in front without taking the keyboard from the game, as a click on it does.
+        if (mini) SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        else TakeForeground(hwnd);
+        return;
+    case shell::ShowHide::Hide: {
         g_hiddenViewports.clear();
         if (ImGui::GetCurrentContext())
             for (const auto* viewport : ImGui::GetPlatformIO().Viewports)
@@ -213,11 +262,13 @@ void ShowOrHide(HWND hwnd) {
         ShowWindow(hwnd, SW_HIDE);
         return;
     }
-    // Mini comes back without taking the keyboard from the game, as a click on it does.
-    const bool mini = g_panels && g_panels->miniMode;
-    ShowWindow(hwnd, IsIconic(hwnd) ? (mini ? SW_SHOWNOACTIVATE : SW_RESTORE) : (mini ? SW_SHOWNA : SW_SHOW));
-    for (const HWND own : std::exchange(g_hiddenViewports, {})) if (IsWindow(own)) ShowWindow(own, SW_SHOWNA);
-    if (!mini) SetForegroundWindow(hwnd);
+    case shell::ShowHide::Show:
+        // Mini comes back without taking the keyboard from the game, as a click on it does.
+        ShowWindow(hwnd, IsIconic(hwnd) ? (mini ? SW_SHOWNOACTIVATE : SW_RESTORE) : (mini ? SW_SHOWNA : SW_SHOW));
+        for (const HWND own : std::exchange(g_hiddenViewports, {})) if (IsWindow(own)) ShowWindow(own, SW_SHOWNA);
+        if (!mini) TakeForeground(hwnd);
+        return;
+    }
 }
 
 // No taskbar button and out of Alt+Tab: the window is owned by a hidden tool
@@ -380,11 +431,8 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if ((buttons & RI_MOUSE_BUTTON_4_DOWN) && g_registered->mouse[0] >= 0) FireHotkey(static_cast<size_t>(g_registered->mouse[0]));
             if ((buttons & RI_MOUSE_BUTTON_5_DOWN) && g_registered->mouse[1] >= 0) FireHotkey(static_cast<size_t>(g_registered->mouse[1]));
         } else if (g_registered && input.header.dwType == RIM_TYPEKEYBOARD && input.data.keyboard.VKey < 256) {
-            // A key read raw fires once per press, not on its auto-repeat.
-            static std::array<bool, 256> down{};
             const USHORT vk = input.data.keyboard.VKey;
-            const bool pressed = !(input.data.keyboard.Flags & RI_KEY_BREAK);
-            if (pressed && !down[vk]) {
+            if (g_rawKeys.Fires(vk, !(input.data.keyboard.Flags & RI_KEY_BREAK))) {
                 const auto held = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
                 const int mix = (held(VK_SHIFT) ? 1 : 0) | (held(VK_CONTROL) ? 2 : 0) | (held(VK_MENU) ? 4 : 0);
                 for (const auto& [key, bound] : g_registered->rawKeys) {
@@ -394,10 +442,13 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (shell::RawHotkeyFires(vk, mixes, mix, g_registered->typing)) FireHotkey(bound);
                 }
             }
-            down[vk] = pressed;
         }
         break;  // DefWindowProc frees the input
     }
+    case WM_INPUTLANGCHANGE:
+        // Wakes the loop, hidden too, to check the bound keys under the new layout.
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+        break;
     case WM_DROPFILES: {
         const auto drop = reinterpret_cast<HDROP>(wp);
         wchar_t path[32768]{};
@@ -636,6 +687,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     shell::Panels panels;
     panels.LoadPreferences(preferencesPath);
     shell::CaptureShellLog captureLog;
+    // The engine checks a key it binds against this thread's layout, the one the user switches.
+    shell::g_layoutThread = GetCurrentThreadId();
     shell::ShellEngine engine(directory / L"config.json", {}, false,
         [] { return std::make_unique<shell::NativeConnectInput>(); });
     g_engine = &engine;
@@ -820,13 +873,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (!running) break;
         for (auto& path : std::exchange(g_opened, {})) { OpenPath(std::move(path)); input = true; }
         g_noActivate = panels.miniMode;
+        // A key capture is for a hotkey's place or, from a song's menu or row, for a song.
+        const auto armed = [&] { return panels.hotkeyCapture >= 0 || !panels.songHotkeyCapture.empty(); };
         {
-            // A text field, a key being bound or a Wooting pedal key being learnt
+            // A text field, a key being bound (an action's or a song's, which
+            // the game in front would cancel) or a Wooting pedal key being learnt
             // reads keys, as does the key test. Taken once: a field left active
             // behind the game does not pull the keyboard back.
             const ImGuiContext& g = *ImGui::GetCurrentContext();
             const bool reads = g.IO.WantTextInput || g.WantTextInputNextFrame == 1 ||
-                               panels.hotkeyCapture >= 0 || panels.wootingPedalCapture >= 0 ||
+                               armed() || panels.wootingPedalCapture >= 0 ||
                                panels.keyTestRequested || keyTestUntil != 0;
             const HWND front = GetForegroundWindow();
             DWORD owner = 0;
@@ -883,8 +939,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
             // GetAsyncKeyState is global, so cancel a capture when another
             // process takes the foreground.
-            // A capture is for a hotkey's place or, from a song's menu or row, for a song.
-            const auto armed = [&] { return panels.hotkeyCapture >= 0 || !panels.songHotkeyCapture.empty(); };
             if (armed() && foreground != GetCurrentProcessId()) { panels.hotkeyCapture = -1; panels.songHotkeyCapture.clear(); }
             if (capturedKey != 0 && !keyDown(static_cast<int>(capturedKey))) capturedKey = 0;
             if (armed()) {
@@ -899,6 +953,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                     else command.track = static_cast<size_t>(panels.hotkeyCapture);
                     command.key = shell::VKToName(pressed);
                     engine.Send(std::move(command));
+                    if (panels.hideOnShowHideKey && panels.hotkeyCapture == static_cast<int>(shell::kShowHideHotkey))
+                        panels.hideOnceShowHideWorks = true;
                 }
                 if (pressed != shell::HotkeyCapture::None) {
                     capturedKey = pressed > 0 ? static_cast<WPARAM>(pressed) : VK_ESCAPE;
@@ -907,6 +963,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 }
             }
             if (!armed()) capturing = false;
+            if (panels.hotkeyCapture != static_cast<int>(shell::kShowHideHotkey)) panels.hideOnShowHideKey = false;
             if (panels.wootingPedalCapture >= 0 && foreground != GetCurrentProcessId()) panels.wootingPedalCapture = -1;
             if (panels.wootingPedalCapture >= 0) {
                 if (!pedalCapturing) { WootingBeginKeyCapture(); pedalCapturing = true; }
@@ -943,9 +1000,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 for (size_t i = 0; i < shell::kHotkeys; ++i) if (resting[i]) wanted[i].clear();
                 const bool media = panels.preferences.mediaKeys;
                 const bool blockAltF4 = panels.preferences.blockAltF4;
+                // A layout switch (WM_INPUTLANGCHANGE wakes the loop) or a key map
+                // edit can make a bound key one the app types.
                 if (!hotkeys.any || wanted != hotkeys.names || snapshot->songHotkeys != hotkeys.songs ||
-                    typing != hotkeys.typing || media != hotkeys.media || blockAltF4 != hotkeys.blockAltF4) {
-                    RegisterHotkeys(hwnd, hotkeys, wanted, snapshot->songHotkeys, typing, media, blockAltF4);
+                    typing != hotkeys.typing || media != hotkeys.media || blockAltF4 != hotkeys.blockAltF4 ||
+                    shell::UiLayout() != hotkeys.layout || snapshot->mappingRevision != hotkeys.mappingRevision) {
+                    RegisterHotkeys(hwnd, hotkeys, wanted, snapshot->songHotkeys, typing, media, blockAltF4,
+                                    snapshot->keyMappings, snapshot->mappingRevision);
                     panels.songKeysAvailable = hotkeys.songHeld;
                     panels.stopHotkeyAvailable = hotkeys.held[3];
                     for (size_t i = 0; i < shell::kHotkeys; ++i) {
@@ -1030,8 +1091,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 if (g_taskbarOwner) ApplyAffinity(g_taskbarOwner, g_affinity);
             }
         }
-        // Hidden by the show/hide key, it draws nothing until shown again.
-        if (IsIconic(hwnd) || (shown && !IsWindowVisible(hwnd))) { WaitMessage(); continue; }
+        // Hidden by the show/hide key, it draws nothing until shown again. A song
+        // a key opens meanwhile is saved as the last song all the same, which
+        // the save after each frame drawn would miss at a shutdown or crash.
+        if (IsIconic(hwnd) || (shown && !IsWindowVisible(hwnd))) {
+            if (const auto open = engine.Snapshot()->loaded; !open.empty() && open != panels.preferences.lastSong) {
+                keepSong();
+                panels.SavePreferences(preferencesPath, false);
+                preferencesSaved = GetTickCount64();
+            }
+            WaitMessage();
+            continue;
+        }
         const skin::Skin current = panels.ActiveSkin();
         const uint64_t active = shell::SkinSignature(current);
         // "Focused" means any window of this process, since viewports such as

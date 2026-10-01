@@ -56,8 +56,6 @@ inline const std::vector<HelpEntry>& HelpEntries() {
         {"Velocity and Output", "What is MIDI output for?",
          "Choose MIDI output to send the song, or your playing, to a MIDI port instead of typing keys."},
 
-        {"Conversion and Sheets", "Should I install the CPU or the GPU converter?",
-         "Install GPU only if your PC has an NVIDIA graphics card. Every other PC needs CPU.", "1.0"},
         {"Conversion and Sheets", "Why does the converter ask me to sign in?",
          "YouTube blocks some downloads unless you are signed in. Files from your PC never need it."},
         {"Conversion and Sheets", "Where do converted files go?",

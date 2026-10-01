@@ -596,10 +596,7 @@ VirtualPianoPlayer::~VirtualPianoPlayer() {
         CloseHandle(waitable_timer);
     }
 
-    if (live_timer_held) {
-        hold_timer_resolution(false);
-        live_timer_held = false;
-    }
+    for (int holds = live_timer_holds.exchange(0); holds > 0; --holds) hold_timer_resolution(false);
 
     hotkey_stop.store(true, std::memory_order_release);
     if (hotkey_thread && hotkey_thread->joinable()) {
@@ -788,6 +785,19 @@ int VirtualPianoPlayer::timer_resolution_holds() noexcept {
     return s_timerHolds;
 }
 
+// The shortest pass a loop makes, as the shell's shortest section: a section
+// ending as it starts, or a song whose events all fall at its start, wrapped
+// on every pass of the playback thread and spun it.
+constexpr std::chrono::nanoseconds kShortestLoop = std::chrono::milliseconds(250);
+
+// The clock held for a take's build or an action's run starts again however
+// the work ends, a throw included: left held, the next song read as a Tap run.
+struct ClockThaw {
+    std::atomic<bool>& frozen;
+    bool armed;
+    ~ClockThaw() { if (armed) frozen.store(false, std::memory_order_release); }
+};
+
 // An error on this thread, an add-on's build throwing among others, used to
 // end the whole process with the song's keys held in the game. It now ends
 // the song: the keys come up, the song reads as done, and the log says why.
@@ -890,6 +900,7 @@ void VirtualPianoPlayer::play_song() {
     if (!paused.load(std::memory_order_acquire) && !clock_frozen.load(std::memory_order_relaxed))
         last_resume_tsc = __rdtsc();
 
+    bool was_quiet = false;
     while (!should_stop.load(std::memory_order_acquire)) {
         // Apply a speed change from the current position.
         const double wanted = std::clamp(requested_speed.load(std::memory_order_acquire), .05, 8.0);
@@ -906,6 +917,7 @@ void VirtualPianoPlayer::play_song() {
             // than being passed over by a clock that ran on.
             const bool held = clock_frozen.load(std::memory_order_relaxed);
             if (!held) { total_adjusted_time = get_adjusted_time(); clock_frozen.store(true, std::memory_order_release); }
+            const ClockThaw thaw{ clock_frozen, !held };
             prepare_event_queue();
             buffer_size = note_buffer.size();
             song_done.store(false, std::memory_order_release);
@@ -943,7 +955,7 @@ void VirtualPianoPlayer::play_song() {
                 } else release_key(it->first);
                 it = track_note_owners.erase(it);
             }
-            if (!held) { last_resume_tsc = __rdtsc(); clock_frozen.store(false, std::memory_order_release); }
+            if (!held) last_resume_tsc = __rdtsc();
         }
         if (action_pending.exchange(false, std::memory_order_acquire)) {
             play_actions(current_index);
@@ -972,7 +984,9 @@ void VirtualPianoPlayer::play_song() {
                 buffer_size
             );
             if (new_state.needs_reset) {
+                // What an action scheduled leaves the take, which is then shorter.
                 drop_scheduled();
+                buffer_size = note_buffer.size();
                 current_index = find_next_event_index(new_state.position);
                 song_done.store(false, std::memory_order_release);
                 buffer_index.store(current_index, std::memory_order_release);
@@ -997,7 +1011,12 @@ void VirtualPianoPlayer::play_song() {
         }
         // Held while the game is behind: look again every 5 ms.
         bool quiet = false;
-        if (hold_while_behind(quiet)) {
+        const bool holding = hold_while_behind(quiet);
+        // Played without key-downs, the song's pedal press was withheld with
+        // its notes; the keys resume under it. A hold restores it as it ends.
+        if (was_quiet && !quiet && !holding) restore_pedal(current_index);
+        was_quiet = quiet && !holding;
+        if (holding) {
             std::unique_lock<std::mutex> lock(playback_cv_mutex);
             playback_cv.wait_for(lock, std::chrono::milliseconds(5), [this]() {
                 return paused.load() || should_stop.load() || (WaitForSingleObject(command_event, 0) == WAIT_OBJECT_0);
@@ -1007,7 +1026,7 @@ void VirtualPianoPlayer::play_song() {
         // A loop wraps at its section's end, or just after the take's last event.
         std::optional<std::chrono::nanoseconds> wrapAt;
         if (const auto end = loop_end(); end && buffer_size)
-            wrapAt = *end == std::chrono::nanoseconds::max() ? note_buffer.back()->time + std::chrono::nanoseconds(1) : *end;
+            wrapAt = *end == std::chrono::nanoseconds::max() ? (std::max)(note_buffer.back()->time + std::chrono::nanoseconds(1), kShortestLoop) : *end;
         // At the end, wait on command_event: the wait above returns at once
         // while not paused, and would spin this critical-priority thread until
         // the worker stops it. Stop, seek and skip all set the event.
@@ -1063,6 +1082,7 @@ void VirtualPianoPlayer::play_song() {
 
         if (wrapNext) {
             wrap_loop(current_index, get_adjusted_time() - *wrapAt);
+            buffer_size = note_buffer.size();
             continue;
         }
 
@@ -1281,6 +1301,24 @@ void VirtualPianoPlayer::restore_pedal(size_t index) {
     isSustainPressed = true;
 }
 
+void VirtualPianoPlayer::release_pedal() {
+    std::lock_guard lock(dispatch_mutex);
+    sustain_owners.clear();
+    if (output_target.load(std::memory_order_acquire) == OutputTarget::MidiDevice) {
+        for (int pedal = 0; pedal < 3; ++pedal) {
+            pedal_tracks[pedal].clear();
+            if (pedal_sent[pedal] == 0) continue;
+            pedal_sent[pedal] = 0;
+            const uint8_t message[3] = { 0xB0, kPedalControllers[pedal], 0 };
+            send_midi_output(message, 3);
+        }
+        return;
+    }
+    if (!isSustainPressed) return;
+    releaseKey(sustain_key_code);
+    isSustainPressed = false;
+}
+
 size_t VirtualPianoPlayer::find_next_event_index(const std::chrono::nanoseconds& target_time) {
     auto it = std::lower_bound(note_buffer.begin(),
                                note_buffer.end(),
@@ -1296,7 +1334,7 @@ std::optional<std::chrono::nanoseconds> VirtualPianoPlayer::loop_end() const noe
     case Loop::Song: return std::chrono::nanoseconds::max();
     case Loop::Section: {
         const int64_t start = loop_start_ns.load(std::memory_order_acquire), end = loop_end_ns.load(std::memory_order_acquire);
-        if (end > start) return std::chrono::nanoseconds(end);
+        if (end > start) return std::chrono::nanoseconds((std::max)(end, start + kShortestLoop.count()));
         return std::nullopt;
     }
     default: return std::nullopt;
@@ -1906,12 +1944,15 @@ void VirtualPianoPlayer::tap_step(size_t& current_index, size_t buffer_size) {
                                       tap_holds_notes.load(std::memory_order_acquire));
     if (current_index != cursor) tap_moved = true;
     // Looping, the tap after the loop's last chord plays its first. Keys a tap
-    // holds are left to the tap, which lets them go when its key comes up.
+    // holds are left to the tap, which lets them go when its key comes up; the
+    // pedal goes where the song has it at the loop's start, as a timed wrap puts it.
     if (const auto end = loop_end(); end && buffer_size &&
         (current_index >= buffer_size || note_buffer[current_index]->time >= *end)) {
         const auto start = loop.load(std::memory_order_acquire) == Loop::Section
             ? std::chrono::nanoseconds(loop_start_ns.load(std::memory_order_acquire)) : std::chrono::nanoseconds::zero();
         current_index = find_next_event_index(start);
+        release_pedal();
+        restore_pedal(current_index);
         position = start.count();
         tap_moved = false;
         standing = QM_STEP_PLAYING;
@@ -1957,6 +1998,7 @@ void VirtualPianoPlayer::play_actions(size_t current_index) {
     // The clock is held as Tap holds it, so a pause, stop or seek during the
     // run reads the position the run began at.
     if (!frozen) { total_adjusted_time = get_adjusted_time(); clock_frozen.store(true, std::memory_order_release); }
+    const ClockThaw thaw{ clock_frozen, !frozen };
     for (const auto& id : ids) {
         const auto position = total_adjusted_time;
         const qm_take_event* events = nullptr;
@@ -1986,7 +2028,7 @@ void VirtualPianoPlayer::play_actions(size_t current_index) {
             execute_note_event(NoteEvent(position, stable_note_name(pitch), EventType::Release, 0, false, 0, track));
         if (stopped) break;
     }
-    if (!frozen) { last_resume_tsc = __rdtsc(); clock_frozen.store(false, std::memory_order_release); }
+    if (!frozen) last_resume_tsc = __rdtsc();
 }
 
 // The action is told where the clock stands and returns keys at score times
@@ -2107,17 +2149,21 @@ void VirtualPianoPlayer::toggle_out_of_range_transpose() {
 // ---------------------------------------------------------------------------
 
 void VirtualPianoPlayer::set_live_release_hook(std::function<void()> hook) {
-    const bool live = static_cast<bool>(hook);
-    {
-        std::lock_guard lock(output_mutex);
-        live_release_hook = std::move(hook);
+    std::lock_guard lock(output_mutex);
+    live_release_hook = std::move(hook);
+}
+
+// Held from the device's open, not from MIDI2Key's making: the engine keeps
+// that object after its device closes, and the tick stayed fine all along.
+void VirtualPianoPlayer::hold_live_timer(bool hold) noexcept {
+    if (hold) {
+        live_timer_holds.fetch_add(1);
+        hold_timer_resolution(true);
+        return;
     }
-    // MIDI2Key registers its hook when it is made and clears it when it goes,
-    // so live input is open while a hook is set, and holds the timer tick.
-    if (live != live_timer_held) {
-        hold_timer_resolution(live);
-        live_timer_held = live;
-    }
+    int holds = live_timer_holds.load();
+    while (holds > 0 && !live_timer_holds.compare_exchange_weak(holds, holds - 1)) {}
+    if (holds > 0) hold_timer_resolution(false);
 }
 
 bool VirtualPianoPlayer::open_midi_output(const std::wstring& deviceId) {

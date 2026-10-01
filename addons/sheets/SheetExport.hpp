@@ -10,9 +10,13 @@
 // Header only, no project dependencies.
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <ctime>
 #include <limits>
 #include <map>
 #include <optional>
@@ -980,34 +984,92 @@ inline void MarkPedals(StyledResult& r, std::vector<PedalChange> changes, const 
     }
 }
 
-// The original's palette: long notes green through short notes red.
-inline const char* RhythmColour(Rhythm rhythm) {
-    switch (rhythm) {
-    case Rhythm::Quadruple: return "#a3f0a3";
-    case Rhythm::Whole: return "#74da74";
-    case Rhythm::Half: return "#9ada5a";
-    case Rhythm::Quarter: return "#c0c05a";
-    case Rhythm::Eighth: return "#da7e5a";
-    case Rhythm::Sixteenth: return "#daa6a6";
-    case Rhythm::ThirtySecond: return "#ff1900";
-    case Rhythm::SixtyFourth: return "#9c0f00";
-    default: return "white";
-    }
+// How a sheet is drawn: its size, colours, background and font, stored in the
+// page data as "page" (the size) and "look" (the rest). The defaults are
+// midi-converter's dark page. The page's THEMES[0] holds the same.
+struct Look {
+    enum Ground { Colour, Image, Grain };
+    enum Fit { Cover, Tile };
+    enum Font { Verdana, SegoeUi, Consolas };
+    double fontSizePt = 10;
+    double lineHeightPercent = 135;
+    int theme = 0;                         // the page's theme picker: dark, paper, white, custom
+    std::string background = "#2D2A32";
+    Ground ground = Colour;
+    std::string image;                     // a data URL, for Ground::Image
+    Fit fit = Cover;
+    int dim = 0;                           // percent of the background colour over the image
+    int grain = 0;                         // percent, for Ground::Grain
+    bool oneColour = false;                // every chord in the text colour
+    std::string text = "#ffffff";
+    std::string comment = "#c8c4cc";
+    std::string heading = "#aaa4b3";
+    // Pedal highlight colours, in hues no note is drawn in: a blue for down and
+    // a magenta for up, each a tint of the background so the notes read on it.
+    std::string pedalDown = "#31406b";
+    std::string pedalUp = "#6b3262";
+    // By Rhythm: the original's palette, long notes green through short notes red.
+    std::array<std::string, 9> rhythm{"#9c0f00", "#ff1900", "#daa6a6", "#da7e5a", "#c0c05a", "#9ada5a", "#74da74", "#a3f0a3", "white"};
+    Font font = Verdana;
+};
+
+// A colour the look accepts: #rrggbb, or "white" as the original writes it.
+inline bool IsLookColour(const std::string& colour) {
+    if (colour == "white") return true;
+    if (colour.size() != 7 || colour[0] != '#') return false;
+    for (size_t i = 1; i < 7; ++i) if (!std::isxdigit(static_cast<unsigned char>(colour[i]))) return false;
+    return true;
+}
+
+// Paper grain: a tile kGrainTile pixels a side of values from 0 to 1, coarse
+// value noise over fine noise from a fixed seed, so every sheet's paper is the
+// same. The page's grainTile makes the same numbers.
+inline constexpr int kGrainTile = 192, kGrainCell = 16;
+inline std::vector<double> GrainTile() {
+    uint32_t a = 0x5eed;
+    const auto next = [&] {   // mulberry32
+        a += 0x6D2B79F5u;
+        uint32_t t = (a ^ (a >> 15)) * (a | 1u);
+        t = (t + (t ^ (t >> 7)) * (t | 61u)) ^ t;
+        return (t ^ (t >> 14)) / 4294967296.0;
+    };
+    constexpr int cells = kGrainTile / kGrainCell;
+    std::vector<double> coarse(cells * cells);
+    for (auto& value : coarse) value = next();
+    std::vector<double> tile(kGrainTile * kGrainTile);
+    for (int y = 0; y < kGrainTile; ++y)
+        for (int x = 0; x < kGrainTile; ++x) {
+            const int x0 = x / kGrainCell, y0 = y / kGrainCell, x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;
+            const double fx = static_cast<double>(x % kGrainCell) / kGrainCell, fy = static_cast<double>(y % kGrainCell) / kGrainCell;
+            const double top = coarse[y0 * cells + x0] + (coarse[y0 * cells + x1] - coarse[y0 * cells + x0]) * fx;
+            const double bottom = coarse[y1 * cells + x0] + (coarse[y1 * cells + x1] - coarse[y1 * cells + x0]) * fx;
+            tile[y * kGrainTile + x] = 0.6 * (top + (bottom - top) * fy) + 0.4 * next();
+        }
+    return tile;
+}
+// One channel of the background under grain of the given percent.
+inline int GrainChannel(int channel, double value, int grain) {
+    return std::clamp(static_cast<int>(std::floor(channel + (value - 0.5) * grain * 0.6 + 0.5)), 0, 255);
 }
 
 namespace detail {
-// Pedal highlight colours, in hues no note is drawn in: a blue for down and a
-// magenta for up, each a tint of the page's background so the notes read on it.
-inline constexpr const char* kPedalDownColour = "#31406b";
-inline constexpr const char* kPedalUpColour = "#6b3262";
+inline const Look& DefaultLook() { static const Look look; return look; }
+
+inline const char* FontCss(Look::Font font) {
+    return font == Look::SegoeUi ? "'Segoe UI',sans-serif" : font == Look::Consolas ? "Consolas,monospace" : "Verdana,sans-serif";
+}
+
+inline const std::string& ChordColour(Rhythm rhythm, const Look& look) {
+    return look.oneColour ? look.text : look.rhythm[static_cast<size_t>(rhythm)];
+}
 
 // The highlight behind a stretch of the sheet with the pedal at level (0 up,
 // 1 part way, 2 down), as a style, or empty for none. Part way highlights the
 // lower half of the line. The page's pedalHighlight writes the same.
-inline std::string PedalHighlight(int level, PedalMarks marks) {
+inline std::string PedalHighlight(int level, PedalMarks marks, const Look& look = DefaultLook()) {
     const bool down = level > 0;
     if (marks == PedalMarks::Off || (down && marks == PedalMarks::Inverted) || (!down && marks == PedalMarks::Normal)) return {};
-    const std::string colour = down ? kPedalDownColour : kPedalUpColour;
+    const std::string& colour = down ? look.pedalDown : look.pedalUp;
     return level == 1 ? "background:linear-gradient(transparent 50%," + colour + " 50%)" : "background:" + colour;
 }
 
@@ -1018,20 +1080,20 @@ inline std::string Heading(const std::string& title, int difficulty) {
     return (title.empty() ? "" : title + " \xC2\xB7 ") + "Difficulty " + std::to_string(difficulty) + " of 10";
 }
 
-inline std::string WithPedalHighlight(const std::string& html, int level, PedalMarks marks) {
-    const auto highlight = PedalHighlight(level, marks);
+inline std::string WithPedalHighlight(const std::string& html, int level, PedalMarks marks, const Look& look) {
+    const auto highlight = PedalHighlight(level, marks, look);
     return highlight.empty() || html.empty() ? html : "<span style=\"" + highlight + "\">" + html + "</span>";
 }
 
 // Sheet markup shared by ToHtml and the editor page. Under the separator the
 // pedal is the chord's while it is held into the next chord, and up otherwise.
-inline std::string SheetBody(const StyledResult& r) {
+inline std::string SheetBody(const StyledResult& r, const Look& look = DefaultLook()) {
     using Kind = StyledItem::Kind;
     std::string html;
     for (size_t i = 0; i < r.items.size(); ++i) {
         const auto& item = r.items[i];
         if (item.kind == Kind::Chord) {
-            html += std::string("<span style=\"color:") + RhythmColour(item.rhythm) + "\">";
+            html += "<span style=\"color:" + ChordColour(item.rhythm, look) + "\">";
             std::string chord;
             for (const auto& segment : item.segments) {
                 if (segment.outOfRange)
@@ -1039,11 +1101,11 @@ inline std::string SheetBody(const StyledResult& r) {
                              "border-bottom:2px solid;font-weight:900\">" + detail::EscapeHtml(segment.text) + "</span>";
                 else chord += detail::EscapeHtml(segment.text);
             }
-            html += WithPedalHighlight(chord, item.pedal, r.pedalMarks);
-            html += WithPedalHighlight(detail::EscapeHtml(item.separator), item.pedalHeld ? item.pedal : 0, r.pedalMarks);
+            html += WithPedalHighlight(chord, item.pedal, r.pedalMarks, look);
+            html += WithPedalHighlight(detail::EscapeHtml(item.separator), item.pedalHeld ? item.pedal : 0, r.pedalMarks, look);
             html += "</span>";
         } else if (item.kind == Kind::Comment) {
-            html += "<br><span style=\"color:#c8c4cc\">" + detail::EscapeHtml(item.text) + "</span><br>";
+            html += "<br><span style=\"color:" + look.comment + "\">" + detail::EscapeHtml(item.text) + "</span><br>";
         } else {
             const bool nearComment = (i > 0 && r.items[i - 1].kind == Kind::Comment) ||
                 (i + 1 < r.items.size() && r.items[i + 1].kind == Kind::Comment);
@@ -1054,12 +1116,131 @@ inline std::string SheetBody(const StyledResult& r) {
 }
 } // namespace detail
 
-// Self-contained HTML page on the original's background, out-of-range notes
-// bold and underlined. title sets the <title> (the MIDI file's stem from the app).
-inline std::string ToHtml(const StyledResult& r, const std::string& title = "Sheet") {
+// The header above a sheet: which lines show, how they sit, and the arranger,
+// who is the same on every sheet. Title and difficulty by default, as before.
+struct Header {
+    bool title = true, subtitle = false, artist = false, arranger = false, tempo = false, key = false, difficulty = true, date = false;
+    bool centre = false;
+    std::string arrangerName;
+};
+// A song's own header text. Sheet files written for a library leave all but
+// the title (the file's name) and the date (today) empty.
+struct SongText { std::string title, subtitle, artist, date; };
+// What the header says of the music: its first tempo and the key found.
+struct HeaderFacts { double bpm = 0; std::string key; };
+
+// Today as the header writes a date: 30 September 2026.
+inline std::string Today() {
+    static const char* months[] = {"January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"};
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    return std::to_string(local.tm_mday) + " " + months[local.tm_mon] + " " + std::to_string(local.tm_year + 1900);
+}
+
+// The key by Krumhansl and Schmuckler: the major or minor profile that best
+// matches how often each pitch class is played. The page's findKey does the same.
+inline std::string FindKey(const std::vector<TimedNote>& notes) {
+    if (notes.empty()) return {};
+    static const char* names[] = {"C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"};
+    static const double major[12] = {6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88};
+    static const double minor[12] = {6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17};
+    double counts[12] = {};
+    for (const auto& note : notes) counts[((note.midi % 12) + 12) % 12] += 1;
+    const auto correlation = [&](const double* profile, int tonic) {
+        double mx = 0, my = 0;
+        for (int i = 0; i < 12; ++i) { mx += counts[(i + tonic) % 12]; my += profile[i]; }
+        mx /= 12; my /= 12;
+        double sxy = 0, sxx = 0, syy = 0;
+        for (int i = 0; i < 12; ++i) {
+            const double x = counts[(i + tonic) % 12] - mx, y = profile[i] - my;
+            sxy += x * y; sxx += x * x; syy += y * y;
+        }
+        return sxx > 0 && syy > 0 ? sxy / std::sqrt(sxx * syy) : 0.0;
+    };
+    double best = -2;
+    std::string key;
+    for (int tonic = 0; tonic < 12; ++tonic)
+        for (int minorKey = 0; minorKey < 2; ++minorKey) {
+            const double c = correlation(minorKey ? minor : major, tonic);
+            if (c > best) { best = c; key = std::string(names[tonic]) + (minorKey ? " minor" : " major"); }
+        }
+    return key;
+}
+
+namespace detail {
+inline std::string Joined(const std::vector<std::string>& parts, const char* separator) {
+    std::string out;
+    for (const auto& part : parts) out += (out.empty() ? "" : separator) + part;
+    return out;
+}
+// The header's lines after the first, which the picture and the text share:
+// subtitle, artist and arranger, tempo and key, date. The page's
+// headerLines writes the same.
+inline std::vector<std::string> HeaderLines(const StyledResult& r, const Header& h, const SongText& song, const HeaderFacts& facts) {
+    std::vector<std::string> lines;
+    if (h.subtitle && !song.subtitle.empty()) lines.push_back(song.subtitle);
+    std::vector<std::string> people;
+    if (h.artist && !song.artist.empty()) people.push_back(song.artist);
+    if (h.arranger && !h.arrangerName.empty()) people.push_back("Arranged by " + h.arrangerName);
+    if (!people.empty()) lines.push_back(Joined(people, " \xC2\xB7 "));
+    std::vector<std::string> music;
+    if (h.tempo && facts.bpm > 0) music.push_back(std::to_string(static_cast<long long>(std::floor(facts.bpm + 0.5))) + " BPM");
+    if (h.key) {
+        if (!facts.key.empty()) music.push_back(facts.key);
+        if (r.sections.size() > 1) music.push_back("Transposed in " + std::to_string(r.sections.size()) + " sections");
+        // As the sheet's own Transpose by line says it: what the game is set to.
+        else if (r.transposition) music.push_back("Transpose by " + std::string(r.transposition < 0 ? "+" : "") + std::to_string(-r.transposition));
+    }
+    if (!music.empty()) lines.push_back(Joined(music, " \xC2\xB7 "));
+    if (h.date && !song.date.empty()) lines.push_back(song.date);
+    return lines;
+}
+} // namespace detail
+
+// The header over the picture and the page: the title and difficulty on the
+// first line, as before, then the rest. The page's headingLines writes the same.
+inline std::vector<std::string> HeadingLines(const StyledResult& r, const Header& h, const SongText& song, const HeaderFacts& facts) {
+    std::vector<std::string> lines;
+    const auto first = detail::Heading(h.title ? song.title : "", h.difficulty ? r.difficulty : 0);
+    if (!first.empty()) lines.push_back(first);
+    for (auto& line : detail::HeaderLines(r, h, song, facts)) lines.push_back(std::move(line));
+    return lines;
+}
+
+// The sheet's text with its header: a title of the song's own (not the file's
+// name), the other lines, then the difficulty, as SheetText(r) writes it. The
+// page's headerText writes the same.
+inline std::string SheetText(const StyledResult& r, const Header& h, const SongText& song, const HeaderFacts& facts, const std::string& fileName) {
+    std::vector<std::string> lines;
+    if (h.title && !song.title.empty() && song.title != fileName) lines.push_back(song.title);
+    for (auto& line : detail::HeaderLines(r, h, song, facts)) lines.push_back(std::move(line));
+    if (h.difficulty && r.difficulty) lines.push_back("Difficulty: " + std::to_string(r.difficulty) + " of 10");
+    const auto head = detail::Joined(lines, "\n");
+    if (head.empty()) return r.text;
+    return head + (r.text.empty() ? "" : "\n" + r.text);
+}
+
+// Self-contained HTML page in the look, the original's dark page by default,
+// out-of-range notes bold and underlined. title sets the <title> (the MIDI
+// file's stem from the app). Paper grain needs the editor page's script, so
+// here the background colour stands in for it.
+inline std::string ToHtml(const StyledResult& r, const std::string& title = "Sheet", const Look& look = detail::DefaultLook()) {
+    std::string background = "background:" + look.background;
+    if (look.ground == Look::Image && !look.image.empty()) {
+        const auto shade = "color-mix(in srgb," + look.background + " " + std::to_string(std::clamp(look.dim, 0, 100)) + "%,transparent)";
+        background += ";background-image:linear-gradient(" + shade + "," + shade + "),url(" + look.image + ")" +
+                      (look.fit == Look::Tile ? ";background-repeat:repeat" : ";background-size:cover;background-position:center");
+    }
+    char size[64];
+    snprintf(size, sizeof(size), "font-size:%gpt;line-height:%g%%", look.fontSizePt, look.lineHeightPercent);
     return "<!doctype html><meta charset=\"utf-8\"><title>" + detail::EscapeHtml(title) + "</title>"
-        "<body style=\"margin:16px;background:#2D2A32;color:#ffffff;font-family:Verdana,sans-serif;"
-        "font-size:10pt;line-height:135%\"><div style=\"white-space:pre-wrap\">" + detail::SheetBody(r) + "</div></body>";
+        "<body style=\"margin:16px;" + background + ";color:" + look.text + ";font-family:" + detail::FontCss(look.font) + ";" +
+        size + "\"><div style=\"white-space:pre-wrap\">" + detail::SheetBody(r, look) + "</div></body>";
 }
 
 } // namespace sheet

@@ -4,6 +4,8 @@
 #include <cwctype>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace shell {
@@ -22,6 +24,37 @@ inline bool TrashFolderName(const std::filesystem::path& name) {
     auto text = name.native();
     std::transform(text.begin(), text.end(), text.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
     return text == kTrashFolder;
+}
+// Whether two paths name the same file as Windows sees them, letters in either
+// case and either slash.
+inline bool SamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
+    const auto& x = a.native();
+    const auto& y = b.native();
+    if (x.size() != y.size()) return false;
+    for (size_t i = 0; i < x.size(); ++i) {
+        wchar_t c = x[i], d = y[i];
+        if (c == d) continue;
+        if (c == L'/') c = L'\\';
+        if (d == L'/') d = L'\\';
+        if (std::towupper(c) != std::towupper(d)) return false;
+    }
+    return true;
+}
+// The same for every path SamePath takes as this one.
+inline std::wstring PathKey(const std::filesystem::path& path) {
+    std::wstring key = path.native();
+    for (auto& c : key) c = c == L'/' ? L'\\' : static_cast<wchar_t>(std::towupper(c));
+    return key;
+}
+// What is left of `path` below the folder `root`, or empty when it is not inside it.
+inline std::filesystem::path Below(const std::filesystem::path& path, const std::filesystem::path& root) {
+    const auto& text = path.native();
+    auto folder = root.native();
+    while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+    if (folder.empty() || text.size() <= folder.size() + 1) return {};
+    if (text[folder.size()] != L'\\' && text[folder.size()] != L'/') return {};
+    if (!SamePath(std::filesystem::path(text.substr(0, folder.size())), std::filesystem::path(folder))) return {};
+    return std::filesystem::path(text.substr(folder.size() + 1));
 }
 // Files the library lists: Standard MIDI Files, karaoke .kar ones included.
 inline bool LibraryFile(const std::filesystem::path& path) {
@@ -136,31 +169,101 @@ struct LibraryLists {
     // Files a scan moved into the library, which Put back returns.
     std::vector<MovedSong> scanned;
     bool operator==(const LibraryLists&) const = default;
-    bool Favourite(const std::filesystem::path& path) const {
-        return std::find(favourites.begin(), favourites.end(), path) != favourites.end();
+    static bool Holds(const std::vector<std::filesystem::path>& songs, const std::filesystem::path& path) {
+        return std::any_of(songs.begin(), songs.end(), [&](const std::filesystem::path& song) { return SamePath(song, path); });
     }
+    bool Favourite(const std::filesystem::path& path) const { return Holds(favourites, path); }
     const MovedSong* Scanned(const std::filesystem::path& path) const {
-        const auto found = std::find_if(scanned.begin(), scanned.end(), [&](const MovedSong& song) { return song.file == path; });
+        const auto found = std::find_if(scanned.begin(), scanned.end(), [&](const MovedSong& song) { return SamePath(song.file, path); });
         return found == scanned.end() ? nullptr : &*found;
     }
     // Whether the song once at `path` is in the Trash.
     bool Trashed(const std::filesystem::path& path) const {
-        return std::any_of(trash.begin(), trash.end(), [&](const MovedSong& song) { return song.origin == path; });
+        return std::any_of(trash.begin(), trash.end(), [&](const MovedSong& song) { return SamePath(song.origin, path); });
+    }
+    // Every list calls each song once; a song listed twice keeps its first place.
+    void Deduplicate() {
+        const auto once = [](std::vector<std::filesystem::path>& songs) {
+            std::unordered_set<std::wstring> seen;
+            std::erase_if(songs, [&](const std::filesystem::path& song) { return !seen.insert(PathKey(song)).second; });
+        };
+        once(favourites);
+        once(queue);
+        for (auto& playlist : playlists) once(playlist.songs);
     }
     // Every list follows a song that moved.
     void Renamed(const std::filesystem::path& from, const std::filesystem::path& to) {
-        const auto follow = [&](std::vector<std::filesystem::path>& songs) { std::replace(songs.begin(), songs.end(), from, to); };
+        const auto follow = [&](std::vector<std::filesystem::path>& songs) {
+            for (auto& song : songs) if (SamePath(song, from)) song = to;
+        };
         follow(favourites);
         follow(queue);
         for (auto& playlist : playlists) follow(playlist.songs);
+        Deduplicate();
+    }
+    // A copy of a song joins its star and playlists, beside it; the queue is
+    // left as it was.
+    void Copied(const std::filesystem::path& from, const std::filesystem::path& to) {
+        if (Favourite(from) && !Favourite(to)) favourites.push_back(to);
+        for (auto& playlist : playlists) {
+            auto& songs = playlist.songs;
+            const auto found = std::find_if(songs.begin(), songs.end(), [&](const std::filesystem::path& song) { return SamePath(song, from); });
+            if (found != songs.end() && !Holds(songs, to)) songs.insert(found + 1, to);
+        }
     }
     // A song gone for good leaves every list.
     void Forget(const std::filesystem::path& path) {
-        const auto drop = [&](std::vector<std::filesystem::path>& songs) { songs.erase(std::remove(songs.begin(), songs.end(), path), songs.end()); };
+        const auto drop = [&](std::vector<std::filesystem::path>& songs) {
+            std::erase_if(songs, [&](const std::filesystem::path& song) { return SamePath(song, path); });
+        };
         drop(favourites);
         drop(queue);
         for (auto& playlist : playlists) drop(playlist.songs);
-        std::erase_if(scanned, [&](const MovedSong& song) { return song.file == path; });
+        std::erase_if(scanned, [&](const MovedSong& song) { return SamePath(song.file, path); });
+    }
+    // The MIDI folder is now `to`, not `from`: each song of `from` found at the
+    // same place in `to` is taken to have moved with it, and its lists and
+    // records follow; the rest are left, for a folder only switched away from.
+    // A folder named again in other letter case takes every song along.
+    void Rebased(const std::filesystem::path& from, const std::filesystem::path& to) {
+        if (from.empty() || to.empty() || from == to) return;
+        const bool recased = SamePath(from, to);
+        const auto moved = [&](const std::filesystem::path& path) {
+            const auto rest = Below(path, from);
+            return rest.empty() ? path : to / rest;
+        };
+        const auto there = [&](const std::filesystem::path& path) {
+            std::error_code error;
+            return recased || std::filesystem::exists(path, error);
+        };
+        const auto follow = [&](std::vector<std::filesystem::path>& songs) {
+            for (auto& song : songs)
+                if (auto file = moved(song); file != song && there(file)) song = std::move(file);
+        };
+        follow(favourites);
+        follow(queue);
+        for (auto& playlist : playlists) follow(playlist.songs);
+        const auto records = [&](std::vector<MovedSong>& songs) {
+            for (auto& song : songs)
+                if (auto file = moved(song.file); file != song.file && there(file)) {
+                    song.file = std::move(file);
+                    song.origin = moved(song.origin);
+                }
+        };
+        records(trash);
+        records(scanned);
+        Deduplicate();
+    }
+    // Each listed song named in other letter case than its file takes the
+    // file's own, from `files` by PathKey.
+    void Recased(const std::unordered_map<std::wstring, std::filesystem::path>& files) {
+        const auto follow = [&](std::filesystem::path& song) {
+            if (const auto found = files.find(PathKey(song)); found != files.end() && found->second != song) song = found->second;
+        };
+        for (auto& song : favourites) follow(song);
+        for (auto& song : queue) follow(song);
+        for (auto& playlist : playlists) for (auto& song : playlist.songs) follow(song);
+        for (auto& song : scanned) follow(song.file);
     }
     // The songs a playlist or the queue holds, in order; null for any other list.
     const std::vector<std::filesystem::path>* Songs(int list) const {
@@ -173,32 +276,38 @@ struct LibraryLists {
     }
 };
 // The songs Previous, Next, shuffle and up next choose from: the favourites or
-// a playlist while it is shown, else the songs beside the open one (SongsBeside).
-// A playlist's song outside the library is named by its file.
+// a playlist while it is shown, none when it is empty, else the songs beside
+// the open one (SongsBeside). A playlist's song outside the library is named by its file.
 inline std::vector<MidiEntry> SongsFollowed(const std::vector<MidiEntry>& files, const std::filesystem::path& open,
                                             const LibraryLists& lists, int openList) {
     std::vector<MidiEntry> songs;
-    if (openList == kFavouritesList)
+    if (openList == kFavouritesList) {
         for (const auto& file : files)
             if (lists.Favourite(file.path)) songs.push_back(file);
-    if (const auto* listed = openList >= 0 ? lists.Songs(openList) : nullptr)
+        return songs;
+    }
+    if (const auto* listed = openList >= 0 ? lists.Songs(openList) : nullptr) {
         for (const auto& song : *listed) {
-            const auto found = std::find_if(files.begin(), files.end(), [&](const MidiEntry& file) { return file.path == song; });
+            const auto found = std::find_if(files.begin(), files.end(), [&](const MidiEntry& file) { return SamePath(file.path, song); });
             const auto name = song.filename().u8string();
             songs.push_back(found != files.end() ? *found : MidiEntry{song, std::string(name.begin(), name.end())});
         }
-    return songs.empty() ? SongsBeside(files, open) : songs;
+        return songs;
+    }
+    return SongsBeside(files, open);
 }
 // Moves `song` within `songs` to before the song at `index`, counted before the
-// move, or to the end past the last; false when it is not there.
+// move, or to the end past the last; false when it is not there. A list calls
+// each song once (LibraryLists::Deduplicate), so the song is the one moved.
 inline bool MoveSong(std::vector<std::filesystem::path>& songs, const std::filesystem::path& song, size_t index) {
-    const auto found = std::find(songs.begin(), songs.end(), song);
+    const auto found = std::find_if(songs.begin(), songs.end(), [&](const std::filesystem::path& each) { return SamePath(each, song); });
     if (found == songs.end()) return false;
     const auto from = static_cast<size_t>(found - songs.begin());
+    const auto moved = *found;
     index = std::min(index, songs.size());
     if (index > from) --index;
     songs.erase(found);
-    songs.insert(songs.begin() + static_cast<std::ptrdiff_t>(index), song);
+    songs.insert(songs.begin() + static_cast<std::ptrdiff_t>(index), moved);
     return true;
 }
 // `wanted`, or the first of "name (2).mid", "name (3).mid" and on that is free.

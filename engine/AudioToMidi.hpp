@@ -1,9 +1,9 @@
 #pragma once
 
 // Runs the audio-to-MIDI converter (tools/mp3-to-midi/convert.py) out of process
-// and parses its line-based status output. Transkun is a PyTorch model with no
-// clean ONNX export, so it runs under Python; the resulting .mid is written to
-// the MIDI folder and picked up by the normal folder scan.
+// and parses its line-based status output. Transkun runs under Python on ONNX
+// Runtime with DirectML, beside yt-dlp; the resulting .mid is written to the
+// MIDI folder and picked up by the normal folder scan.
 //
 // Each Job runs on its own thread and puts the process tree in a job object, so
 // Cancel also kills child processes. Nothing here touches the message loop.
@@ -101,21 +101,11 @@ struct Install {
     std::filesystem::path python;
     std::filesystem::path script;
     std::filesystem::path signin;  // signin.py beside convert.py, if present
-    // setup.ps1 beside convert.py; downloads Python, the packages, FFmpeg and Deno.
+    // setup.ps1 beside convert.py; downloads Python, the packages, the model,
+    // FFmpeg and Deno.
     std::filesystem::path setup;
-    // setup.ps1 -Nvidia installed a CUDA build of PyTorch (its dist-info is
-    // torch-<version>+cu<nnn>); false for the CPU build.
-    bool gpu = false;
-    // convert.py found the CUDA build has no code for the card and ran on the
-    // CPU (gpu-unsupported beside it); setup.ps1 -Nvidia replaces the build.
-    bool gpuUnsupported = false;
     bool Found() const { return !python.empty() && !script.empty(); }
     bool CanSetUp() const { return !Found() && !setup.empty(); }
-    // An install setup.ps1 made can be run again to swap the CPU and GPU builds;
-    // a Python from MIDIPP_CONVERTER_PYTHON is not setup.ps1's to change.
-    bool CanSwitch() const {
-        return Found() && !setup.empty() && python == script.parent_path() / L"python" / L"python.exe";
-    }
     // signin.py writes the YouTube session to cookies.txt; convert.py reads it.
     bool SignedIn() const {
         std::error_code ec;
@@ -128,23 +118,26 @@ inline std::wstring SignInCommandLine(const std::filesystem::path& python, const
 }
 
 // Runs setup.ps1 under the System32 PowerShell with -ExecutionPolicy Bypass.
-// It emits the same step:/done:/error: lines as convert.py. nvidia selects
-// PyTorch's CUDA build.
-inline std::wstring SetupCommandLine(const std::filesystem::path& setup, bool nvidia = false) {
+// It emits the same step:/done:/error: lines as convert.py.
+inline std::wstring SetupCommandLine(const std::filesystem::path& setup) {
     wchar_t system[MAX_PATH]{};
     GetSystemDirectoryW(system, MAX_PATH);
     const auto shell = std::filesystem::path(system) / L"WindowsPowerShell" / L"v1.0" / L"powershell.exe";
     return QuoteArgument(shell.native()) + L" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File " +
-           QuoteArgument(setup.native()) + (nvidia ? L" -Nvidia" : L"");
+           QuoteArgument(setup.native());
 }
 
-// setup.ps1 -Nvidia names the card with nvidia-smi, which NVIDIA's driver puts
-// in System32; without it the GPU build cannot be installed.
-inline bool HasNvidiaCard() {
-    wchar_t system[MAX_PATH]{};
-    GetSystemDirectoryW(system, MAX_PATH);
-    std::error_code ec;
-    return std::filesystem::is_regular_file(std::filesystem::path(system) / L"nvidia-smi.exe", ec);
+// The percentage at the end of a step line ("Transcribing on the GPU, 40%"),
+// or -1 when it has none.
+inline int StepPercent(std::string_view step) {
+    if (step.empty() || step.back() != '%') return -1;
+    size_t digits = step.size() - 1;
+    while (digits > 0 && step[digits - 1] >= '0' && step[digits - 1] <= '9') --digits;
+    const auto number = step.substr(digits, step.size() - 1 - digits);
+    if (number.empty() || number.size() > 3 || digits < 2 || step.substr(digits - 2, 2) != ", ") return -1;
+    int value = 0;
+    for (const char c : number) value = value * 10 + (c - '0');
+    return value <= 100 ? value : -1;
 }
 
 inline Install FindInstall(const std::filesystem::path& exeFolder) {
@@ -168,23 +161,18 @@ inline Install FindInstall(const std::filesystem::path& exeFolder) {
         value.resize(GetEnvironmentVariableW(L"MIDIPP_CONVERTER_PYTHON", value.data(), size));
         if (fs::is_regular_file(value, ec)) found.python = value;
     }
-    // setup.ps1 creates setup.partial while it runs; treat that install as incomplete.
-    const bool partial = !found.script.empty() && fs::exists(found.script.parent_path() / L"setup.partial", ec);
+    // setup.ps1 creates setup.partial while it runs; treat that install as
+    // incomplete. So is one with no model, which a converter from before ONNX
+    // Runtime has, so Install sets it up again.
+    const bool partial = !found.script.empty() &&
+                         (fs::exists(found.script.parent_path() / L"setup.partial", ec) ||
+                          !fs::is_regular_file(found.script.parent_path() / L"model" / L"scorer.onnx", ec));
     if (partial) found.python.clear();
     if (found.python.empty() && !found.script.empty() && !partial)
         // Bundled or setup.ps1-created interpreter beside convert.py.
         for (const auto& candidate : {found.script.parent_path() / L"python" / L"python.exe",
                                       found.script.parent_path() / L".venv" / L"Scripts" / L"python.exe"})
             if (fs::is_regular_file(candidate, ec)) { found.python = candidate; break; }
-    if (!found.python.empty())
-        for (const auto& packages : {found.python.parent_path() / L"Lib" / L"site-packages",
-                                     found.python.parent_path().parent_path() / L"Lib" / L"site-packages"})
-            for (fs::directory_iterator entry(packages, ec), end; !ec && entry != end; entry.increment(ec)) {
-                const auto name = entry->path().filename().wstring();
-                if (name.starts_with(L"torch-") && name.ends_with(L".dist-info") && name.find(L"+cu") != std::wstring::npos)
-                    found.gpu = true;
-            }
-    found.gpuUnsupported = found.gpu && fs::exists(found.script.parent_path() / L"gpu-unsupported", ec);
     return found;
 }
 
@@ -202,7 +190,7 @@ public:
     // Done, Finished or Error.
     bool Start(const std::wstring& commandLine, Sink sink) {
         // The previous run has already reported its final status, but its
-        // process tree can take seconds to exit (Python unloading torch, a
+        // process tree can take seconds to exit (Python unloading its libraries, a
         // closing sign-in window). Joining without Cancel waits for all of it.
         if (worker_.joinable()) { Cancel(); worker_.join(); }
         SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};

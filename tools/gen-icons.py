@@ -29,7 +29,7 @@ ICONS = [
     ("Speaker", "volume-2"), ("Muted", "volume-x"), ("Solo", "headphones"),
     ("Piano", "piano"), ("Mini", "minimize-2"), ("Expand", "maximize-2"),
     ("Copy", "copy"), ("Rename", "pencil"), ("Check", "check"),
-    ("SortDown", "arrow-down"), ("SortUp", "arrow-up"),
+    ("Sort", "arrow-up-down"),
     ("Undo", "undo-2"), ("Redo", "redo-2"), ("Anchor", "git-commit-horizontal"),
     ("Clear", "eraser"),
     ("Draw", "line-squiggle"), ("Delete", "trash-2"),
@@ -37,6 +37,7 @@ ICONS = [
     ("Audio", "audio-lines"), ("Discord", "discord"), ("Roblox", "roblox"),
     ("Help", "circle-question-mark"),
     ("Repeat", "repeat"), ("Repeat1", "repeat-1"),
+    ("Stop", "square"), ("Restart", "skip-back"), ("More", "ellipsis"), ("Warning", "triangle-alert"),
 ]
 
 CURVE_STEPS = 10   # enough for a 24-unit glyph at 32 px

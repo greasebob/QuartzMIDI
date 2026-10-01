@@ -1,12 +1,11 @@
-"""Pin SHA-256 hashes in tools/mp3-to-midi/requirements.txt and its CUDA files.
+"""Pin SHA-256 hashes in tools/mp3-to-midi/requirements.txt.
 
     python tools/pin-hashes.py
 
 Each `name==version` line gets a `--hash=sha256:` for every file of that release
-installable on CPython 3.12, win_amd64 (plus the sdist for SOURCE packages).
-Digests come from PyPI's JSON API, or for +cpu/+cu126/+cu130 versions from the
-`#sha256=` fragments in PyTorch's package index. setup.ps1 installs with
---require-hashes. Rerun after changing a version; only index metadata is fetched.
+installable on CPython 3.12, win_amd64 (plus the sdist for SOURCE packages),
+from PyPI's JSON API. setup.ps1 installs with --require-hashes. Rerun after
+changing a version; only index metadata is fetched.
 """
 import json
 import os
@@ -15,7 +14,6 @@ import sys
 import urllib.request
 
 here = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'mp3-to-midi')
-PYTORCH = 'https://download.pytorch.org/whl/'
 # Packages without a wheel; setup.ps1 builds them from source.
 SOURCE = {'proxy-tools'}
 
@@ -45,14 +43,6 @@ def installable(filename):
 
 
 def hashes(name, version):
-    if '+' in version:
-        page = fetch(PYTORCH + version.split('+')[1] + '/' + normal(name) + '/')
-        found = []
-        for filename, digest in re.findall(r'href="[^"]*?([^/"#]+\.whl)#sha256=([0-9a-f]{64})"', page):
-            filename = urllib.request.unquote(filename)
-            if filename.split('-')[1] == version and installable(filename):
-                found.append(digest)
-        return found
     release = json.loads(fetch('https://pypi.org/pypi/{}/{}/json'.format(name, version)))
     wanted = (lambda f: f.endswith(('.tar.gz', '.zip'))) if normal(name) in SOURCE else installable
     return [item['digests']['sha256'] for item in release['urls'] if wanted(item['filename'])]
@@ -83,5 +73,4 @@ def pin(path):
     open(path, 'w', encoding='utf-8', newline='\n').write('\n'.join(out))
 
 
-for name in ('requirements.txt', 'requirements-cu126.txt', 'requirements-cu130.txt'):
-    pin(os.path.join(here, name))
+pin(os.path.join(here, 'requirements.txt'))
