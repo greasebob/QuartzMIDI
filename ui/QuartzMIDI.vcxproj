@@ -61,7 +61,6 @@
     <ClInclude Include="SavedFiles.hpp" />
     <ClInclude Include="WindowCapture.hpp" />
     <ClInclude Include="MiniFocus.hpp" />
-    <ClInclude Include="KeyTest.hpp" />
     <ClInclude Include="..\engine\Skin.hpp" />
   </ItemGroup>
   <ItemGroup><ResourceCompile Include="Shell.rc" /></ItemGroup>

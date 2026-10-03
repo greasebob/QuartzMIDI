@@ -109,7 +109,7 @@ enum class Icon { Folder, Open, Refresh, Settings, Sun, Moon, Play, Pause, Back,
                   Mini, Expand, Copy, Rename, Check, Sort, Undo, Redo, Anchor, Clear,
                   Draw, Delete,
                   Hold, Tap, Audio, Discord, Roblox, Help,
-                  Repeat, Repeat1, Stop, Restart, More, Warning };
+                  Repeat, Repeat1, Stop, Restart, More, Warning, Upgrade };
 
 // Icons are Lucide, flattened to polylines by tools/gen-icons.py into
 // ui/IconData.hpp. Vector rather than a raster atlas so they stay crisp at
@@ -1213,13 +1213,11 @@ void Panels::LoadPreferences(const std::filesystem::path& path) {
         preferences.dark = value("dark", (legacy & 1) != 0);
         preferences.autoSolo = value("autoSoloPiano", false);
         preferences.alwaysOnTop = value("alwaysOnTop", false);
-        preferences.mediaKeys = value("mediaKeys", true);
         preferences.blockAltF4 = value("blockAltF4", true);
         preferences.hideFromTaskbar = value("hideFromTaskbar", false);
         preferences.opacity = std::clamp(value("opacity", 100), 40, 100);
         preferences.converterCpu = std::clamp(value("converterCpu", 75), 25, 100);
         convertPlaylist_ = value("convertPlaylist", false);
-        timingSource_ = std::clamp(value("timingSource", 0), 0, 1);
         preferences.folders = value("folders", true);
         browse_ = value("openFolder", std::string());
         preferences.startMini = value("mini", false);
@@ -1246,12 +1244,6 @@ void Panels::LoadPreferences(const std::filesystem::path& path) {
         preferences.helpBuild = value("helpBuild", std::string());
         preferences.hideFromCapture = value("hideFromCapture", false);
         preferences.checkForUpdates = value("checkForUpdates", true);
-        for (const auto& [key, paths] : {std::pair{"scanFolders", &preferences.scanFolders}, std::pair{"scanSkipped", &preferences.scanSkipped},
-                                         std::pair{"scanPicked", &preferences.scanPicked}, std::pair{"scanIgnored", &preferences.scanIgnored}})
-            if (const auto found = json.find(key); found != json.end() && found->is_array())
-                for (const auto& each : *found)
-                    if (each.is_string()) { const auto text = each.get<std::string>(); paths->emplace_back(std::u8string(text.begin(), text.end())); }
-                    else damaged = true;
     } else { preferences = {}; preferences.tourSeen = false; }
     if (damaged) {
         const auto aside = SetAside(path);
@@ -1267,10 +1259,10 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
     nlohmann::json json{{"theme", preferences.theme}, {"dark", preferences.dark}, {"autoSoloPiano", preferences.autoSolo},
                         {"midiFolder", Utf8(preferences.folder)},
                         {"song", Utf8(preferences.lastSong)},
-                        {"alwaysOnTop", preferences.alwaysOnTop}, {"mediaKeys", preferences.mediaKeys},
+                        {"alwaysOnTop", preferences.alwaysOnTop},
                         {"blockAltF4", preferences.blockAltF4},
                         {"opacity", preferences.opacity}, {"converterCpu", preferences.converterCpu},
-                        {"convertPlaylist", convertPlaylist_}, {"timingSource", timingSource_},
+                        {"convertPlaylist", convertPlaylist_},
                         {"folders", preferences.folders}, {"openFolder", browse_}, {"mini", miniMode},
                         {"miniAutoplay", miniAutoplay},
                         {"tracksOpen", tracksExpanded}, {"velocityOpen", velocityExpanded},
@@ -1281,11 +1273,6 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
                         {"windowX", preferences.windowX}, {"windowY", preferences.windowY}, {"windowWidth", preferences.windowWidth},
                         {"hideFromCapture", preferences.hideFromCapture}, {"hideFromTaskbar", preferences.hideFromTaskbar},
                         {"checkForUpdates", preferences.checkForUpdates}};
-    for (const auto& [key, paths] : {std::pair{"scanFolders", &preferences.scanFolders}, std::pair{"scanSkipped", &preferences.scanSkipped},
-                                     std::pair{"scanPicked", &preferences.scanPicked}, std::pair{"scanIgnored", &preferences.scanIgnored}}) {
-        auto& list = json[key] = nlohmann::json::array();
-        for (const auto& path : *paths) list.push_back(Utf8(path));
-    }
     const auto text = json.dump(2);
     if (text == savedPreferences_) return;
     // Written through to the disk and renamed over, so an interrupted write can't
@@ -1909,8 +1896,6 @@ std::function<std::filesystem::path(HWND)> PickMidiFile = [](HWND hwnd) { return
 std::function<std::filesystem::path(HWND, bool, const std::string&)> PickThemeFile =
     [](HWND hwnd, bool save, const std::string& name) { return PickTheme(hwnd, save, name); };
 
-Panels::~Panels() { if (measuring_) input_latency::stop(); }
-
 // How far a theme's shape moves the layout from the built-ins, before DPI: a
 // control's height, the window edge, a panel edge and the body text. Sizes
 // below are the built-in number plus this growth, so a theme with taller
@@ -2531,17 +2516,6 @@ void Panels::DrawMidiDevices(const Fonts& fonts, const skin::Skin& design, float
     section("MIDI output");
     if (const int target = Segments("##output-target", {"Keystrokes", "MIDI"}, state->outputMidi ? 1 : 0, s, dpi); target >= 0)
         engine.Send({ShellEngine::Action::OutputTarget, {}, 0, 0, target == 1});
-    // Beside the choice it checks: one harmless key to the app's own window, and
-    // the shell says how it went.
-    ImGui::SameLine(0, s.spacing.s2);
-    ImGui::BeginDisabled(keyTesting || state->outputMidi);
-    if (EasedButton("Test keys", ImVec2(-1, s.metric.controlHeight))) { keyTestRequested = true; keyTestResult.clear(); }
-    ImGui::EndDisabled();
-    if (!keyTestResult.empty()) {
-        ImGui::PushStyleColor(ImGuiCol_Text, Colour(keyTestPassed ? s.accent.okInk : s.accent.warn));
-        ImGui::TextWrapped("%s", keyTestResult.c_str());
-        ImGui::PopStyleColor();
-    }
 
     const auto outputGroups = GroupDevices(state->outputDevices);
     const auto* selectedOutputGroup = SelectedGroup(outputGroups, state->outputDevice);
@@ -2744,15 +2718,9 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     bool detectDrums = state->detectDrums;
     if (SettingSwitch("Detect drum tracks", detectDrums, nullptr, fonts, design, dpi))
         engine.Send({ShellEngine::Action::DetectDrums, {}, 0, 0, detectDrums});
-    // One choice for the two ways a song is transposed as it loads. The one
-    // turned off is sent first, so the two are never on together.
-    const int transposeOnLoad = state->autoTranspose ? 1 : state->fitToKeys ? 2 : 0;
-    if (const int chosen = SettingSegments("Transpose on load", "##transpose-on-load", {"Off", "Best key", "Fit keys"},
-                                           transposeOnLoad, s, dpi); chosen >= 0) {
-        if (chosen == 1) engine.Send({ShellEngine::Action::FitToKeys, {}, 0, 0, false});
+    if (const int chosen = SettingSegments("Transpose on load", "##transpose-on-load", {"Off", "Best key"},
+                                           state->autoTranspose ? 1 : 0, s, dpi); chosen >= 0)
         engine.Send({ShellEngine::Action::AutoTranspose, {}, 0, 0, chosen == 1});
-        if (chosen != 1) engine.Send({ShellEngine::Action::FitToKeys, {}, 0, 0, chosen == 2});
-    }
     // Performer switch and section, only when the add-on is present.
     const auto& performer = state->performer;
     const auto performerControl = [&](const PerformerControl& control) {
@@ -2841,38 +2809,6 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         engine.Send({ShellEngine::Action::OutRange, {}, 0, 0, outRange});
     if (const int octaves = SettingSegments("Octaves", "##octaves", {"1", "2", "3", "4", "5"}, state->octaves - 1, s, dpi); octaves >= 0)
         engine.Send({ShellEngine::Action::Octaves, {}, 0, 0, false, static_cast<double>(octaves + 1)});
-    // Closed by default since it's a diagnostic; a measurement keeps running while
-    // the header is closed.
-    if (SettingSection("Keyboard timing", s, dpi)) {
-    bool measure = measuring_;
-    if (SettingSwitch("Measure keyboard timing", measure, nullptr, fonts, design, dpi)) {
-        if (measure) { timing_ = input_latency::Collector{}; timingSummary_ = {}; measuring_ = input_latency::start(); }
-        else { input_latency::stop(); measuring_ = false; timingSummary_ = {}; }
-    }
-    if (!measuring_ && input_latency::hookError()) ImGui::Text("Hook error %lu", input_latency::hookError());
-    if (const int source = SettingSegments("Source", "##timing-source", {"Live input", "Autoplay"}, timingSource_, s, dpi); source >= 0) {
-        timingSource_ = source; timingSummary_ = {}; nextTimingPoll_ = 0;
-    }
-    if (measuring_) {
-        const auto& t = timingSummary_;
-        if (t.callbackToHookMs.count) {
-            ImGui::Text("Callback to hook: %.3f ms median", t.callbackToHookMs.p50);
-            ImGui::Text("p95 %.3f ms   p99 %.3f ms", t.callbackToHookMs.p95, t.callbackToHookMs.p99);
-            ImGui::Text("Preparation %.3f ms   Calls %.3f ms", t.preparationMs.p50, t.callsMs.p50);
-            ImGui::Text("%zu notes   %.2f events/note", t.notes, t.eventsPerNote);
-            const auto graph = ImGui::GetCursorScreenPos();
-            const float width = ImGui::GetContentRegionAvail().x;
-            auto* draw = ImGui::GetWindowDrawList();
-            skin::RecessedRect(draw, graph, ImVec2(graph.x + width, graph.y + 8 * dpi), 4 * dpi, s);
-            const float observed = static_cast<float>(t.callbackToHookMs.count) / std::max(size_t{1}, t.notes);
-            if (observed > 0) draw->AddRectFilled(graph, ImVec2(graph.x + width * observed, graph.y + 8 * dpi), Colour(s.accent.okInk), 4 * dpi);
-            ImGui::Dummy(ImVec2(width, 8 * dpi));
-            ImGui::Text("%zu of %zu notes fully observed", t.callbackToHookMs.count, t.notes);
-        }
-        ImGui::Text("%zu incomplete   %llu failures   %llu dropped", t.incomplete,
-            static_cast<unsigned long long>(t.failures), static_cast<unsigned long long>(input_latency::dropped()));
-    }
-    }
     ImGui::Separator();
     section("Velocity");
     // The modifier only matters while velocity is on.
@@ -2918,7 +2854,6 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         ImGui::EndDisabled();
         if (!canHide && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             hotkeyCapture = static_cast<int>(kShowHideHotkey);
-            songHotkeyCapture.clear();
             hideOnShowHideKey = revealShowHideKey_ = true;
         }
     }
@@ -2926,14 +2861,13 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     ImGui::Separator();
     section("Hotkeys");
     if (revealSettingsHotkeys) ImGui::SetScrollHereY(0.f);
-    SettingSwitch("Media keys", preferences.mediaKeys, nullptr, fonts, design, dpi);
     SettingSwitch("Block Alt+F4 while playing", preferences.blockAltF4, nullptr, fonts, design, dpi);
     {
         // Action, its key as a keycap, and a button to unbind it. When armed, the cap
         // says "Press a key" inside the accent ring. A key held by another program
         // has the legend's dead-key ink and a warning mark before it.
         const char* actions[kAppHotkeys]{"Play/Pause", "Skip back", "Skip forward", "Stop", "Previous song", "Next song"};
-        const char* laterActions[kLaterHotkeyFields.size()]{"Panic", "Speed up", "Speed down", "Show/hide window"};
+        const char* laterActions[kLaterHotkeyFields.size()]{"Show/hide window"};
         const float height = s.metric.controlHeight, gap = s.spacing.s2, capWidth = 112 * dpi, mark = 14 * dpi;
         auto* draw = ImGui::GetWindowDrawList();
         // A cap's text, centred, with the warning mark before it when the key is taken.
@@ -2975,7 +2909,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             ImGui::PushID(static_cast<int>(i));
             const bool armed = hotkeyCapture == static_cast<int>(i);
             const int clicked = keyRow(action, state->hotkeys[i], armed, transportKeysAvailable[i]);
-            if (clicked == 1) { hotkeyCapture = armed ? -1 : static_cast<int>(i); songHotkeyCapture.clear(); }
+            if (clicked == 1) hotkeyCapture = armed ? -1 : static_cast<int>(i);
             if (clicked == 2) {
                 ShellEngine::Command command{ShellEngine::Action::Hotkey};
                 command.track = i; engine.Send(std::move(command));
@@ -3054,26 +2988,6 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         // The performer's action keys, which work whatever the trigger.
         if (state->performer.on)
             for (const auto& action : state->performer.actions) hotkeyRow(action.key, action.name);
-        // A row per song with a key of its own, named as the song, whose file may be gone.
-        ImGui::PushID("songs");
-        for (size_t i = 0; i < state->songHotkeys.size(); ++i) {
-            const auto& bound = state->songHotkeys[i];
-            ImGui::PushID(static_cast<int>(i));
-            const bool armed = songHotkeyCapture == bound.song;
-            songCaptureDrawn_ |= armed;
-            const int clicked = keyRow(Utf8(bound.song.stem()), bound.key, armed, i < songKeysAvailable.size() && songKeysAvailable[i]);
-            if (clicked == 1) {
-                songHotkeyCapture = armed ? std::filesystem::path() : bound.song;
-                songCaptureDrawn_ = true;
-                hotkeyCapture = -1;
-            }
-            if (clicked == 2) {
-                engine.Send({ShellEngine::Action::SongHotkey, bound.song});
-                if (armed) songHotkeyCapture.clear();
-            }
-            ImGui::PopID();
-        }
-        ImGui::PopID();
     }
     ImGui::Separator();
     section("Appearance");
@@ -3222,11 +3136,6 @@ void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float
     } else {
         hotkeyCapture = -1;
         hideOnceShowHideWorks = false;
-        if (measuring_) {
-            input_latency::stop();
-            measuring_ = false;
-            timingSummary_ = {};
-        }
     }
 }
 
@@ -3360,36 +3269,6 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
 
     progress();
     ImGui::PopStyleVar(2);
-}
-
-// A newer release as an accent chip with a dot before its label, in the top
-// strip of either window. The width is 0 when there is none to offer; call
-// both inside the same font.
-float UpdateChipWidth(const std::string& label, const skin::Skin& s) {
-    return label.empty() ? 0.f : ImGui::CalcTextSize(label.c_str()).x + 2 * s.spacing.s3 + s.spacing.s2 + s.spacing.s1;
-}
-
-void UpdateChip(const std::string& label, const std::string& page, const skin::Skin& s) {
-    const float width = UpdateChipWidth(label, s), height = s.metric.controlHeight;
-    ImGui::PushStyleColor(ImGuiCol_Button, Colour(s.accent.accentSoft));
-    const bool clicked = EasedButton("##update", ImVec2(width, height));
-    ImGui::PopStyleColor();
-    const ImVec2 min = ImGui::GetItemRectMin();
-    auto* draw = ImGui::GetWindowDrawList();
-    const float dot = s.spacing.s2;
-    draw->AddCircleFilled(ImVec2(min.x + s.spacing.s3 + dot / 2, min.y + height / 2), dot / 2, Colour(s.accent.accent));
-    draw->AddText(ImVec2(min.x + s.spacing.s3 + dot + s.spacing.s1, min.y + (height - ImGui::GetTextLineHeight()) / 2),
-                  Colour(s.accent.accent), label.c_str());
-    if (clicked) {
-        const std::wstring wide(page.begin(), page.end());
-        ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    }
-}
-
-std::string Panels::UpdateLabel(float room, const skin::Skin& s, float dpi) const {
-    if (!preferences.checkForUpdates || update.version.empty()) return {};
-    const std::string full = "Update " + update.version;
-    return room - UpdateChipWidth(full, s) - s.spacing.s2 >= 120 * dpi ? full : update.version;
 }
 
 void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi, const EngineSnapshot& state,
@@ -3623,15 +3502,7 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
     const float segmentX = utilityX - 172 * dpi;
     ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, origin.y + stripPad));
     { FontScope deviceFont(fonts, design, design.type.body * SpecFontScale(design), Weight::Medium);
-      // A newer release sits between the device pill and the mode segment.
-      const std::string updateLabel = UpdateLabel(segmentX - s.spacing.s3 - origin.x - pad, s, dpi);
-      const float updateWidth = UpdateChipWidth(updateLabel, s);
-      const float deviceEnd = segmentX - s.spacing.s3 - (updateWidth > 0 ? updateWidth + s.spacing.s2 : 0.f);
-      if (DevicePill(DeviceName(*state), std::max(40 * dpi, deviceEnd - origin.x - pad), s, dpi, InputWaiting(*state))) ImGui::OpenPopup("MIDI devices");
-      if (updateWidth > 0) {
-          ImGui::SetCursorScreenPos(ImVec2(segmentX - s.spacing.s3 - updateWidth, origin.y + stripPad));
-          UpdateChip(updateLabel, update.page, s);
-      } }
+      if (DevicePill(DeviceName(*state), std::max(40 * dpi, segmentX - s.spacing.s3 - origin.x - pad), s, dpi, InputWaiting(*state))) ImGui::OpenPopup("MIDI devices"); }
     ImGui::SetCursorScreenPos(ImVec2(segmentX, origin.y + stripPad));
     {
         FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
@@ -3686,10 +3557,8 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             draw->AddText(ImVec2(pos.x, pos.y + (control - ImGui::GetTextLineHeight()) / 2), Colour(s.ink.secondary), text);
             ImGui::Dummy(ImVec2(ImGui::CalcTextSize(text).x, control)); ImGui::SameLine();
         };
-        // Reset follows the readout, as on the Playback card; the groove gives up
-        // width before the curve's name is cut.
-        const float resetWidth = 2 * s.spacing.s3 + ImGui::CalcTextSize("Reset").x;
-        const float free = size.x - 2 * pad - labels - 48 * dpi - resetWidth - 5 * spacing;
+        // The groove gives up width before the curve's name is cut.
+        const float free = size.x - 2 * pad - labels - 48 * dpi - 4 * spacing;
         const float grooveWidth = std::clamp(free - 150 * dpi, 72 * dpi, 132 * dpi);
         label("Curve");
         CurveCombo("##mini-curve", free - grooveWidth, *state, engine);
@@ -3706,10 +3575,6 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             number(ShellEngine::Action::Transpose, clicked);
         draw->AddText(ImVec2(transposeMin.x + std::floor((48 * dpi - ImGui::CalcTextSize(transposeText).x) / 2),
                              transposeMin.y + (control - ImGui::GetTextLineHeight()) / 2), Colour(s.ink.primary), transposeText);
-        ImGui::SameLine();
-        ImGui::BeginDisabled(state->transpose == 0);
-        if (TransportButton("##mini-transpose-reset-button", "Reset", s, dpi)) number(ShellEngine::Action::Transpose, 0);
-        ImGui::EndDisabled();
     } else {
         // Solo Piano is labelled, as on the Tracks panel, so the file name gives up the width.
         const float soloWidth = 2 * s.spacing.s3 + 16 * dpi + s.spacing.s2 + ImGui::CalcTextSize("Solo Piano").x;
@@ -3851,6 +3716,7 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
     }
     DrawStatus(fonts, design, dpi, *state, ImVec2(origin.x, origin.y + size.y - status), size.x, status);
     ImGui::PopStyleVar();
+    DrawUpdateToast(fonts, design, dpi, origin, size, origin.y + size.y - status);
 }
 
 // Help: search over every question, a chip filtering to this build's additions,
@@ -4082,12 +3948,58 @@ void Panels::DrawTour(const Fonts& fonts, const skin::Skin& design, float dpi, I
     ImGui::EndPopup();
 }
 
+void Panels::DrawUpdateToast(const Fonts& fonts, const skin::Skin& design, float dpi, ImVec2 origin, ImVec2 size, float bottom) {
+    if (!preferences.checkForUpdates || update.version.empty() || updateDismissed_ || tourStop >= 0) return;
+    const auto s = skin::ScaleGeometry(design, dpi);
+    // In over 200 ms, rising a few pixels as it fades in.
+    updateFade_ = std::min(1.f, updateFade_ + ImGui::GetIO().DeltaTime / .2f);
+    const float fade = TourEase(updateFade_);
+    FontScope font(fonts, design, design.type.body * SpecFontScale(design));
+    const std::string title = "QuartzMIDI " + update.version;
+    float titleWidth;
+    { FontScope semibold(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
+      titleWidth = ImGui::CalcTextSize(title.c_str()).x; }
+    const float pad = s.spacing.s2, side = 16 * dpi, gap = s.spacing.s2;
+    const float laterWidth = 2 * s.spacing.s3 + ImGui::CalcTextSize("Later").x;
+    const float updateWidth = 2 * s.spacing.s4 + ImGui::CalcTextSize("Update").x;
+    const float width = pad + s.spacing.s2 + side + s.spacing.s2 + titleWidth + s.spacing.s4 + laterWidth + gap + updateWidth + pad;
+    const float height = s.metric.controlHeight + 2 * pad, margin = s.spacing.s3;
+    ImGui::SetNextWindowPos(ImVec2(origin.x + size.x - margin - width, bottom - margin - height + (1 - fade) * 8 * dpi));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    const bool open = ImGui::Begin("##update-toast", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::PopStyleVar(2);
+    if (open) {
+        // Above the main window even after a click there brings it forward.
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+        auto* draw = ImGui::GetWindowDrawList();
+        const int firstVertex = draw->VtxBuffer.Size;
+        const ImVec2 min = ImGui::GetWindowPos(), max(min.x + width, min.y + height);
+        skin::RaisedRect(draw, min, max, s.radius.card, s, Colour(s.surface.elevated));
+        DrawIcon(draw, Icon::Upgrade, ImVec2(min.x + pad + s.spacing.s2, min.y + (height - side) / 2), side, Colour(s.accent.accent), dpi);
+        { FontScope semibold(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
+          draw->AddText(ImVec2(min.x + pad + s.spacing.s2 + side + s.spacing.s2, min.y + (height - ImGui::GetTextLineHeight()) / 2),
+                        ImGui::GetColorU32(ImGuiCol_Text), title.c_str()); }
+        ImGui::SetCursorScreenPos(ImVec2(max.x - pad - updateWidth - gap - laterWidth, min.y + pad));
+        const bool later = TransportBody("##update-later", nullptr, "Later", s, dpi, false);
+        ImGui::SameLine(0, gap);
+        const bool go = TransportBody("##update-go", nullptr, "Update", s, dpi, true);
+        if (fade < 1) FadeVertices(draw, firstVertex, fade);
+        if (go) {
+            const std::wstring wide(update.page.begin(), update.page.end());
+            ShellExecuteW(nullptr, L"open", wide.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        updateDismissed_ = later || go;
+    }
+    ImGui::End();
+}
+
 void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine) {
     // Set again by any transition still moving this frame.
     g_motion = false;
     convertBarDrawn_ = false;
-    // A song's capture ends when its menu or Settings row closes.
-    if (!std::exchange(songCaptureDrawn_, false)) songHotkeyCapture.clear();
     const auto s = skin::ScaleGeometry(design, dpi);
     auto state = engine.Snapshot();
     SyncLayout(*state);
@@ -4127,12 +4039,6 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     }
     if (!scannedLive_ && hwnd) { engine.Send({ShellEngine::Action::LiveScan}); scannedLive_ = true; }
     if (!scannedOutput_ && hwnd) { engine.Send({ShellEngine::Action::OutputScan}); scannedOutput_ = true; }
-    if (measuring_ && ImGui::GetTime() >= nextTimingPoll_) {
-        input_latency::poll(timing_);
-        timingSummary_ = timing_.summarize(timingSource_ ? input_latency::Source::Autoplay : input_latency::Source::LiveKeys,
-                                          input_latency::frequency());
-        nextTimingPoll_ = ImGui::GetTime() + .2;
-    }
     const auto send = [&](ShellEngine::Action action, size_t track = 0, bool value = false) {
         engine.Send({action, {}, state->generation, track, value});
     };
@@ -4168,20 +4074,13 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     // Right-aligned against the utility buttons, next to the Settings button it
     // opens, so its width doesn't move anything else.
     { FontScope font(fonts, design, design.type.body * SpecFontScale(design), Weight::Medium);
-      // A newer release sits between the device pill and the utility buttons.
-      const std::string updateLabel = UpdateLabel(utilityX - s.spacing.s3 - ImGui::GetCursorScreenPos().x, s, dpi);
-      const float updateWidth = UpdateChipWidth(updateLabel, s);
-      const float deviceEnd = utilityX - s.spacing.s3 - (updateWidth > 0 ? updateWidth + s.spacing.s2 : 0.f);
+      const float deviceEnd = utilityX - s.spacing.s3;
       const auto name = DeviceName(*state);
       const float room = std::max(40 * dpi, deviceEnd - ImGui::GetCursorScreenPos().x);
       const float width = std::min(room, ImGui::CalcTextSize(name.c_str()).x + 26 * dpi);
       ImGui::SetCursorScreenPos(ImVec2(deviceEnd - width, origin.y + stripPad));
       if (DevicePill(name, room, s, dpi, InputWaiting(*state))) ImGui::OpenPopup("MIDI devices");
-      tourRect(TourStop::Device, ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
-      if (updateWidth > 0) {
-          ImGui::SetCursorScreenPos(ImVec2(utilityX - s.spacing.s3 - updateWidth, origin.y + stripPad));
-          UpdateChip(updateLabel, update.page, s);
-      } }
+      tourRect(TourStop::Device, ImGui::GetItemRectMin(), ImGui::GetItemRectMax()); }
     ImGui::SetCursorScreenPos(ImVec2(utilityX, origin.y + stripPad));
     if (IconButton("##mini-mode", Icon::Mini, "Mini mode", s, dpi)) miniMode = true;
     ImGui::SameLine();
@@ -4242,7 +4141,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     // the queue while it holds a song, then the playlists.
     const int list = state->openList;
     const auto& library = *state->library;
-    const std::string listName = list == kFavouritesList ? "Favourites" : list == kQueueList ? "Queue" : list == kTrashList ? "Trash"
+    const std::string listName = list == kFavouritesList ? "Favourites" : list == kQueueList ? "Queue"
         : list >= 0 && static_cast<size_t>(list) < library.playlists.size() ? library.playlists[static_cast<size_t>(list)].name : "MIDI Files";
     const float buttonsX = ImGui::GetWindowWidth() - 3 * s.metric.controlHeight - 2 * s.spacing.s2;
     if (ListHeading("##lists-heading", listName, buttonsX - ImGui::GetCursorPosX() - s.spacing.s2, ImGui::IsPopupOpen("##lists"),
@@ -4277,18 +4176,11 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         };
         if (TickedItem("MIDI Files", list == kFolderList, s, dpi, itemWidth)) open(kFolderList);
         if (TickedItem("Favourites", list == kFavouritesList, s, dpi, itemWidth)) open(kFavouritesList);
-        // Queue and Trash are always listed, so they are found before they hold
-        // anything; empty, they are greyed.
+        // The queue is always listed, so it is found before it holds anything;
+        // empty, it is greyed.
         ImGui::BeginDisabled(library.queue.empty() && list != kQueueList);
         if (TickedItem("Queue", list == kQueueList, s, dpi, itemWidth)) open(kQueueList);
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(library.trash.empty() && list != kTrashList);
-        if (TickedItem("Trash", list == kTrashList, s, dpi, itemWidth)) open(kTrashList);
-        ImGui::EndDisabled();
-        if (!library.trash.empty() && ImGui::BeginPopupContextItem("##trash-menu")) {
-            if (ImGui::MenuItem("Empty Trash")) emptyTrash_ = true;
-            ImGui::EndPopup();
-        }
         if (!library.playlists.empty()) ImGui::Separator();
         for (size_t i = 0; i < library.playlists.size(); ++i) {
             ImGui::PushID(static_cast<int>(i));
@@ -4307,7 +4199,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         ImGui::Separator();
         if (ImGui::Selectable("New playlist...", false, 0, ImVec2(itemWidth, 0))) namePlaylist_ = true;
         if (const auto song = dropped(); !song.empty()) { playlistFirstSong_ = song; namePlaylist_ = true; }
-        if (namePlaylist_ || renamePlaylist_ >= 0 || deletePlaylist_ >= 0 || emptyTrash_) ImGui::CloseCurrentPopup();
+        if (namePlaylist_ || renamePlaylist_ >= 0 || deletePlaylist_ >= 0) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
     ImGui::SameLine(buttonsX);
@@ -4366,8 +4258,6 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             const auto path = PickFolder(hwnd);
             if (!path.empty()) { preferences.folder = path; browse_.clear(); engine.Send({ShellEngine::Action::Scan, path}); }
         }
-        // Finds MIDI files elsewhere and moves them into the MIDI folder.
-        if (ImGui::MenuItem("Scan for MIDI files...", nullptr, false, !state->folder.empty())) openScan = true;
         ImGui::EndPopup();
     }
     if (convertRequested) ImGui::OpenPopup("Convert audio");
@@ -4408,9 +4298,9 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         if (!preferences.folders) browse_.clear();
         // The other lists are flat, each song with its folder, as search results are. A
         // playlist and the queue keep their own order, and a song can be dragged within it.
-        const bool browsing = list == kFolderList, trashView = list == kTrashList;
+        const bool browsing = list == kFolderList;
         const auto* songs = library.Songs(list);
-        const std::vector<MidiEntry>& source = songs || trashView ? listEntries_ : *state->files;
+        const std::vector<MidiEntry>& source = songs ? listEntries_ : *state->files;
         const bool reorder = songs && query.empty();
         if (filteredFiles_ != state->files || filteredQuery_ != query || filteredFolders_ != preferences.folders ||
             filteredLibrary_ != state->library || filteredList_ != list) {
@@ -4418,23 +4308,10 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             fileFilter_.clear();
             folderRows_.clear();
             listEntries_.clear();
-            if (trashView) {
-                // Each named by where it came from: its folder in the library, or all of its
-                // path for a song from outside it.
-                for (const auto& song : library.trash) {
-                    std::error_code missing;
-                    const auto bytes = std::filesystem::file_size(song.file, missing);
-                    const auto inside = state->folder.empty() ? std::filesystem::path() : song.origin.lexically_relative(state->folder);
-                    const bool relative = !inside.empty() && *inside.begin() != L"..";
-                    listEntries_.push_back({song.file, Utf8(relative ? inside : song.origin), missing ? 0 : bytes});
-                }
-                fileFilter_ = SearchFolder(listEntries_, "", query);
-            } else if (songs) {
+            if (songs) {
                 std::unordered_map<std::wstring, size_t> listed;
                 for (size_t i = 0; i < state->files->size(); ++i) listed.emplace((*state->files)[i].path.native(), i);
                 for (const auto& song : *songs) {
-                    // A song in the Trash is left out until it is restored.
-                    if (library.Trashed(song)) continue;
                     const auto found = listed.find(song.native());
                     std::error_code missing;
                     const auto bytes = found == listed.end() ? std::filesystem::file_size(song, missing) : 0;
@@ -4527,8 +4404,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             ImGui::BeginDisabled(state->busy);
             // The star is its own button over the row's right end.
             ImGui::SetNextItemAllowOverlap();
-            // A song in the Trash is restored before it plays.
-            if (ImGui::Selectable("##file", file.path == state->loaded, 0, ImVec2(width, s.metric.controlHeight)) && !trashView) {
+            if (ImGui::Selectable("##file", file.path == state->loaded, 0, ImVec2(width, s.metric.controlHeight))) {
                 load(file.path);
                 clickedFile_ = file.path;
             }
@@ -4537,7 +4413,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             const bool rowHot = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem | ImGuiHoveredFlags_AllowWhenDisabled);
             const bool outside = std::filesystem::path(std::u8string(file.name.begin(), file.name.end())).is_absolute();
             // Any song can be dragged onto a playlist in the list menu.
-            if (!trashView && ImGui::BeginDragDropSource()) {
+            if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("QM_SONG", file.path.c_str(), (file.path.native().size() + 1) * sizeof(wchar_t));
                 ImGui::TextUnformatted(Utf8(file.path.stem()).c_str());
                 ImGui::EndDragDropSource();
@@ -4550,10 +4426,8 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                     const float lineY = after ? pos.y + s.metric.controlHeight + s.spacing.s1 : pos.y - s.spacing.s1;
                     ImGui::GetWindowDrawList()->AddLine(ImVec2(pos.x + s.spacing.s2, lineY), ImVec2(pos.x + width - s.spacing.s2, lineY),
                                                         Colour(s.accent.accent), 2 * dpi);
-                    // Counted in the list itself, which may hold songs in the Trash the rows leave out.
                     if (payload->IsDelivery()) {
-                        const auto at = static_cast<size_t>(std::find(songs->begin(), songs->end(), file.path) - songs->begin());
-                        ShellEngine::Command move{ShellEngine::Action::MoveInList, static_cast<const wchar_t*>(payload->Data), 0, at + (after ? 1 : 0),
+                        ShellEngine::Command move{ShellEngine::Action::MoveInList, static_cast<const wchar_t*>(payload->Data), 0, row + (after ? 1 : 0),
                                                   false, static_cast<double>(list)};
                         engine.Send(std::move(move));
                     }
@@ -4562,15 +4436,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             }
             // Like Explorer's search results: go to the file's location, which ends the
             // search and opens its folder at its row. The other lists go there too.
-            if (trashView && ImGui::BeginPopupContextItem("##file-menu")) {
-                if (ImGui::MenuItem("Restore")) engine.Send({ShellEngine::Action::Restore, file.path});
-                if (ImGui::MenuItem("Show in Explorer"))
-                    ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + file.path.native() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
-                ImGui::Separator();
-                if (ImGui::MenuItem("Delete")) deleteSong_ = file.path;
-                if (ImGui::MenuItem("Empty Trash")) emptyTrash_ = true;
-                ImGui::EndPopup();
-            } else if (ImGui::BeginPopupContextItem("##file-menu")) {
+            if (ImGui::BeginPopupContextItem("##file-menu")) {
                 if (ImGui::MenuItem("Play next")) engine.Send({ShellEngine::Action::AddToList, file.path, 0, 0, false, static_cast<double>(kQueueList)});
                 if (ImGui::BeginMenu("Add to playlist")) {
                     for (size_t p = 0; p < library.playlists.size(); ++p) {
@@ -4597,31 +4463,8 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                 }
                 if (ImGui::MenuItem("Show in Explorer"))
                     ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + file.path.native() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
-                // The song's own key, shown as a menu shortcut. A click listens for
-                // the key as a cap in Settings does, with the menu kept open.
-                {
-                    const auto& songs = state->songHotkeys;
-                    const auto bound = std::find_if(songs.begin(), songs.end(), [&](const SongHotkey& each) { return each.song == file.path; });
-                    const bool armed = songHotkeyCapture == file.path;
-                    songCaptureDrawn_ |= armed;
-                    const std::string key = armed || bound == songs.end() ? std::string() : HotkeyLabel(bound->key);
-                    ImGui::PushItemFlag(ImGuiItemFlags_AutoClosePopups, false);
-                    if (ImGui::MenuItem("Hotkey", key.c_str())) {
-                        songHotkeyCapture = armed ? std::filesystem::path() : file.path;
-                        songCaptureDrawn_ = true;
-                        hotkeyCapture = -1;
-                    }
-                    ImGui::PopItemFlag();
-                    if (songHotkeyCapture == file.path) CaptureRing(ImGui::GetWindowDrawList(), s, dpi);
-                }
                 ImGui::Separator();
-                // A file a scan moved here can go back to where it was found.
-                if (library.Scanned(file.path) && ImGui::MenuItem("Put back")) {
-                    ShellEngine::Command back{ShellEngine::Action::PutBack};
-                    back.paths = {file.path};
-                    engine.Send(std::move(back));
-                }
-                if (ImGui::MenuItem("Move to Trash")) engine.Send({ShellEngine::Action::Trash, file.path});
+                if (ImGui::MenuItem("Delete")) engine.Send({ShellEngine::Action::DeleteSong, file.path});
                 ImGui::EndPopup();
             }
             const bool selected = file.path == state->loaded;
@@ -4636,27 +4479,26 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             // A favourite's star stays; the open song's row and a hovered one show an empty one.
             const bool favourite = state->library->Favourite(file.path);
             const float starSide = 16 * dpi, starX = pos.x + width - s.spacing.s3 - starSide;
-            bool starHot = false;
-            if (!trashView) {
-                ImGui::SetCursorScreenPos(ImVec2(starX - s.spacing.s1, pos.y));
-                if (ImGui::InvisibleButton("##star", ImVec2(starSide + 2 * s.spacing.s1, s.metric.controlHeight)))
-                    engine.Send({ShellEngine::Action::Favourite, file.path, 0, 0, !favourite});
-                starHot = ImGui::IsItemHovered();
-            }
-            if (!trashView && (favourite || rowHot || selected))
+            ImGui::SetCursorScreenPos(ImVec2(starX - s.spacing.s1, pos.y));
+            if (ImGui::InvisibleButton("##star", ImVec2(starSide + 2 * s.spacing.s1, s.metric.controlHeight)))
+                engine.Send({ShellEngine::Action::Favourite, file.path, 0, 0, !favourite});
+            const bool starHot = ImGui::IsItemHovered();
+            if (favourite || rowHot || selected)
                 DrawStar(listDraw, ImVec2(starX, pos.y + (s.metric.controlHeight - starSide) / 2), starSide,
                          Colour(favourite ? s.accent.accent : starHot ? s.ink.primary : s.ink.secondary), favourite);
             // The row's menu is on a button too, in the size's place while the row is hovered.
             const float moreX = starX - s.spacing.s2 - starSide;
+            // Always submitted, like the star: pressing it takes the row's hover away,
+            // and a button that vanished before the release would never be clicked.
             const bool menuOpen = ImGui::IsPopupOpen("##file-menu");
-            const bool showMore = rowHot || menuOpen;
-            if (showMore) {
-                ImGui::SetCursorScreenPos(ImVec2(moreX - s.spacing.s1, pos.y));
-                if (ImGui::InvisibleButton("##more", ImVec2(starSide + 2 * s.spacing.s1, s.metric.controlHeight)))
-                    ImGui::OpenPopup("##file-menu");
+            ImGui::SetCursorScreenPos(ImVec2(moreX - s.spacing.s1, pos.y));
+            if (ImGui::InvisibleButton("##more", ImVec2(starSide + 2 * s.spacing.s1, s.metric.controlHeight)))
+                ImGui::OpenPopup("##file-menu");
+            const bool moreHot = ImGui::IsItemHovered() || ImGui::IsItemActive();
+            const bool showMore = rowHot || menuOpen || moreHot;
+            if (showMore)
                 DrawIcon(listDraw, Icon::More, ImVec2(moreX, pos.y + (s.metric.controlHeight - starSide) / 2), starSide,
-                         Colour(ImGui::IsItemHovered() || menuOpen ? s.ink.primary : s.ink.secondary), dpi);
-            }
+                         Colour(moreHot || menuOpen ? s.ink.primary : s.ink.secondary), dpi);
             FontScope rowFont(fonts, design, design.type.body * SpecFontScale(design), selected ? Weight::Semibold : Weight::Regular);
             const auto bytes = std::to_string((file.bytes + 1023) / 1024) + " KB";
             const float sizeWidth = ImGui::CalcTextSize(bytes.c_str()).x;
@@ -4741,238 +4583,6 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                 engine.Send({ShellEngine::Action::DeletePlaylist, {}, 0, 0, false, static_cast<double>(deletingPlaylist_)});
                 ImGui::CloseCurrentPopup();
             }
-        }
-        ImGui::EndPopup();
-    }
-    // Deleting a song in the Trash asks first, as deleting a theme does.
-    if (!deleteSong_.empty()) { deletingSong_ = std::move(deleteSong_); deleteSong_.clear(); ImGui::OpenPopup("##confirm-delete-song"); }
-    if (ImGui::IsPopupOpen("##confirm-delete-song"))
-        ImGui::SetNextWindowPos(ImVec2(headingMin.x, headingMax.y + s.spacing.s1), ImGuiCond_Appearing);
-    if (ImGui::BeginPopup("##confirm-delete-song")) {
-        const auto trashed = std::find_if(library.trash.begin(), library.trash.end(), [&](const MovedSong& song) { return song.file == deletingSong_; });
-        if (trashed == library.trash.end()) ImGui::CloseCurrentPopup();
-        else {
-            ImGui::Text("Delete %s?", Utf8(trashed->origin.filename()).c_str());
-            const bool remove = EasedButton("Delete", ImVec2(nameButton, s.metric.controlHeight));
-            ImGui::SameLine(0, s.spacing.s2);
-            if (EasedButton("Cancel", ImVec2(nameButton, s.metric.controlHeight))) ImGui::CloseCurrentPopup();
-            if (remove) {
-                engine.Send({ShellEngine::Action::DeleteForever, deletingSong_});
-                ImGui::CloseCurrentPopup();
-            }
-        }
-        ImGui::EndPopup();
-    }
-    // Emptying the Trash asks first, as deleting one song in it does.
-    if (emptyTrash_) { emptyTrash_ = false; ImGui::OpenPopup("##confirm-empty-trash"); }
-    if (ImGui::IsPopupOpen("##confirm-empty-trash"))
-        ImGui::SetNextWindowPos(ImVec2(headingMin.x, headingMax.y + s.spacing.s1), ImGuiCond_Appearing);
-    if (ImGui::BeginPopup("##confirm-empty-trash")) {
-        if (library.trash.empty()) ImGui::CloseCurrentPopup();
-        else {
-            ImGui::TextUnformatted("Delete every song in the Trash?");
-            const bool remove = EasedButton("Delete", ImVec2(nameButton, s.metric.controlHeight));
-            ImGui::SameLine(0, s.spacing.s2);
-            if (EasedButton("Cancel", ImVec2(nameButton, s.metric.controlHeight))) ImGui::CloseCurrentPopup();
-            if (remove) {
-                engine.Send({ShellEngine::Action::EmptyTrash});
-                ImGui::CloseCurrentPopup();
-            }
-        }
-        ImGui::EndPopup();
-    }
-    // Scan for MIDI files: the drives and folders to look in, what the scan reads as it
-    // goes, then what it found by folder, each ticked, to move into the MIDI folder.
-    // A folder ignored from its heading leaves the results with all below it, unticked.
-    const auto listScanned = [&] {
-        const auto& found = *state->scanResults;
-        scanRows_.clear();
-        const MidiEntry* last = nullptr;
-        for (size_t i = 0; i < found.size(); ++i) {
-            const auto folder = found[i].path.parent_path();
-            if (std::any_of(preferences.scanIgnored.begin(), preferences.scanIgnored.end(), [&](const std::filesystem::path& ignored) {
-                    auto part = folder.begin();
-                    for (const auto& each : ignored) if (part == folder.end() || *part++ != each) return false;
-                    return true; })) { scanChosen_[i] = 0; continue; }
-            if (!last || found[i].name != last->name) scanRows_.push_back(-1 - static_cast<int>(i));
-            scanRows_.push_back(static_cast<int>(i));
-            last = &found[i];
-        }
-    };
-    if (state->scanRevision != scanChosenRevision_) {
-        scanChosenRevision_ = state->scanRevision;
-        scanChosen_.assign(state->scanResults->size(), 1);
-        listScanned();
-    }
-    if (openScan) {
-        openScan = false;
-        scanUserFolders_ = UserScanFolders();
-        scanDrives_.clear();
-        const DWORD drives = GetLogicalDrives();
-        for (int letter = 0; letter < 26; ++letter) {
-            if (!(drives & (1u << letter))) continue;
-            const std::wstring root{static_cast<wchar_t>(L'A' + letter), L':', L'\\'};
-            // Not CD drives or network shares, which a whole-drive walk would wait on.
-            if (const UINT type = GetDriveTypeW(root.c_str()); type == DRIVE_FIXED || type == DRIVE_REMOVABLE) scanDrives_.emplace_back(root);
-        }
-        ImGui::OpenPopup("Scan for MIDI files");
-    }
-    ImGui::SetNextWindowSizeConstraints(ImVec2(440 * dpi, 0), ImVec2(440 * dpi, 10000 * dpi));
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Scan for MIDI files", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove)) {
-        const auto& found = *state->scanResults;
-        const size_t chosen = static_cast<size_t>(std::count(scanChosen_.begin(), scanChosen_.end(), 1));
-        const size_t shown = static_cast<size_t>(std::count_if(scanRows_.begin(), scanRows_.end(), [](int row) { return row >= 0; }));
-        const std::string title = state->scanning || !scanResultsShown_ ? std::string("Scan for MIDI files")
-            : shown == 0 ? std::string("No new MIDI files")
-            : shown == 1 ? std::string("1 new MIDI file") : std::to_string(shown) + " new MIDI files";
-        { FontScope font(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
-          ImGui::TextUnformatted(title.c_str()); }
-        ImGui::Spacing();
-        const float rowPitch = ImGui::GetTextLineHeightWithSpacing();
-        if (state->scanning) {
-            ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
-            Ellipsis(state->scanFolder, ImGui::GetContentRegionAvail().x);
-            ImGui::PopStyleColor();
-            ImGui::Text("%zu found", state->scanFound);
-            ImGui::Spacing();
-            if (TransportButton("##scan-stop", "Stop", s, dpi)) engine.Send({ShellEngine::Action::ScanCancel});
-            ImGui::SameLine();
-            if (TransportButton("##scan-close", "Close", s, dpi)) ImGui::CloseCurrentPopup();
-        } else if (scanResultsShown_) {
-            // A folder's heading ticks or unticks all of its files, and its menu ignores the folder.
-            std::filesystem::path ignore;
-            ImGui::BeginChild("##scan-found", ImVec2(0, std::min(scanRows_.size() * rowPitch + 2 * s.spacing.s1, 320 * dpi)), ImGuiChildFlags_None);
-            ImGuiListClipper clipper;
-            clipper.Begin(static_cast<int>(scanRows_.size()));
-            while (clipper.Step()) for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-                ImGui::PushID(row);
-                const int at = scanRows_[static_cast<size_t>(row)];
-                if (at < 0) {
-                    const size_t first = static_cast<size_t>(-1 - at);
-                    size_t end = first;
-                    while (end < found.size() && found[end].name == found[first].name) ++end;
-                    const bool all = std::all_of(scanChosen_.begin() + first, scanChosen_.begin() + end, [](char on) { return on != 0; });
-                    // A long folder loses its start, keeping the folders nearest its files.
-                    std::string folder = found[first].name;
-                    const float room = ImGui::GetContentRegionAvail().x - 16 * dpi - s.spacing.s3;
-                    for (size_t cut; ImGui::CalcTextSize(folder.c_str()).x > room && (cut = folder.find('\\', 4)) != std::string::npos;)
-                        folder = "..." + folder.substr(cut);
-                    ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
-                    if (TickedItem(folder.c_str(), all, s, dpi)) std::fill(scanChosen_.begin() + first, scanChosen_.begin() + end, all ? 0 : 1);
-                    ImGui::PopStyleColor();
-                    if (ImGui::BeginPopupContextItem("##scan-found-menu")) {
-                        if (ImGui::MenuItem("Ignore folder")) ignore = found[first].path.parent_path();
-                        ImGui::EndPopup();
-                    }
-                } else {
-                    ImGui::Indent(s.spacing.s3);
-                    auto& on = scanChosen_[static_cast<size_t>(at)];
-                    if (TickedItem(Utf8(found[static_cast<size_t>(at)].path.filename()).c_str(), on != 0, s, dpi)) on = !on;
-                    ImGui::Unindent(s.spacing.s3);
-                }
-                ImGui::PopID();
-            }
-            ImGui::EndChild();
-            if (!ignore.empty()) {
-                if (std::find(preferences.scanIgnored.begin(), preferences.scanIgnored.end(), ignore) == preferences.scanIgnored.end())
-                    preferences.scanIgnored.push_back(ignore);
-                listScanned();
-            }
-            ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
-            ImGui::TextWrapped("%s", Utf8(state->folder).c_str());
-            ImGui::PopStyleColor();
-            ImGui::Spacing();
-            ImGui::BeginDisabled(chosen == 0 || state->folder.empty());
-            if (TransportButton("##scan-move", (chosen == 1 ? std::string("Move 1 file") : "Move " + std::to_string(chosen) + " files").c_str(), s, dpi, true)) {
-                ShellEngine::Command add{ShellEngine::Action::AddScanned};
-                for (size_t i = 0; i < found.size(); ++i) if (scanChosen_[i]) add.paths.push_back(found[i].path);
-                engine.Send(std::move(add));
-                scanResultsShown_ = false;
-                ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndDisabled();
-            ImGui::SameLine();
-            if (TransportButton("##scan-back", "Back", s, dpi)) scanResultsShown_ = false;
-            ImGui::SameLine();
-            if (TransportButton("##scan-close", "Close", s, dpi)) ImGui::CloseCurrentPopup();
-        } else {
-            // The user's folders and those added ticked unless the user left them out,
-            // the drives unticked unless the user ticked them; added and ignored
-            // folders go with a right click.
-            const auto listed = [](const std::vector<std::filesystem::path>& list, const std::filesystem::path& place) {
-                return std::find(list.begin(), list.end(), place) != list.end();
-            };
-            const auto skipped = [&](const std::filesystem::path& place) { return listed(preferences.scanSkipped, place); };
-            const auto place = [&](const std::filesystem::path& where, const std::string& label) {
-                const bool on = !skipped(where);
-                if (TickedItem(label.c_str(), on, s, dpi)) {
-                    if (on) preferences.scanSkipped.push_back(where);
-                    else std::erase(preferences.scanSkipped, where);
-                }
-            };
-            for (const auto& folder : scanUserFolders_) { ImGui::PushID(folder.c_str()); place(folder, Utf8(folder.filename())); ImGui::PopID(); }
-            for (const auto& drive : scanDrives_) {
-                ImGui::PushID(drive.c_str());
-                const bool on = listed(preferences.scanPicked, drive);
-                if (TickedItem(Utf8(drive).substr(0, 2).c_str(), on, s, dpi)) {
-                    if (on) std::erase(preferences.scanPicked, drive);
-                    else preferences.scanPicked.push_back(drive);
-                }
-                ImGui::PopID();
-            }
-            std::filesystem::path removed;
-            for (const auto& folder : preferences.scanFolders) {
-                if (listed(scanUserFolders_, folder)) continue;
-                ImGui::PushID(folder.c_str());
-                place(folder, Utf8(folder));
-                if (ImGui::BeginPopupContextItem("##scan-folder-menu")) {
-                    if (ImGui::MenuItem("Remove")) removed = folder;
-                    ImGui::EndPopup();
-                }
-                ImGui::PopID();
-            }
-            if (!removed.empty()) { std::erase(preferences.scanFolders, removed); std::erase(preferences.scanSkipped, removed); }
-            if (TransportButton("##scan-add-folder", Icon::Plus, "Add folder...", s, dpi)) {
-                const auto path = PickFolder(hwnd);
-                if (!path.empty() && std::find(preferences.scanFolders.begin(), preferences.scanFolders.end(), path) == preferences.scanFolders.end())
-                    preferences.scanFolders.push_back(path);
-            }
-            if (!preferences.scanIgnored.empty()) {
-                ImGui::Spacing();
-                ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
-                ImGui::TextUnformatted("Ignored folders");
-                ImGui::PopStyleColor();
-                std::filesystem::path kept;
-                for (const auto& folder : preferences.scanIgnored) {
-                    ImGui::PushID(folder.c_str());
-                    ImGui::Selectable(Utf8(folder).c_str());
-                    if (ImGui::BeginPopupContextItem("##scan-ignored-menu")) {
-                        if (ImGui::MenuItem("Stop ignoring")) kept = folder;
-                        ImGui::EndPopup();
-                    }
-                    ImGui::PopID();
-                }
-                if (!kept.empty()) std::erase(preferences.scanIgnored, kept);
-            }
-            ImGui::Spacing();
-            ShellEngine::Command look{ShellEngine::Action::ScanDrives};
-            for (const auto& folder : scanUserFolders_) if (!skipped(folder)) look.paths.push_back(folder);
-            for (const auto& drive : scanDrives_) if (listed(preferences.scanPicked, drive)) look.paths.push_back(drive);
-            for (const auto& folder : preferences.scanFolders) if (!skipped(folder) && !listed(scanUserFolders_, folder)) look.paths.push_back(folder);
-            look.ignored = preferences.scanIgnored;
-            ImGui::BeginDisabled(look.paths.empty());
-            if (TransportButton("##scan-go", "Scan", s, dpi, true)) { engine.Send(std::move(look)); scanResultsShown_ = true; }
-            ImGui::EndDisabled();
-            // What earlier scans moved into the library, back where each was found.
-            if (const size_t moved = library.scanned.size()) {
-                ImGui::SameLine();
-                if (TransportButton("##scan-put-back", (moved == 1 ? std::string("Put back 1 file") : "Put back " + std::to_string(moved) + " files").c_str(), s, dpi))
-                    engine.Send({ShellEngine::Action::PutBack});
-            }
-            ImGui::SameLine();
-            if (TransportButton("##scan-close", "Close", s, dpi)) ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
@@ -5196,14 +4806,12 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     };
     // Speed scales the player's clock, so it can be dragged during playback. Steps
     // of 0.05; the readout button steps by 0.25 and middle-click resets to 1.
-    // Reset puts speed and transpose back together. The grooves give up width
-    // before anything in the row is cut.
-    const float resetWidth = 2 * s.spacing.s3 + ImGui::CalcTextSize("Reset").x;
+    // The grooves give up width before anything in the row is cut.
     float grooveWidth = 132 * dpi;
     {
         FontScope font(fonts, design, design.type.meta * SpecFontScale(design));
-        const float fixed = ImGui::CalcTextSize("Speed").x + ImGui::CalcTextSize("Transpose").x + 2 * 48 * dpi + resetWidth +
-                            6 * ImGui::GetStyle().ItemSpacing.x;
+        const float fixed = ImGui::CalcTextSize("Speed").x + ImGui::CalcTextSize("Transpose").x + 2 * 48 * dpi +
+                            5 * ImGui::GetStyle().ItemSpacing.x;
         grooveWidth = std::clamp((contentWidth - fixed) / 2, 64 * dpi, 132 * dpi);
     }
     label("Speed");
@@ -5239,13 +4847,6 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             transposeMin.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2), Colour(s.ink.primary), transposeText);
         tourRect(TourStop::Speed, ImVec2(content.x, transportY + s.metric.controlHeight + rowGap), ImGui::GetItemRectMax());
     }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(std::abs(state->speed - 1.0) < 1e-6 && state->transpose == 0);
-    if (TransportButton("##speed-transpose-reset", "Reset", s, dpi)) {
-        number(ShellEngine::Action::Speed, 1.0);
-        number(ShellEngine::Action::Transpose, 0);
-    }
-    ImGui::EndDisabled();
     // Performer row: its panel controls and triggers. These change per song and
     // mid-song, so they live here rather than in Settings.
     if (performerRow_) {
@@ -5451,6 +5052,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         DrawThemeEditor(fonts, design, dpi);
     }
     DrawLog(hwnd, fonts, design, dpi, engine);
+    DrawUpdateToast(fonts, design, dpi, origin, size, origin.y + size.y - status);
     // Drawn last, and only in the full window; mini has no tour.
     DrawTour(fonts, design, dpi, origin, size);
 }

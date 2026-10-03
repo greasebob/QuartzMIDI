@@ -16,15 +16,6 @@ struct MidiEntry {
     std::filesystem::file_time_type modified{};
     bool operator==(const MidiEntry&) const = default;
 };
-// The Trash is a hidden folder of this name at the top of the MIDI folder,
-// where the user can find it and where it goes with the songs. The library,
-// its watcher and Scan pass over a folder so named wherever it is.
-inline constexpr wchar_t kTrashFolder[] = L".trash";
-inline bool TrashFolderName(const std::filesystem::path& name) {
-    auto text = name.native();
-    std::transform(text.begin(), text.end(), text.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
-    return text == kTrashFolder;
-}
 // Whether two paths name the same file as Windows sees them, letters in either
 // case and either slash.
 inline bool SamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
@@ -147,40 +138,22 @@ inline std::vector<MidiEntry> SongsBeside(const std::vector<MidiEntry>& files, c
 
 // The lists the Files panel shows besides the folder, kept by path in
 // library.json beside config.json. Playlists are numbered from 0.
-enum ListId : int { kFolderList = -1, kFavouritesList = -2, kQueueList = -3, kTrashList = -4 };
+enum ListId : int { kFolderList = -1, kFavouritesList = -2, kQueueList = -3 };
 struct Playlist {
     std::string name;
     std::vector<std::filesystem::path> songs;
     bool operator==(const Playlist&) const = default;
-};
-// A file moved away from where it was: a song in the Trash, or one a scan
-// moved into the library.
-struct MovedSong {
-    std::filesystem::path file, origin;
-    bool operator==(const MovedSong&) const = default;
 };
 struct LibraryLists {
     std::vector<std::filesystem::path> favourites;
     std::vector<Playlist> playlists;
     // Played before the rest, first in first out.
     std::vector<std::filesystem::path> queue;
-    // Songs removed from the library, in the MIDI folder's Trash (kTrashFolder).
-    std::vector<MovedSong> trash;
-    // Files a scan moved into the library, which Put back returns.
-    std::vector<MovedSong> scanned;
     bool operator==(const LibraryLists&) const = default;
     static bool Holds(const std::vector<std::filesystem::path>& songs, const std::filesystem::path& path) {
         return std::any_of(songs.begin(), songs.end(), [&](const std::filesystem::path& song) { return SamePath(song, path); });
     }
     bool Favourite(const std::filesystem::path& path) const { return Holds(favourites, path); }
-    const MovedSong* Scanned(const std::filesystem::path& path) const {
-        const auto found = std::find_if(scanned.begin(), scanned.end(), [&](const MovedSong& song) { return SamePath(song.file, path); });
-        return found == scanned.end() ? nullptr : &*found;
-    }
-    // Whether the song once at `path` is in the Trash.
-    bool Trashed(const std::filesystem::path& path) const {
-        return std::any_of(trash.begin(), trash.end(), [&](const MovedSong& song) { return SamePath(song.origin, path); });
-    }
     // Every list calls each song once; a song listed twice keeps its first place.
     void Deduplicate() {
         const auto once = [](std::vector<std::filesystem::path>& songs) {
@@ -191,26 +164,6 @@ struct LibraryLists {
         once(queue);
         for (auto& playlist : playlists) once(playlist.songs);
     }
-    // Every list follows a song that moved.
-    void Renamed(const std::filesystem::path& from, const std::filesystem::path& to) {
-        const auto follow = [&](std::vector<std::filesystem::path>& songs) {
-            for (auto& song : songs) if (SamePath(song, from)) song = to;
-        };
-        follow(favourites);
-        follow(queue);
-        for (auto& playlist : playlists) follow(playlist.songs);
-        Deduplicate();
-    }
-    // A copy of a song joins its star and playlists, beside it; the queue is
-    // left as it was.
-    void Copied(const std::filesystem::path& from, const std::filesystem::path& to) {
-        if (Favourite(from) && !Favourite(to)) favourites.push_back(to);
-        for (auto& playlist : playlists) {
-            auto& songs = playlist.songs;
-            const auto found = std::find_if(songs.begin(), songs.end(), [&](const std::filesystem::path& song) { return SamePath(song, from); });
-            if (found != songs.end() && !Holds(songs, to)) songs.insert(found + 1, to);
-        }
-    }
     // A song gone for good leaves every list.
     void Forget(const std::filesystem::path& path) {
         const auto drop = [&](std::vector<std::filesystem::path>& songs) {
@@ -219,11 +172,10 @@ struct LibraryLists {
         drop(favourites);
         drop(queue);
         for (auto& playlist : playlists) drop(playlist.songs);
-        std::erase_if(scanned, [&](const MovedSong& song) { return SamePath(song.file, path); });
     }
     // The MIDI folder is now `to`, not `from`: each song of `from` found at the
-    // same place in `to` is taken to have moved with it, and its lists and
-    // records follow; the rest are left, for a folder only switched away from.
+    // same place in `to` is taken to have moved with it, and its lists follow;
+    // the rest are left, for a folder only switched away from.
     // A folder named again in other letter case takes every song along.
     void Rebased(const std::filesystem::path& from, const std::filesystem::path& to) {
         if (from.empty() || to.empty() || from == to) return;
@@ -243,15 +195,6 @@ struct LibraryLists {
         follow(favourites);
         follow(queue);
         for (auto& playlist : playlists) follow(playlist.songs);
-        const auto records = [&](std::vector<MovedSong>& songs) {
-            for (auto& song : songs)
-                if (auto file = moved(song.file); file != song.file && there(file)) {
-                    song.file = std::move(file);
-                    song.origin = moved(song.origin);
-                }
-        };
-        records(trash);
-        records(scanned);
         Deduplicate();
     }
     // Each listed song named in other letter case than its file takes the
@@ -263,7 +206,6 @@ struct LibraryLists {
         for (auto& song : favourites) follow(song);
         for (auto& song : queue) follow(song);
         for (auto& playlist : playlists) for (auto& song : playlist.songs) follow(song);
-        for (auto& song : scanned) follow(song.file);
     }
     // The songs a playlist or the queue holds, in order; null for any other list.
     const std::vector<std::filesystem::path>* Songs(int list) const {

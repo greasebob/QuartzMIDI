@@ -29,10 +29,8 @@ namespace shell {
 // indices and ids earlier builds gave them. Each defaults to unbound.
 inline constexpr size_t kAppHotkeys = 6, kAddonHotkeys = 16;
 inline constexpr size_t kFirstLaterHotkey = kAppHotkeys + kAddonHotkeys;
-inline constexpr std::array<const char*, 4> kLaterHotkeyFields{"PANIC_KEY", "SPEED_UP_KEY", "SPEED_DOWN_KEY", "SHOW_HIDE_KEY"};
-inline constexpr size_t kPanicHotkey = kFirstLaterHotkey;
-inline constexpr size_t kSpeedUpHotkey = kFirstLaterHotkey + 1, kSpeedDownHotkey = kFirstLaterHotkey + 2;
-inline constexpr size_t kShowHideHotkey = kFirstLaterHotkey + 3;
+inline constexpr std::array<const char*, 1> kLaterHotkeyFields{"SHOW_HIDE_KEY"};
+inline constexpr size_t kShowHideHotkey = kFirstLaterHotkey;
 inline constexpr size_t kHotkeys = kFirstLaterHotkey + kLaterHotkeyFields.size();
 inline constexpr std::array<const char*, kAppHotkeys> kHotkeyFields{
     "PLAY_PAUSE_KEY", "REWIND_KEY", "SKIP_KEY", "EMERGENCY_EXIT_KEY", "PREVIOUS_SONG_KEY", "NEXT_SONG_KEY"};

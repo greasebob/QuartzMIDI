@@ -66,7 +66,7 @@ inline const std::vector<HelpEntry>& HelpEntries() {
         {"Appearance and Controls", "Why is a hotkey greyed out?",
          "Another program is using that key. Close that program, or choose a different key in Settings under Hotkeys."},
         {"Appearance and Controls", "Can my keyboard's media keys control a song?",
-         "Yes: turn on Media keys in Settings to use Play, Stop, Previous and Next.", "1.0"},
+         "Yes: Play, Stop, Previous and Next always work, with no setup.", "1.0"},
         {"Appearance and Controls", "Why is the light and dark button greyed out?",
          "The selected theme has only one palette. Open Customise in Settings and turn on Light and dark.", "1.0"},
         {"Appearance and Controls", "Can a theme change more than the colours?",

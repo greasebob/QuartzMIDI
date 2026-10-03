@@ -1400,8 +1400,8 @@ void VirtualPianoPlayer::panic() {
     std::lock_guard lock(dispatch_mutex);
     // The port first, while the channels written are still known.
     if (output_target.load(std::memory_order_acquire) == OutputTarget::MidiDevice) silence_midi_output(true);
-    // The record is cleared here; the sweep below lets every key go, so Stop,
-    // which sweeps too, sends each release once rather than twice.
+    // The record is cleared here; the sweep below lets every key go, so each
+    // release is sent once rather than twice.
     release_keys_locked(false);
     // A key pressed on the keystroke target before a switch to MIDI, or under
     // the other layout, is released here too. A mapping's release carries its
@@ -1424,7 +1424,7 @@ void VirtualPianoPlayer::release_keys(bool everyMapping) {
 
 // The caller holds dispatch_mutex, so no note is dispatched while this runs.
 void VirtualPianoPlayer::release_keys_locked(bool everyMapping) {
-    // Stop, pause, seek, a loop's wrap and Panic all pass here; what the game
+    // Stop, pause, seek and a loop's wrap all pass here; what the game
     // is set to after them is not ours to know.
     sent_velocity = 0;
     track_note_owners.clear();

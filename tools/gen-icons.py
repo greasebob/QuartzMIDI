@@ -38,6 +38,7 @@ ICONS = [
     ("Help", "circle-question-mark"),
     ("Repeat", "repeat"), ("Repeat1", "repeat-1"),
     ("Stop", "square"), ("Restart", "skip-back"), ("More", "ellipsis"), ("Warning", "triangle-alert"),
+    ("Upgrade", "circle-arrow-up"),
 ]
 
 CURVE_STEPS = 10   # enough for a 24-unit glyph at 32 px

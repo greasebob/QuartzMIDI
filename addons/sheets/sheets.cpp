@@ -83,11 +83,12 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
             if (it != l.end() && it->is_string() && sheet::IsLookColour(it->get<std::string>())) into = it->get<std::string>();
         };
         look.theme = number("theme", look.theme, 0, 3);
-        look.ground = static_cast<sheet::Look::Ground>(number("ground", look.ground, 0, 2));
+        if (look.theme == 1) look.theme = 3;   // Paper was 1: its colours are the user's own
+        // Grain was 2: its paper is the plain colour.
+        look.ground = number("ground", look.ground, 0, 2) == 1 ? sheet::Look::Image : sheet::Look::Colour;
         look.fit = static_cast<sheet::Look::Fit>(number("fit", look.fit, 0, 1));
         look.dim = number("dim", look.dim, 0, 100);
-        look.grain = number("grain", look.grain, 0, 100);
-        look.font = static_cast<sheet::Look::Font>(number("font", look.font, 0, 2));
+        look.font = number("font", look.font, 0, sheet::kFontCount - 1);
         if (const auto it = l.find("oneColour"); it != l.end() && it->is_boolean()) look.oneColour = it->get<bool>();
         colour("background", look.background);
         colour("text", look.text);

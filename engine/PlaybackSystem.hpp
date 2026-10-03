@@ -247,7 +247,7 @@ public:
     // pressed_keys, for the panic key, where that bookkeeping may be wrong.
     void release_all_keys();
     void release_every_mapped_key();
-    // The Panic hotkey's sweep, which trusts no record at all: every mapping of
+    // Stop's sweep, which trusts no record at all: every mapping of
     // both layouts, the sustain key and Shift, Ctrl and Alt come up as
     // keystrokes whichever target is chosen, and on the MIDI target every note
     // of every channel written gets a note-off before the pedals lift. Queued
@@ -433,7 +433,7 @@ public:
     std::unordered_map<std::string, std::atomic<bool>> pressed_keys;
     // The game's velocity level, one for autoplay and live input, since both
     // tap the same game. Cleared whenever the game may have another: a song
-    // starting, a loop's wrap, a stop, a pause, a seek, Panic, a hold while
+    // starting, a loop's wrap, a stop, a pause, a seek, a hold while
     // the game is behind ending, and any send that lost an input.
     SentVelocity sent_velocity;
     bool isSustainPressed{ false };
@@ -539,7 +539,7 @@ private:
     std::atomic<bool> short_send_logged{ false };
     // Gives the crash handler (CrashGuard.hpp) the key-ups it sends: every
     // key the mappings of both layouts type, the sustain key, Shift, Ctrl and
-    // Alt. At the player's making, each start and Panic.
+    // Alt. At the player's making, each start and Stop's sweep.
     void set_crash_key_ups();
     // play_notes' body, which play_notes guards.
     void play_song();

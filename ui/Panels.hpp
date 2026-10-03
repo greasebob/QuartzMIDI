@@ -6,7 +6,6 @@
 #include "ShellEngine.hpp"
 #include "HelpModel.hpp"
 #include "ThemeModel.hpp"
-#include "InputLatency.hpp"
 #include "UpdateCheck.hpp"
 #include <windows.h>
 
@@ -34,9 +33,6 @@ struct Preferences {
     std::string theme = "blue";
     bool dark = false;
     bool autoSolo = false;
-    // Media play/previous/next/stop keys act as hotkeys too; off leaves them to
-    // the media player.
-    bool mediaKeys = true;
     // While playing, a hotkey on F4 is also taken with Alt held, so an F4 that
     // lands on a velocity tap's Alt reaches no window as Alt+F4.
     bool blockAltF4 = true;
@@ -77,12 +73,6 @@ struct Preferences {
     // Every window of the app is left out of screenshots, recordings and screen
     // sharing; the shell applies it where Windows can (captureExclusionOffered).
     bool hideFromCapture = false;
-    // Scan for MIDI files: the folders added to those it offers, and the
-    // folders left unticked.
-    std::vector<std::filesystem::path> scanFolders, scanSkipped;
-    // And the drives ticked, which start unticked, and the folders ignored
-    // from a result's heading, which no later scan enters.
-    std::vector<std::filesystem::path> scanPicked, scanIgnored;
     // Ask GitHub once at start for a newer release, offered in the status bar.
     bool checkForUpdates = true;
 };
@@ -123,27 +113,18 @@ public:
     // A key taken that way turns the switch on only once it registers; a key
     // another program holds leaves it off. Cleared when Settings closes.
     bool hideOnceShowHideWorks = false;
-    // Song whose own key is being captured, from its menu in MIDI Files or its
-    // row in Settings, or empty. Cleared when neither is drawn any more.
-    std::filesystem::path songHotkeyCapture;
     // ImGui time the armed capture last passed over a key it refuses, such as a
     // note key, or -1; its button flashes in the warning colour for a moment.
     double captureRefusedAt = -1;
     static constexpr double kRefusedFlash = .4;
-    // Whether each of the snapshot's song keys registered; the shell sets it.
-    std::vector<bool> songKeysAvailable;
     // Wooting pedal whose key is being learnt, or -1. The shell listens to the
     // Wooting for the key and sends it.
     int wootingPedalCapture = -1;
-    // Settings' Test keys: a one-frame request the shell answers by sending a key
-    // to the app's own window, while it runs, and the line it ends with.
-    bool keyTestRequested = false;
-    bool keyTesting = false, keyTestPassed = false;
-    std::string keyTestResult;
     // Set by the shell where Windows can leave a window out of capture; without
     // it, Settings has no Hide from screen capture.
     bool captureExclusionOffered = false;
-    // A newer release the shell's check found, shown while Check for updates is on.
+    // A newer release the shell's check found, offered in a corner card while
+    // Check for updates is on.
     AvailableUpdate update;
     bool velocityExpanded = false;
     bool tracksExpanded = true;
@@ -161,8 +142,6 @@ public:
     bool openConvert = false;
     // One-frame request to open the library save confirmation.
     bool openLibrarySave = false;
-    // One-frame request to open Scan for MIDI files.
-    bool openScan = false;
     // One-frame request to open Help; helpAdded selects its what's-new filter.
     bool openHelp = false;
     bool helpAdded = false;
@@ -185,7 +164,6 @@ public:
     bool revealSettingsTapKeys = false;
     // and the About section, expanded.
     bool revealSettingsAbout = false;
-    ~Panels();
     ImVec2 DesiredSize() const;
     // Full window height for the panels currently open; changes when Tracks or
     // Velocity Response is toggled.
@@ -206,16 +184,14 @@ public:
     void ReportError(const std::string& result, const std::string& detail = {}) const;
     void Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design,
               float dpi, ShellEngine& engine);
-    // True while something changes with time alone (the timing readout polls every
-    // 200 ms, a control's transition moves), so the on-demand renderer keeps drawing.
-    bool Animating() const { return measuring_ || hotkeyCapture >= 0 || !songHotkeyCapture.empty() || wootingPedalCapture >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
+    // True while something changes with time alone (a control's transition
+    // moves), so the on-demand renderer keeps drawing.
+    bool Animating() const { return hotkeyCapture >= 0 || wootingPedalCapture >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
 private:
     float HeightGrowth(bool tracksOpen, bool velocityOpen) const;
     void DrawHelp(const Fonts&, const skin::Skin&, float, const EngineSnapshot&);
     void DrawTour(const Fonts&, const skin::Skin&, float, ImVec2, ImVec2);
     bool performerRow_ = false;
-    // Set by whatever draws the armed song capture this frame.
-    bool songCaptureDrawn_ = false;
     char helpSearch_[128]{};
     int helpFolderRevealed_ = -1;
     // Screen rect of each tour stop's control, recorded as it draws, so the tour
@@ -278,18 +254,6 @@ private:
     char playlistName_[128]{};
     // The list menu, opened under a dragged song, closes when the drag ends.
     bool listsByDrag_ = false;
-    // A song in the Trash whose Delete was chosen, and the one asked about.
-    std::filesystem::path deleteSong_, deletingSong_;
-    // Empty Trash was chosen, to be asked about.
-    bool emptyTrash_ = false;
-    // Scan for MIDI files: the user's folders and the drives it offers, read as
-    // it opens; the rows of what a scan found (a file's index, or -1 - n for the
-    // nth folder's heading), which are ticked, and whether they are shown.
-    std::vector<std::filesystem::path> scanUserFolders_, scanDrives_;
-    std::vector<int> scanRows_;
-    std::vector<char> scanChosen_;
-    uint64_t scanChosenRevision_ = 0;
-    bool scanResultsShown_ = false;
     std::vector<size_t> fileFilter_;
     // Current folder, as a prefix of MidiEntry::name; search covers it and its
     // sub-folders.
@@ -347,10 +311,11 @@ private:
     void SettingsControl(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, float);
     void DrawMini(HWND, const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, ImVec2);
     void DrawStatus(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, float, float);
-    // The update chip's label for a top strip with `room` before its utility
-    // buttons: the version alone when the full label would squeeze the device
-    // pill, and empty with no newer release to offer.
-    std::string UpdateLabel(float room, const skin::Skin&, float dpi) const;
+    // A newer release as a card in the window's bottom-right corner, above the
+    // status bar whose top is `bottom`, until Later or Update closes it.
+    void DrawUpdateToast(const Fonts&, const skin::Skin&, float, ImVec2, ImVec2, float bottom);
+    bool updateDismissed_ = false;
+    float updateFade_ = 0;
     // The position and length right-aligned at `right`, with a looped section's
     // bounds before them while there is room after `left`.
     void TimeReadout(ImDrawList*, const EngineSnapshot&, bool section, float left, float right, float y, const skin::Skin&) const;
@@ -390,10 +355,5 @@ private:
     std::array<bool, 4> wootingPending_{};
     bool scannedLive_ = false;
     bool scannedOutput_ = false;
-    bool measuring_ = false;
-    int timingSource_ = 0;
-    input_latency::Collector timing_;
-    input_latency::Summary timingSummary_;
-    double nextTimingPoll_ = 0;
 };
 }

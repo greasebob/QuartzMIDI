@@ -103,13 +103,6 @@ struct PerformerSection {
     }
 };
 
-// A key bound to one song: pressing it anywhere loads and plays the song.
-struct SongHotkey {
-    std::filesystem::path song;
-    std::string key;
-    bool operator==(const SongHotkey&) const = default;
-};
-
 struct EngineSnapshot {
     std::shared_ptr<const std::vector<MidiEntry>> files = std::make_shared<const std::vector<MidiEntry>>();
     std::vector<TrackRow> rows;
@@ -267,19 +260,6 @@ struct EngineSnapshot {
     // The list the Files panel shows, which Previous, Next and shuffle follow
     // when it is the favourites or a playlist: a ListId or a playlist.
     int openList = kFolderList;
-    // A scan for MIDI files: the folder it reads and how many new files it has
-    // found so far, then, once it ends, those files, each named by its folder.
-    bool scanning = false;
-    std::string scanFolder;
-    size_t scanFound = 0;
-    std::shared_ptr<const std::vector<MidiEntry>> scanResults = std::make_shared<const std::vector<MidiEntry>>();
-    uint64_t scanRevision = 0;
-    // Songs with a key of their own, in the order they were bound. A song
-    // whose file is gone keeps its key. Changes bump hotkeyRevision.
-    std::vector<SongHotkey> songHotkeys;
-    // Applied when a file loads: Transpose moves by the fewest semitones that
-    // put every note on the layout's keys, or the most notes when none can.
-    bool fitToKeys = false;
     // How many octaves each note sounds in, 1 to 5: itself, then an octave
     // above, below, two above, two below. A double off the keys is dropped.
     int octaves = 1;
@@ -376,33 +356,10 @@ public:
                         // amount is a playlist or kQueueList, path the song.
                         // MoveInList: track is the row it goes before.
                         AddToList, RemoveFromList, MoveInList,
-                        // Trash: path is a song, moved into the MIDI folder's Trash
-                        // (kTrashFolder). Restore and DeleteForever: path is the file
-                        // in the Trash; deleting sends it to the Recycle Bin.
-                        Trash, Restore, DeleteForever,
-                        // ScanDrives looks below paths for MIDI files not in the
-                        // library, on threads of its own; ScanCancel stops it and
-                        // ScanProgress is its report (generation the scan, key the
-                        // folder read, track the count found, value finished, files
-                        // what it found). AddScanned moves the paths chosen into the
-                        // library folder, and PutBack returns paths moved so, or all
-                        // of them when there are none, to where they came from.
-                        ScanDrives, ScanCancel, ScanProgress, AddScanned, PutBack,
-                        // Stop, then every note key, modifier and the sustain key
-                        // released, and on the MIDI port every note and pedal.
-                        Panic,
-                        // amount is how many 0.1 steps to move Speed; applied as Speed.
-                        SpeedStep,
-                        // SongHotkey: path is the song, key the new name or empty
-                        // to unbind; a key bound elsewhere is moved. PlaySong loads
-                        // the song at path and plays it; one that is gone does nothing.
-                        SongHotkey, PlaySong,
-                        // value is the setting; saved, and reloads the open file as AutoTranspose does.
-                        FitToKeys,
+                        // path is a song, sent to the Recycle Bin and taken out of every list.
+                        DeleteSong,
                         // amount is the octaves each note sounds in, 1 to 5; saved.
-                        Octaves,
-                        // Sends every song in the Trash to the Recycle Bin.
-                        EmptyTrash };
+                        Octaves };
     struct Command {
         Action action;
         std::filesystem::path path;
@@ -420,10 +377,6 @@ public:
         // whenever a device comes or goes, so it cancels no calibration, and
         // when it fails the song plays on and the device stays saved.
         bool automatic = false;
-        // ScanDrives: where to look. AddScanned and PutBack: the files.
-        std::vector<std::filesystem::path> paths;
-        // ScanDrives: folders it passes over, with all below them.
-        std::vector<std::filesystem::path> ignored;
     };
     explicit ShellEngine(std::filesystem::path config, std::shared_ptr<AutoVolumeHost> volumeHost = {},
                          bool requireTypingAcknowledgement = false, ConnectFactory connectFactory = {});
@@ -438,6 +391,11 @@ public:
     // Add-on folder and signing key (an addon::PublicKey); defaults to the
     // addons folder beside the exe and kOwnerKey. Call before constructing an engine.
     static void SetAddons(std::filesystem::path folder, const std::array<std::uint8_t, 72>& key);
+    // What sends files to the Recycle Bin, true when every one went; the bin
+    // itself by default. The tests replace it so a run leaves the real bin
+    // alone. Call before constructing an engine.
+    using Recycler = std::function<bool(const std::vector<std::filesystem::path>&)>;
+    static void SetRecycler(Recycler recycle);
 private:
     std::function<bool(int)> keyProbe_ = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
     std::mutex keyProbeMutex_;
@@ -459,7 +417,4 @@ std::string Utf8(const std::filesystem::path& path);
 // Where sheet files go when no sheets folder has been chosen.
 std::filesystem::path DefaultSheetsFolder(const std::filesystem::path& midiFolder);
 std::string NoteName(int note);
-// The user's Downloads, Desktop, Documents, Music and OneDrive folders that
-// exist, once each: where Scan for MIDI files looks unless told otherwise.
-std::vector<std::filesystem::path> UserScanFolders();
 }

@@ -988,18 +988,16 @@ inline void MarkPedals(StyledResult& r, std::vector<PedalChange> changes, const 
 // page data as "page" (the size) and "look" (the rest). The defaults are
 // midi-converter's dark page. The page's THEMES[0] holds the same.
 struct Look {
-    enum Ground { Colour, Image, Grain };
+    enum Ground { Colour, Image };         // 2 was grain, read as Colour
     enum Fit { Cover, Tile };
-    enum Font { Verdana, SegoeUi, Consolas };
     double fontSizePt = 10;
     double lineHeightPercent = 135;
-    int theme = 0;                         // the page's theme picker: dark, paper, white, custom
+    int theme = 0;                         // the page's theme: 0 dark, 2 white, 3 the user's own (1 was paper, read as 3)
     std::string background = "#2D2A32";
     Ground ground = Colour;
     std::string image;                     // a data URL, for Ground::Image
     Fit fit = Cover;
     int dim = 0;                           // percent of the background colour over the image
-    int grain = 0;                         // percent, for Ground::Grain
     bool oneColour = false;                // every chord in the text colour
     std::string text = "#ffffff";
     std::string comment = "#c8c4cc";
@@ -1010,8 +1008,24 @@ struct Look {
     std::string pedalUp = "#6b3262";
     // By Rhythm: the original's palette, long notes green through short notes red.
     std::array<std::string, 9> rhythm{"#9c0f00", "#ff1900", "#daa6a6", "#da7e5a", "#c0c05a", "#9ada5a", "#74da74", "#a3f0a3", "white"};
-    Font font = Verdana;
+    int font = 0;                          // an index of kFonts
 };
+
+// The fonts a sheet can use, all installed with Windows. The page's FONTS
+// holds the same, in the same order; a new font goes at the end.
+struct FontFace { const char* name; const char* css; };
+inline constexpr FontFace kFonts[] = {
+    {"Verdana", "Verdana,sans-serif"}, {"Segoe UI", "'Segoe UI',sans-serif"}, {"Consolas", "Consolas,monospace"},
+    {"Arial", "Arial,sans-serif"}, {"Bahnschrift", "Bahnschrift,sans-serif"}, {"Calibri", "Calibri,sans-serif"},
+    {"Cambria", "Cambria,serif"}, {"Candara", "Candara,sans-serif"}, {"Cascadia Mono", "'Cascadia Mono',monospace"},
+    {"Comic Sans MS", "'Comic Sans MS',cursive"}, {"Constantia", "Constantia,serif"}, {"Corbel", "Corbel,sans-serif"},
+    {"Courier New", "'Courier New',monospace"}, {"Franklin Gothic Medium", "'Franklin Gothic Medium',sans-serif"},
+    {"Georgia", "Georgia,serif"}, {"Ink Free", "'Ink Free',cursive"}, {"Lucida Console", "'Lucida Console',monospace"},
+    {"Palatino Linotype", "'Palatino Linotype',serif"}, {"Segoe Print", "'Segoe Print',cursive"},
+    {"Sitka Text", "'Sitka Text',serif"}, {"Tahoma", "Tahoma,sans-serif"}, {"Times New Roman", "'Times New Roman',serif"},
+    {"Trebuchet MS", "'Trebuchet MS',sans-serif"},
+};
+inline constexpr int kFontCount = static_cast<int>(std::size(kFonts));
 
 // A colour the look accepts: #rrggbb, or "white" as the original writes it.
 inline bool IsLookColour(const std::string& colour) {
@@ -1021,42 +1035,11 @@ inline bool IsLookColour(const std::string& colour) {
     return true;
 }
 
-// Paper grain: a tile kGrainTile pixels a side of values from 0 to 1, coarse
-// value noise over fine noise from a fixed seed, so every sheet's paper is the
-// same. The page's grainTile makes the same numbers.
-inline constexpr int kGrainTile = 192, kGrainCell = 16;
-inline std::vector<double> GrainTile() {
-    uint32_t a = 0x5eed;
-    const auto next = [&] {   // mulberry32
-        a += 0x6D2B79F5u;
-        uint32_t t = (a ^ (a >> 15)) * (a | 1u);
-        t = (t + (t ^ (t >> 7)) * (t | 61u)) ^ t;
-        return (t ^ (t >> 14)) / 4294967296.0;
-    };
-    constexpr int cells = kGrainTile / kGrainCell;
-    std::vector<double> coarse(cells * cells);
-    for (auto& value : coarse) value = next();
-    std::vector<double> tile(kGrainTile * kGrainTile);
-    for (int y = 0; y < kGrainTile; ++y)
-        for (int x = 0; x < kGrainTile; ++x) {
-            const int x0 = x / kGrainCell, y0 = y / kGrainCell, x1 = (x0 + 1) % cells, y1 = (y0 + 1) % cells;
-            const double fx = static_cast<double>(x % kGrainCell) / kGrainCell, fy = static_cast<double>(y % kGrainCell) / kGrainCell;
-            const double top = coarse[y0 * cells + x0] + (coarse[y0 * cells + x1] - coarse[y0 * cells + x0]) * fx;
-            const double bottom = coarse[y1 * cells + x0] + (coarse[y1 * cells + x1] - coarse[y1 * cells + x0]) * fx;
-            tile[y * kGrainTile + x] = 0.6 * (top + (bottom - top) * fy) + 0.4 * next();
-        }
-    return tile;
-}
-// One channel of the background under grain of the given percent.
-inline int GrainChannel(int channel, double value, int grain) {
-    return std::clamp(static_cast<int>(std::floor(channel + (value - 0.5) * grain * 0.6 + 0.5)), 0, 255);
-}
-
 namespace detail {
 inline const Look& DefaultLook() { static const Look look; return look; }
 
-inline const char* FontCss(Look::Font font) {
-    return font == Look::SegoeUi ? "'Segoe UI',sans-serif" : font == Look::Consolas ? "Consolas,monospace" : "Verdana,sans-serif";
+inline const char* FontCss(int font) {
+    return kFonts[font >= 0 && font < kFontCount ? font : 0].css;
 }
 
 inline const std::string& ChordColour(Rhythm rhythm, const Look& look) {
@@ -1227,8 +1210,7 @@ inline std::string SheetText(const StyledResult& r, const Header& h, const SongT
 
 // Self-contained HTML page in the look, the original's dark page by default,
 // out-of-range notes bold and underlined. title sets the <title> (the MIDI
-// file's stem from the app). Paper grain needs the editor page's script, so
-// here the background colour stands in for it.
+// file's stem from the app).
 inline std::string ToHtml(const StyledResult& r, const std::string& title = "Sheet", const Look& look = detail::DefaultLook()) {
     std::string background = "background:" + look.background;
     if (look.ground == Look::Image && !look.image.empty()) {

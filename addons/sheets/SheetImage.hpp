@@ -100,31 +100,13 @@ inline std::unique_ptr<Gdiplus::Bitmap> ImageFromDataUrl(const std::string& url)
 }
 
 // The look's background over the whole picture, as the page draws it: its
-// colour, then paper grain, or the image covering or tiled at its own size
-// with the colour laid over it by dim.
+// colour, or the image covering or tiled at its own size with the colour
+// laid over it by dim.
 inline void PaintBackground(Gdiplus::Graphics& g, const Look& look, int width, int height, double scale) {
     const auto colour = ColourFromCss(look.background);
     g.Clear(colour);
     const auto s = static_cast<Gdiplus::REAL>(scale);
-    if (look.ground == Look::Grain && look.grain > 0) {
-        Gdiplus::Bitmap tile(kGrainTile, kGrainTile, PixelFormat32bppARGB);
-        Gdiplus::Rect rect(0, 0, kGrainTile, kGrainTile);
-        Gdiplus::BitmapData data;
-        if (tile.LockBits(&rect, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &data) != Gdiplus::Ok) return;
-        const auto values = GrainTile();
-        for (int y = 0; y < kGrainTile; ++y) {
-            auto* row = reinterpret_cast<uint32_t*>(static_cast<BYTE*>(data.Scan0) + static_cast<ptrdiff_t>(y) * data.Stride);
-            for (int x = 0; x < kGrainTile; ++x) {
-                const double v = values[static_cast<size_t>(y) * kGrainTile + x];
-                row[x] = 0xFF000000u | (static_cast<uint32_t>(GrainChannel(colour.GetR(), v, look.grain)) << 16) |
-                         (static_cast<uint32_t>(GrainChannel(colour.GetG(), v, look.grain)) << 8) | static_cast<uint32_t>(GrainChannel(colour.GetB(), v, look.grain));
-            }
-        }
-        tile.UnlockBits(&data);
-        Gdiplus::TextureBrush brush(&tile, Gdiplus::WrapModeTile);
-        brush.ScaleTransform(s, s);
-        g.FillRectangle(&brush, 0, 0, width, height);
-    } else if (look.ground == Look::Image) {
+    if (look.ground == Look::Image) {
         const auto image = ImageFromDataUrl(look.image);
         if (!image) return;
         const auto iw = static_cast<Gdiplus::REAL>(image->GetWidth()), ih = static_cast<Gdiplus::REAL>(image->GetHeight());
@@ -204,7 +186,9 @@ inline std::pair<int, int> SavePng(const StyledResult& r, const HeadingBlock& he
     const float lineHeight = static_cast<float>(fontPx * look.lineHeightPercent / 100);
     const float pad = static_cast<float>(16 * scale);
     const float wrapWidth = static_cast<float>(maxWidth * scale);
-    const char* fontName = look.font == Look::SegoeUi ? "Segoe UI" : look.font == Look::Consolas ? "Consolas" : "Verdana";
+    // A font this Windows lacks draws in Verdana, as the page's fallback does.
+    const char* fontName = kFonts[look.font >= 0 && look.font < kFontCount ? look.font : 0].name;
+    if (!Gdiplus::Font(detail::Wide(fontName).c_str(), fontPx, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel).IsAvailable()) fontName = kFonts[0].name;
     const auto fontWide = detail::Wide(fontName);
     Gdiplus::Font regular(fontWide.c_str(), fontPx, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     Gdiplus::Font heavy(fontWide.c_str(), fontPx, Gdiplus::FontStyleBold | Gdiplus::FontStyleUnderline, Gdiplus::UnitPixel);

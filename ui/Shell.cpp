@@ -13,7 +13,6 @@
 #include "Bundle.hpp"
 #include "WindowCapture.hpp"
 #include "MiniFocus.hpp"
-#include "KeyTest.hpp"
 #include "CrashGuard.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -63,39 +62,30 @@ constexpr int kModifierMixes = 8;   // bit 0 Shift, bit 1 Ctrl, bit 2 Alt
 constexpr int kHotkeyIdStride = 32; // id = place + 1 + stride * mix
 static_assert(shell::kHotkeys < kHotkeyIdStride);
 
-// Media transport keys, registered in addition to the user's binds when the
-// Settings switch is on. A media key the user bound explicitly registers
-// first, so its registration here fails.
+// Media transport keys, always registered in addition to the user's binds. A
+// media key the user bound explicitly registers first, so its registration
+// here fails and the press fires only the action it was bound to.
 constexpr int kMediaIdBase = 0x1000;
 constexpr std::array<UINT, 4> kMediaKeys{VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_NEXT_TRACK, VK_MEDIA_STOP};
-
-// A song's own key: id = base + song * kModifierMixes + mix, below 0xC000.
-constexpr int kSongIdBase = 0x2000;
-constexpr size_t kMostSongHotkeys = (0xC000 - kSongIdBase) / kModifierMixes;
 
 struct Registered {
     std::array<bool, shell::kHotkeys> held{};
     std::array<uint8_t, shell::kHotkeys> mixes{};
     std::array<uint8_t, kMediaKeys.size()> mediaMixes{};
     std::array<std::string, shell::kHotkeys> names;
-    std::vector<shell::SongHotkey> songs;
-    std::vector<uint8_t> songMixes;
-    std::vector<bool> songHeld;
-    // Hotkey bound to each mouse side button, kHotkeys and on for a song's, or
-    // -1. RegisterHotKey cannot take a mouse button, so while one is bound the
-    // window reads the mouse as raw
+    // Hotkey bound to each mouse side button, or -1. RegisterHotKey cannot take
+    // a mouse button, so while one is bound the window reads the mouse as raw
     // input, in the background too, and fires on the button's press. Whatever
     // the modifiers are, as a key registered while typing does. Unlike a key,
     // the press still reaches the game.
     std::array<int, 2> mouse{-1, -1};
     bool rawMouse = false;
     // Keys another program registered first, read as raw keyboard input: each
-    // one's virtual key and hotkey, kHotkeys and on for a song's. Like a mouse
+    // one's virtual key and hotkey. Like a mouse
     // button, such a key still reaches the game.
     std::vector<std::pair<int, size_t>> rawKeys;
     bool rawKeyboard = false;
     bool typing = false;
-    bool media = false;
     bool blockAltF4 = false;
     // The layout and key map the keys were checked against: a key the app types
     // under them is left out, and a change checks every key again.
@@ -123,12 +113,6 @@ void UnregisterHotkeys(HWND hwnd, Registered& done) {
     for (size_t i = 0; i < kMediaKeys.size(); ++i)
         for (int mix = 0; mix < kModifierMixes; ++mix)
             if (done.mediaMixes[i] & (1u << mix)) UnregisterHotKey(hwnd, kMediaIdBase + static_cast<int>(i) + kHotkeyIdStride * mix);
-    for (size_t i = 0; i < done.songMixes.size(); ++i)
-        for (int mix = 0; mix < kModifierMixes; ++mix)
-            if (done.songMixes[i] & (1u << mix)) UnregisterHotKey(hwnd, kSongIdBase + static_cast<int>(i) * kModifierMixes + mix);
-    done.songMixes.clear();
-    done.songHeld.clear();
-    done.songs.clear();
     if (done.rawMouse) ReadRawMouse(hwnd, false);
     done.rawMouse = false;
     if (done.rawKeyboard) ReadRawKeyboard(hwnd, false);
@@ -145,7 +129,7 @@ void UnregisterHotkeys(HWND hwnd, Registered& done) {
 // input instead; one that cannot be read either is reported through
 // Registered::held, not treated as fatal.
 void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, shell::kHotkeys>& names,
-                     const std::vector<shell::SongHotkey>& songs, bool typing, bool media, bool blockAltF4,
+                     bool typing, bool blockAltF4,
                      const std::map<std::string, std::string>& keyMappings, uint64_t mappingRevision) {
     UnregisterHotkeys(hwnd, done);
     const HKL layout = shell::UiLayout();
@@ -167,38 +151,22 @@ void RegisterHotkeys(HWND hwnd, Registered& done, const std::array<std::string, 
         done.held[i] = take(vk, static_cast<int>(i) + 1, kHotkeyIdStride, done.mixes[i]);
         if (vk != 0 && !done.held[i]) done.rawKeys.push_back({vk, i});
     }
-    done.songs = songs;
-    done.songMixes.assign(songs.size(), 0);
-    done.songHeld.assign(songs.size(), false);
-    for (size_t i = 0; i < songs.size() && i < kMostSongHotkeys; ++i) {
-        const int vk = shell::RegisteredVK(songs[i].key, typed);
-        if (shell::IsMouseHotkey(vk)) { done.mouse[vk == VK_XBUTTON1 ? 0 : 1] = static_cast<int>(shell::kHotkeys + i); continue; }
-        done.songHeld[i] = take(vk, kSongIdBase + static_cast<int>(i) * kModifierMixes, 1, done.songMixes[i]);
-        if (vk != 0 && !done.songHeld[i]) done.rawKeys.push_back({vk, shell::kHotkeys + i});
-    }
-    for (size_t i = 0; media && i < kMediaKeys.size(); ++i)
+    for (size_t i = 0; i < kMediaKeys.size(); ++i)
         for (int mix = 0; mix < (typing ? kModifierMixes : 1); ++mix)
             if (RegisterHotKey(hwnd, kMediaIdBase + static_cast<int>(i) + kHotkeyIdStride * mix, modifiersOf(mix), kMediaKeys[i]))
                 done.mediaMixes[i] |= static_cast<uint8_t>(1u << mix);
     if (done.mouse[0] >= 0 || done.mouse[1] >= 0) {
         done.rawMouse = ReadRawMouse(hwnd, true);
-        for (const int bound : done.mouse) {
-            if (bound < 0) continue;
-            if (static_cast<size_t>(bound) < shell::kHotkeys) done.held[static_cast<size_t>(bound)] = done.rawMouse;
-            else done.songHeld[static_cast<size_t>(bound) - shell::kHotkeys] = done.rawMouse;
-        }
+        for (const int bound : done.mouse)
+            if (bound >= 0) done.held[static_cast<size_t>(bound)] = done.rawMouse;
     }
     if (!done.rawKeys.empty()) {
         g_rawKeys.Start([](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; });
         done.rawKeyboard = ReadRawKeyboard(hwnd, true);
-        for (const auto& [vk, bound] : done.rawKeys) {
-            if (bound < shell::kHotkeys) done.held[bound] = done.rawKeyboard;
-            else done.songHeld[bound - shell::kHotkeys] = done.rawKeyboard;
-        }
+        for (const auto& [vk, bound] : done.rawKeys) done.held[bound] = done.rawKeyboard;
     }
     done.names = names;
     done.typing = typing;
-    done.media = media;
     done.blockAltF4 = blockAltF4;
     done.layout = layout;
     done.mappingRevision = mappingRevision;
@@ -307,16 +275,10 @@ void FireHotkey(size_t index) {
         Action::TogglePlayPause, Action::Back10, Action::Forward10, Action::Stop, Action::Previous, Action::Next};
     const uint64_t generation = g_engine->Snapshot()->generation;
     if (index < actions.size()) g_engine->Send({actions[index], {}, generation});
-    else if (index == shell::kPanicHotkey) g_engine->Send({Action::Panic});
     // A performer's action key, which works whatever the trigger.
     else if (const int action = g_engine->Snapshot()->performer.ActionOfKey(index); action >= 0)
         g_engine->Send({Action::PerformerAction, {}, generation, static_cast<size_t>(action)});
-    else if (index == shell::kSpeedUpHotkey || index == shell::kSpeedDownHotkey)
-        g_engine->Send({Action::SpeedStep, {}, 0, 0, false, index == shell::kSpeedUpHotkey ? 1.0 : -1.0});
     else if (index == shell::kShowHideHotkey) { if (g_window) ShowOrHide(g_window); }
-    // A song's key, kHotkeys and on as the mouse buttons number them.
-    else if (index >= shell::kHotkeys && g_registered && index - shell::kHotkeys < g_registered->songs.size())
-        g_engine->Send({Action::PlaySong, g_registered->songs[index - shell::kHotkeys].song});
 }
 }
 
@@ -397,11 +359,6 @@ static bool OpenPath(std::filesystem::path path) {
     return true;
 }
 
-// Settings' key test sends F24, which nothing uses, tagged so the loop knows it
-// arrived and keeps it from every control.
-static constexpr ULONG_PTR kKeyTestTag = 0x514D4B54;
-static constexpr ULONGLONG kKeyTestWaitMs = 500;
-
 // A device arriving or leaving sends a burst of WM_DEVICECHANGE; MIDI devices
 // are rescanned once it has been quiet this long.
 static constexpr UINT_PTR kDeviceScanTimer = 1;
@@ -417,8 +374,7 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         static constexpr std::array<Action, kMediaKeys.size()> media{
             Action::TogglePlayPause, Action::Previous, Action::Next, Action::Stop};
         const size_t place = wp % kHotkeyIdStride;
-        if (wp >= kSongIdBase) FireHotkey(shell::kHotkeys + (wp - kSongIdBase) / kModifierMixes);
-        else if (wp >= kMediaIdBase) { if (place < media.size()) g_engine->Send({media[place], {}, g_engine->Snapshot()->generation}); }
+        if (wp >= kMediaIdBase) { if (place < media.size()) g_engine->Send({media[place], {}, g_engine->Snapshot()->generation}); }
         else if (place >= 1) FireHotkey(place - 1);
         return 0;
     }
@@ -436,10 +392,7 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 const auto held = [](int key) { return (GetAsyncKeyState(key) & 0x8000) != 0; };
                 const int mix = (held(VK_SHIFT) ? 1 : 0) | (held(VK_CONTROL) ? 2 : 0) | (held(VK_MENU) ? 4 : 0);
                 for (const auto& [key, bound] : g_registered->rawKeys) {
-                    if (key != vk) continue;
-                    const unsigned mixes = bound < shell::kHotkeys ? g_registered->mixes[bound]
-                        : bound - shell::kHotkeys < g_registered->songMixes.size() ? g_registered->songMixes[bound - shell::kHotkeys] : 0u;
-                    if (shell::RawHotkeyFires(vk, mixes, mix, g_registered->typing)) FireHotkey(bound);
+                    if (key == vk && shell::RawHotkeyFires(vk, g_registered->mixes[bound], mix, g_registered->typing)) FireHotkey(bound);
                 }
             }
         }
@@ -758,9 +711,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // A control reads keys, and the window mini took the keyboard from for it.
     bool readingKeys = false;
     HWND keyboardFrom = nullptr;
-    // When the running key test gives up, 0 when none runs, and whether its key came.
-    ULONGLONG keyTestUntil = 0;
-    bool keyTestArrived = false;
     const auto keyDown = [](int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; };
 
     IMGUI_CHECKVERSION();
@@ -856,11 +806,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             // Swallow key-downs during a rebind capture so they don't reach
             // ImGui. Filtered here because Settings can be its own OS window.
             const bool keyDownMessage = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
-            if (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST && static_cast<ULONG_PTR>(GetMessageExtraInfo()) == kKeyTestTag) {
-                if (keyDownMessage) keyTestArrived = true;
-                input = true;
-                continue;
-            }
             if ((msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) && msg.wParam == capturedKey) capturedKey = 0;
             if (keyDownMessage && (capturing || pedalCapturing || (capturedKey != 0 && msg.wParam == capturedKey))) { input = true; continue; }
             ::TranslateMessage(&msg);
@@ -873,17 +818,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (!running) break;
         for (auto& path : std::exchange(g_opened, {})) { OpenPath(std::move(path)); input = true; }
         g_noActivate = panels.miniMode;
-        // A key capture is for a hotkey's place or, from a song's menu or row, for a song.
-        const auto armed = [&] { return panels.hotkeyCapture >= 0 || !panels.songHotkeyCapture.empty(); };
         {
-            // A text field, a key being bound (an action's or a song's, which
-            // the game in front would cancel) or a Wooting pedal key being learnt
-            // reads keys, as does the key test. Taken once: a field left active
-            // behind the game does not pull the keyboard back.
+            // A text field, a key being bound (which the game in front would
+            // cancel) or a Wooting pedal key being learnt reads keys. Taken
+            // once: a field left active behind the game does not pull the
+            // keyboard back.
             const ImGuiContext& g = *ImGui::GetCurrentContext();
             const bool reads = g.IO.WantTextInput || g.WantTextInputNextFrame == 1 ||
-                               armed() || panels.wootingPedalCapture >= 0 ||
-                               panels.keyTestRequested || keyTestUntil != 0;
+                               panels.hotkeyCapture >= 0 || panels.wootingPedalCapture >= 0;
             const HWND front = GetForegroundWindow();
             DWORD owner = 0;
             GetWindowThreadProcessId(front, &owner);
@@ -902,55 +844,21 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             }
             readingKeys = reads;
         }
-        // Settings' key test: F24 down and up to the app's own window, which has
-        // the keyboard by now, then the game's integrity level beside the app's.
-        if (std::exchange(panels.keyTestRequested, false) && !keyTestUntil) {
-            DWORD owner = 0;
-            GetWindowThreadProcessId(GetForegroundWindow(), &owner);
-            if (owner != GetCurrentProcessId()) {
-                panels.keyTestResult = shell::KeyTestResult(shell::KeyTestOutcome::NoFocus, 0, 0);
-                panels.keyTestPassed = false;
-            }
-            else {
-                // Off while it runs, so a hotkey on F24 cannot take the key.
-                UnregisterHotkeys(hwnd, hotkeys);
-                INPUT keys[2]{};
-                for (int i = 0; i < 2; ++i) {
-                    keys[i].type = INPUT_KEYBOARD;
-                    keys[i].ki.wScan = static_cast<WORD>(MapVirtualKeyW(VK_F24, MAPVK_VK_TO_VSC));
-                    keys[i].ki.dwFlags = KEYEVENTF_SCANCODE | (i ? KEYEVENTF_KEYUP : 0);
-                    keys[i].ki.dwExtraInfo = kKeyTestTag;
-                }
-                keyTestArrived = false;
-                keyTestUntil = GetTickCount64() + kKeyTestWaitMs;
-                // A send Windows refuses ends the test at once.
-                if (SendInput(2, keys, sizeof(INPUT)) != 2) keyTestUntil = 1;
-            }
-        }
-        if (keyTestUntil && (keyTestArrived || GetTickCount64() >= keyTestUntil)) {
-            const DWORD ours = shell::ProcessIntegrity(GetCurrentProcessId()), game = shell::RobloxIntegrity();
-            panels.keyTestResult = shell::KeyTestResult(keyTestArrived ? shell::KeyTestOutcome::Arrived : shell::KeyTestOutcome::Lost, ours, game);
-            panels.keyTestPassed = shell::KeyTestPassed(keyTestArrived ? shell::KeyTestOutcome::Arrived : shell::KeyTestOutcome::Lost, ours, game);
-            keyTestUntil = 0;
-        }
-        panels.keyTesting = keyTestUntil != 0;
         {
             DWORD foreground = 0;
             GetWindowThreadProcessId(GetForegroundWindow(), &foreground);
             // GetAsyncKeyState is global, so cancel a capture when another
             // process takes the foreground.
-            if (armed() && foreground != GetCurrentProcessId()) { panels.hotkeyCapture = -1; panels.songHotkeyCapture.clear(); }
+            if (panels.hotkeyCapture >= 0 && foreground != GetCurrentProcessId()) panels.hotkeyCapture = -1;
             if (capturedKey != 0 && !keyDown(static_cast<int>(capturedKey))) capturedKey = 0;
-            if (armed()) {
+            if (panels.hotkeyCapture >= 0) {
                 if (!capturing) { UnregisterHotkeys(hwnd, hotkeys); capture.Begin(keyDown); capturing = true; }
                 const auto mapped = engine.Snapshot();
                 const int pressed = capture.Poll(keyDown, [&](int vk) { return shell::IsNoteKey(vk, mapped->keyMappings); });
                 if (capture.Refused()) panels.captureRefusedAt = ImGui::GetTime();
                 if (pressed > 0) {
-                    const bool song = panels.hotkeyCapture < 0;
-                    shell::ShellEngine::Command command{song ? shell::ShellEngine::Action::SongHotkey : shell::ShellEngine::Action::Hotkey};
-                    if (song) command.path = panels.songHotkeyCapture;
-                    else command.track = static_cast<size_t>(panels.hotkeyCapture);
+                    shell::ShellEngine::Command command{shell::ShellEngine::Action::Hotkey};
+                    command.track = static_cast<size_t>(panels.hotkeyCapture);
                     command.key = shell::VKToName(pressed);
                     engine.Send(std::move(command));
                     if (panels.hideOnShowHideKey && panels.hotkeyCapture == static_cast<int>(shell::kShowHideHotkey))
@@ -959,10 +867,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 if (pressed != shell::HotkeyCapture::None) {
                     capturedKey = pressed > 0 ? static_cast<WPARAM>(pressed) : VK_ESCAPE;
                     panels.hotkeyCapture = -1;
-                    panels.songHotkeyCapture.clear();
                 }
             }
-            if (!armed()) capturing = false;
+            if (panels.hotkeyCapture < 0) capturing = false;
             if (panels.hotkeyCapture != static_cast<int>(shell::kShowHideHotkey)) panels.hideOnShowHideKey = false;
             if (panels.wootingPedalCapture >= 0 && foreground != GetCurrentProcessId()) panels.wootingPedalCapture = -1;
             if (panels.wootingPedalCapture >= 0) {
@@ -982,9 +889,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             }
             if (panels.wootingPedalCapture < 0 && pedalCapturing) { WootingEndKeyCapture(); pedalCapturing = false; }
             // Don't re-register until the captured key is released, or its
-            // auto-repeat fires the action just bound to it, nor while the key
-            // test runs.
-            if (capturedKey != 0 || keyTestUntil) drawUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
+            // auto-repeat fires the action just bound to it.
+            if (capturedKey != 0) drawUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(750);
             else if (!capturing) {
                 const auto snapshot = engine.Snapshot();
                 // Performer keys are registered only while their trigger is
@@ -998,16 +904,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                     resting[i] = snapshot->performer.ActionOfKey(i) >= 0 ? !(snapshot->performer.on && snapshot->playing)
                         : snapshot->trigger == 0 || snapshot->performer.TriggerOfKey(i) != snapshot->trigger;
                 for (size_t i = 0; i < shell::kHotkeys; ++i) if (resting[i]) wanted[i].clear();
-                const bool media = panels.preferences.mediaKeys;
                 const bool blockAltF4 = panels.preferences.blockAltF4;
                 // A layout switch (WM_INPUTLANGCHANGE wakes the loop) or a key map
                 // edit can make a bound key one the app types.
-                if (!hotkeys.any || wanted != hotkeys.names || snapshot->songHotkeys != hotkeys.songs ||
-                    typing != hotkeys.typing || media != hotkeys.media || blockAltF4 != hotkeys.blockAltF4 ||
+                if (!hotkeys.any || wanted != hotkeys.names ||
+                    typing != hotkeys.typing || blockAltF4 != hotkeys.blockAltF4 ||
                     shell::UiLayout() != hotkeys.layout || snapshot->mappingRevision != hotkeys.mappingRevision) {
-                    RegisterHotkeys(hwnd, hotkeys, wanted, snapshot->songHotkeys, typing, media, blockAltF4,
+                    RegisterHotkeys(hwnd, hotkeys, wanted, typing, blockAltF4,
                                     snapshot->keyMappings, snapshot->mappingRevision);
-                    panels.songKeysAvailable = hotkeys.songHeld;
                     panels.stopHotkeyAvailable = hotkeys.held[3];
                     for (size_t i = 0; i < shell::kHotkeys; ++i) {
                         panels.transportKeysAvailable[i] = hotkeys.held[i] || resting[i];

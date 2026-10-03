@@ -8,8 +8,8 @@ By BobGrease. Based on [MIDI++](https://github.com/Zephkek/MIDIPlusPlus) by Zeph
 
 - Autoplay on 61 or 88 keys, with velocity, sustain, speed, transpose, fold, octaves and loop.
 - Pauses when the game loses focus and picks up where it left off.
-- A MIDI library with folders, search, favourites, playlists, a queue, Trash and a scan for the MIDI files already on the computer.
-- Hotkeys that work from inside the game, for the transport, speed, Panic, the window and any single song, on keys or mouse buttons.
+- A MIDI library with folders, search, favourites, playlists and a queue.
+- Hotkeys that work from inside the game, for the transport and the window, on keys or mouse buttons.
 - Tracks with mute, solo and Solo Piano.
 - The game's key maps: Major, Dorian, Lydian, Locrian, Mixolydian, Minor, Phrygian and Phrygian Dom.
 - Live play from a MIDI keyboard or a Wooting analog keyboard, over Kernel Streaming or WinMM.
@@ -22,7 +22,7 @@ By BobGrease. Based on [MIDI++](https://github.com/Zephkek/MIDIPlusPlus) by Zeph
 
 ## Add-ons
 
-`QuartzMIDI-v1.2.0.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.2.0.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.2.0-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
+`QuartzMIDI-v1.3.0.zip` on the [release page](https://github.com/greasebob/QuartzMIDI/releases) includes both, as does `QuartzMIDI-v1.3.0.exe`, a single file that keeps them and its settings in `%APPDATA%\QuartzMIDI`. `QuartzMIDI-v1.3.0-no-addons.zip` leaves them out; add one by extracting its zip into the app's `addons` folder.
 
 - `sheets.zip`: a song as a sheet, copied, saved or opened in the sheet editor.
 - `converter.zip`: audio to MIDI, from a file or a link.

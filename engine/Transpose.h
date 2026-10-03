@@ -4,33 +4,7 @@
 #include <array>
 #include <set>
 #include <map>
-#include <algorithm>
-#include <cstdlib>
 #include "midi_parser.h"
-
-// The Transpose, from -12 to 12, that puts the most of `notes` on the keys,
-// which is every note when any shift can. Among equals it keeps the shift
-// nearest `from`, then nearest 0, then the higher. onKeys(n) says whether
-// note n has a key.
-template <class OnKeys> int FitToKeys(const std::vector<int>& notes, int from, OnKeys onKeys) {
-    from = std::clamp(from, -12, 12);
-    std::vector<int> shifts;
-    for (int shift = -12; shift <= 12; ++shift) shifts.push_back(shift);
-    std::stable_sort(shifts.begin(), shifts.end(), [&](int a, int b) {
-        if (std::abs(a - from) != std::abs(b - from)) return std::abs(a - from) < std::abs(b - from);
-        if (std::abs(a) != std::abs(b)) return std::abs(a) < std::abs(b);
-        return a > b;
-    });
-    int best = from;
-    size_t bestCount = 0;
-    bool counted = false;
-    for (const int shift : shifts) {
-        size_t count = 0;
-        for (const int note : notes) count += onKeys(note + shift) ? 1 : 0;
-        if (!counted || count > bestCount) { best = shift; bestCount = count; counted = true; }
-    }
-    return best;
-}
 
 class TransposeEngine {
 public:

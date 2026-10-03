@@ -9,7 +9,7 @@
 namespace shell {
 // The app's version. tools\make-release.ps1 reads it from here for the zip and
 // exe names, so a release bumps it in this one place.
-inline constexpr const char* kAppVersion = "1.2.0";
+inline constexpr const char* kAppVersion = "1.3.0";
 
 // Once at start, off the UI thread, the app asks GitHub for the public repo's
 // latest release and offers it in the status bar when it is newer. Nothing is
