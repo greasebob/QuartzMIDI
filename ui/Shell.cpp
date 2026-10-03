@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -291,6 +292,21 @@ static bool g_deviceLost = false;
 // the game, and a window opens without taking it. The frame loop gives a window
 // the keyboard only while a control in it reads keys.
 static bool g_noActivate = false;
+// Draws one frame from inside Windows' own loop while the window is dragged or
+// sized, which would otherwise hold the app's loop until the mouse is let go.
+static std::function<void()> g_drawWhileMoving;
+static bool g_moving = false;
+
+// Each step of a drag draws a frame as the window lands, so the popups beside it
+// move in the same step instead of trailing behind; the timer covers a held
+// mouse. A frame can open a file dialog, whose loop would bring this back.
+static void DrawWhileMoving() {
+    static bool drawing = false;
+    if (!g_moving || !g_drawWhileMoving || drawing) return;
+    drawing = true;
+    g_drawWhileMoving();
+    drawing = false;
+}
 
 static void CreateTarget() {
     ID3D11Texture2D* back = nullptr;
@@ -363,6 +379,7 @@ static bool OpenPath(std::filesystem::path path) {
 // are rescanned once it has been quiet this long.
 static constexpr UINT_PTR kDeviceScanTimer = 1;
 static constexpr UINT kDeviceScanSettleMs = 500;
+static constexpr UINT_PTR kMoveDrawTimer = 2;
 
 static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp)) return true;
@@ -413,7 +430,19 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp != DBT_DEVNODES_CHANGED) break;
         SetTimer(hwnd, kDeviceScanTimer, kDeviceScanSettleMs, nullptr);
         return TRUE;
+    case WM_ENTERSIZEMOVE:
+        g_moving = true;
+        SetTimer(hwnd, kMoveDrawTimer, 16, nullptr);
+        break;
+    case WM_EXITSIZEMOVE:
+        g_moving = false;
+        KillTimer(hwnd, kMoveDrawTimer);
+        break;
+    case WM_MOVE:
+        DrawWhileMoving();
+        break;
     case WM_TIMER:
+        if (wp == kMoveDrawTimer) { DrawWhileMoving(); return 0; }
         if (wp != kDeviceScanTimer) break;
         KillTimer(hwnd, kDeviceScanTimer);
         if (g_engine) {
@@ -451,6 +480,7 @@ static LRESULT WINAPI WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (resized == DXGI_ERROR_DEVICE_REMOVED || resized == DXGI_ERROR_DEVICE_RESET) g_deviceLost = true;
             else CreateTarget();
         }
+        DrawWhileMoving();
         return 0;
     case WM_SYSCOMMAND:
         if ((wp & 0xfff0) == SC_KEYMENU) return 0;  // no ALT menu
@@ -799,23 +829,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // The window is first shown by the first pass, at its final size and mode,
     // so a start in mini never shows an empty full-size window.
     bool shown = false;
-    while (running) {
-        MSG msg;
-        bool input = false;
-        while (::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            // Swallow key-downs during a rebind capture so they don't reach
-            // ImGui. Filtered here because Settings can be its own OS window.
-            const bool keyDownMessage = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
-            if ((msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) && msg.wParam == capturedKey) capturedKey = 0;
-            if (keyDownMessage && (capturing || pedalCapturing || (capturedKey != 0 && msg.wParam == capturedKey))) { input = true; continue; }
-            ::TranslateMessage(&msg);
-            ::DispatchMessageW(&msg);
-            if (msg.message == WM_QUIT) running = false;
-            // Raw mouse input, read while a side button is bound, arrives on
-            // every move anywhere and draws nothing.
-            if (msg.message != WM_INPUT) input = true;
-        }
-        if (!running) break;
+    // One pass after the messages are pumped, drawing a frame when one is due.
+    // While the window is dragged or sized, Windows runs a loop of its own and
+    // the window's timer calls this with moving set, so the app keeps drawing
+    // and its popups follow; nothing waits then.
+    const auto pass = [&](bool input, bool moving) {
         for (auto& path : std::exchange(g_opened, {})) { OpenPath(std::move(path)); input = true; }
         g_noActivate = panels.miniMode;
         {
@@ -1004,8 +1022,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 panels.SavePreferences(preferencesPath, false);
                 preferencesSaved = GetTickCount64();
             }
-            WaitMessage();
-            continue;
+            if (!moving) WaitMessage();
+            return;
         }
         const skin::Skin current = panels.ActiveSkin();
         const uint64_t active = shell::SkinSignature(current);
@@ -1039,7 +1057,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 if (caret) wait = std::min(wait, std::chrono::ceil<std::chrono::milliseconds>(caretDue - now));
                 MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(wait.count()), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
                 waited = true;
-                continue;
+                return;
             }
             drawnSnapshot = std::move(snapshot);
             drawnPlayed = played;
@@ -1057,8 +1075,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             CleanupDevice();
             if (!CreateDevice(hwnd)) {
                 // The adapter may not be back yet; retry in a second.
-                MsgWaitForMultipleObjectsEx(0, nullptr, 1000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-                continue;
+                if (!moving) MsgWaitForMultipleObjectsEx(0, nullptr, 1000, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                return;
             }
             ImGui_ImplWin32_Init(hwnd);
             HookViewports();
@@ -1074,8 +1092,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             // Nothing was shown, so the current snapshot is drawn once visible;
             // a song that ended while locked would otherwise stay on screen.
             drawnSnapshot.reset();
-            MsgWaitForMultipleObjectsEx(0, nullptr, 250, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-            continue;
+            if (!moving) MsgWaitForMultipleObjectsEx(0, nullptr, 250, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            return;
         }
         occluded = false;
         const bool modeChanged = appliedMini != panels.miniMode;
@@ -1085,6 +1103,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         // window flagged maximized at a non-maximized size.
         if (sizeChanged && !modeChanged && !panels.miniMode && IsZoomed(hwnd)) appliedLayout = layoutNow();
         else if (sizeChanged) {
+            // Full and mini are one window in one place: a switch keeps its
+            // top-right corner, where both windows' switch buttons are.
+            RECT corner{}; GetWindowRect(hwnd, &corner);
             if (modeChanged) {
                 // Mini has no maximize box. A maximized full window is
                 // restored on entering mini and re-maximized on leaving it.
@@ -1095,23 +1116,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             }
             RECT window{}, client{}; GetWindowRect(hwnd, &window); GetClientRect(hwnd, &client);
             if (modeChanged && panels.miniMode) { fullRect = window; fullDpi = g_dpi; }
-            // Mini reopens where it was left, in this session and the next.
-            if (modeChanged && !panels.miniMode) {
-                panels.preferences.miniX = window.left;
-                panels.preferences.miniY = window.top;
-                panels.preferences.miniSaved = true;
-            }
             RECT target{};
             HMONITOR onto = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
             const auto desired = panels.DesiredSize();
             if (modeChanged && !panels.miniMode) {
-                // The full window returns where it was, rescaled for any DPI
-                // change since; if that monitor is gone, it opens where mini is.
+                // The full window keeps its size, rescaled for any DPI change since.
                 const float ratio = g_dpi / fullDpi;
-                target = {fullRect.left, fullRect.top, fullRect.left + static_cast<LONG>((fullRect.right - fullRect.left) * ratio),
-                          fullRect.top + static_cast<LONG>((fullRect.bottom - fullRect.top) * ratio)};
-                if (const HMONITOR fullMonitor = MonitorFromRect(&fullRect, MONITOR_DEFAULTTONULL)) onto = fullMonitor;
-                else OffsetRect(&target, window.left - target.left, window.top - target.top);
+                const LONG width = static_cast<LONG>((fullRect.right - fullRect.left) * ratio);
+                target = {corner.right - width, corner.top, corner.right,
+                          corner.top + static_cast<LONG>((fullRect.bottom - fullRect.top) * ratio)};
             } else {
                 // The full window keeps its user-set width, rescaled by the
                 // change in Size; WM_GETMINMAXINFO enforces the floor.
@@ -1123,10 +1136,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 AdjustWindowRectExForDpi(&dimensions, WS_OVERLAPPEDWINDOW, FALSE, 0, static_cast<UINT>(96.f * g_dpi));
                 target = {window.left, window.top, window.left + dimensions.right - dimensions.left,
                     window.top + dimensions.bottom - dimensions.top};
-                if (modeChanged && panels.preferences.miniSaved) {
-                    RECT parked = target;
-                    OffsetRect(&parked, panels.preferences.miniX - target.left, panels.preferences.miniY - target.top);
-                    if (const HMONITOR there = MonitorFromRect(&parked, MONITOR_DEFAULTTONULL)) { target = parked; onto = there; }
+                if (modeChanged) {
+                    OffsetRect(&target, corner.right - target.right, corner.top - target.top);
+                    onto = MonitorFromRect(&corner, MONITOR_DEFAULTTONEAREST);
                 }
             }
             // A move onto a monitor at another DPI rescales the window through
@@ -1209,7 +1221,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         }
         ImGui::UpdatePlatformWindows();
         ImGui::RenderPlatformWindowsDefault();
-        const HRESULT presented = g_swapChain->Present(1, 0);
+        // While moving, a wait for the vertical blank would hold Windows' move
+        // loop and queue frames behind the window, so the drag would lag.
+        const HRESULT presented = g_swapChain->Present(moving ? 0 : 1, 0);
         if (presented == DXGI_STATUS_OCCLUDED) occluded = true;
         else if (presented == DXGI_ERROR_DEVICE_REMOVED || presented == DXGI_ERROR_DEVICE_RESET || !g_target) g_deviceLost = true;
         // Save preferences every second so a crash or shutdown doesn't lose them.
@@ -1225,10 +1239,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
                 // Height dragged beyond the applied layout's, in dp.
                 panels.preferences.windowExtra = std::max(0.f, client.bottom - appliedLayout[0] * g_dpi) / (g_dpi * appliedLayout[3]);
             }
+            // Mini moves the full window's place with it, by their shared top-right corner.
             if (panels.miniMode && !IsIconic(hwnd) && GetWindowRect(hwnd, &window)) {
-                panels.preferences.miniX = window.left;
-                panels.preferences.miniY = window.top;
-                panels.preferences.miniSaved = true;
+                panels.preferences.windowX = window.right - static_cast<LONG>((fullRect.right - fullRect.left) * g_dpi / fullDpi);
+                panels.preferences.windowY = window.top;
             }
             keepSong();
             panels.SavePreferences(preferencesPath, false);
@@ -1236,9 +1250,30 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         // Throttle redraws to ~12 fps when unfocused; playback doesn't depend on
         // frame rate. The engine's WM_NULL posts wait for the next pass then, or
         // each publish would draw a frame; input and hotkeys still end the wait.
-        MsgWaitForMultipleObjectsEx(0, nullptr, ours ? 16 : 80,
-                                    ours ? QS_ALLINPUT : QS_ALLINPUT & ~QS_POSTMESSAGE, MWMO_INPUTAVAILABLE);
+        if (!moving) MsgWaitForMultipleObjectsEx(0, nullptr, ours ? 16 : 80,
+                                                 ours ? QS_ALLINPUT : QS_ALLINPUT & ~QS_POSTMESSAGE, MWMO_INPUTAVAILABLE);
+    };
+    g_drawWhileMoving = [&] { pass(true, true); };
+    while (running) {
+        MSG msg;
+        bool input = false;
+        while (::PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            // Swallow key-downs during a rebind capture so they don't reach
+            // ImGui. Filtered here because Settings can be its own OS window.
+            const bool keyDownMessage = msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN;
+            if ((msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) && msg.wParam == capturedKey) capturedKey = 0;
+            if (keyDownMessage && (capturing || pedalCapturing || (capturedKey != 0 && msg.wParam == capturedKey))) { input = true; continue; }
+            ::TranslateMessage(&msg);
+            ::DispatchMessageW(&msg);
+            if (msg.message == WM_QUIT) running = false;
+            // Raw mouse input, read while a side button is bound, arrives on
+            // every move anywhere and draws nothing.
+            if (msg.message != WM_INPUT) input = true;
+        }
+        if (!running) break;
+        pass(input, false);
     }
+    g_drawWhileMoving = nullptr;
     // Nothing is pumped from here on, so a start now waits for the mutex instead.
     if (receiver) ::DestroyWindow(receiver);
 

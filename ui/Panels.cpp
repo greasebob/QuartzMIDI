@@ -1266,9 +1266,6 @@ void Panels::LoadPreferences(const std::filesystem::path& path) {
         // clamps it further.
         preferences.windowExtra = std::clamp(value("windowExtra", 0.f), 0.f, 16384.f);
         preferences.maximized = value("maximized", false);
-        preferences.miniX = value("miniX", 0);
-        preferences.miniY = value("miniY", 0);
-        preferences.miniSaved = value("miniSaved", false);
         const auto folder = value("midiFolder", std::string());
         preferences.folder = std::filesystem::path(std::u8string(folder.begin(), folder.end()));
         const auto song = value("song", std::string());
@@ -1302,7 +1299,6 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
                         {"tracksOpen", tracksExpanded}, {"velocityOpen", velocityExpanded},
                         {"curveTool", curveTool_},
                         {"windowExtra", preferences.windowExtra}, {"maximized", preferences.maximized},
-                        {"miniX", preferences.miniX}, {"miniY", preferences.miniY}, {"miniSaved", preferences.miniSaved},
                         {"tourSeen", preferences.tourSeen}, {"helpBuild", preferences.helpBuild},
                         {"windowX", preferences.windowX}, {"windowY", preferences.windowY}, {"windowWidth", preferences.windowWidth},
                         {"hideFromCapture", preferences.hideFromCapture}, {"hideFromTaskbar", preferences.hideFromTaskbar},
@@ -3589,8 +3585,17 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
       if (IconButton("##mini-theme", s.dark ? Icon::Moon : Icon::Sun, s.dark ? "Switch to light" : "Switch to dark", s, dpi)) preferences.dark = !preferences.dark;
       ImGui::EndDisabled(); }
     ImGui::SameLine(0, s.spacing.s1);
-    SettingsControl(fonts, design, dpi, engine,
-                    ImVec2(origin.x + size.x - PopoverWidth(design) * dpi - s.spacing.windowPad, origin.y + stripPad + control + s.spacing.s1), 544 * dpi, true);
+    // Settings opens beside mini, top edges level, on the side of the monitor
+    // with room for it, so it never covers the window it belongs to.
+    const float popover = PopoverWidth(design) * dpi;
+    ImVec2 beside(origin.x + size.x + s.spacing.s2, origin.y);
+    for (const auto& monitor : ImGui::GetPlatformIO().Monitors) {
+        const ImVec2 min = monitor.WorkPos, max(min.x + monitor.WorkSize.x, min.y + monitor.WorkSize.y);
+        if (origin.x < min.x || origin.x >= max.x || origin.y < min.y || origin.y >= max.y) continue;
+        if (beside.x + popover > max.x && origin.x - s.spacing.s2 - popover >= min.x) beside.x = origin.x - s.spacing.s2 - popover;
+        break;
+    }
+    SettingsControl(fonts, design, dpi, engine, beside, 544 * dpi, true);
     // Mini leaves out the pills that can't be pressed for a while and narrows to
     // fit the rest; they always span the row, so it ends on the window's edges.
     ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, origin.y + 2 * stripPad + control));

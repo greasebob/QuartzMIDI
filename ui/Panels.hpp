@@ -49,16 +49,13 @@ struct Preferences {
     // paused at its beginning.
     std::filesystem::path lastSong;
     // Full window position and width in screen pixels; width 0 means none saved.
-    // The height is derived from which panels are open.
+    // The height is derived from which panels are open. Mini shares the place:
+    // it opens on the full window's top-right corner, and moving it moves this.
     int windowX = 0, windowY = 0, windowWidth = 0;
     // Any height the full window was dragged beyond that, in dp, and whether it
     // was maximized.
     float windowExtra = 0;
     bool maximized = false;
-    // Mini window position in screen pixels; miniSaved is false until mini has
-    // been shown.
-    int miniX = 0, miniY = 0;
-    bool miniSaved = false;
     // Restore mini mode at startup. The shell switches after placing the full
     // window, because mini records the full window's position to return to.
     bool startMini = false;
