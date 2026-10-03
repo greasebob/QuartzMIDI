@@ -236,6 +236,15 @@ bool IconButton(const char* id, Icon icon, const char* tip, const skin::Skin& s,
     return clicked;
 }
 
+// While held, buttons have no fill or frame until hovered or on, so the one
+// filled button beside them leads. The primary button keeps its own.
+struct BareButtons {
+    BareButtons() { for (const auto colour : {ImGuiCol_Button, ImGuiCol_Border, ImGuiCol_BorderShadow}) ImGui::PushStyleColor(colour, IM_COL32(0, 0, 0, 0)); }
+    ~BareButtons() { ImGui::PopStyleColor(3); }
+    BareButtons(const BareButtons&) = delete;
+    BareButtons& operator=(const BareButtons&) = delete;
+};
+
 // Icon and label are centred as one unit. `active` marks a toggle that is on,
 // styled as in IconButton. `reserve` lists every label the button can show, so
 // it keeps the widest width and neighbouring controls don't shift.
@@ -245,10 +254,11 @@ bool TransportBody(const char* id, const Icon* icon, const char* label,
     ImVec2 min = ImGui::GetCursorScreenPos();
     const float pad = primary ? s.spacing.s4 : s.spacing.s3;
     const float side = 16 * dpi;
-    const float lead = icon ? side + s.spacing.s2 : 0.f;
     const float labelWidth = ImGui::CalcTextSize(label).x;
     float reserved = labelWidth;
     for (const char* other : reserve) reserved = std::max(reserved, ImGui::CalcTextSize(other).x);
+    // Without a label, the icon alone is centred.
+    const float lead = icon ? side + (reserved > 0 ? s.spacing.s2 : 0.f) : 0.f;
     const float width = 2 * pad + lead + reserved;
     const float frameX = min.x;
     min.x += std::floor((reserved - labelWidth) / 2);
@@ -329,7 +339,9 @@ bool DisclosureHeading(const char* id, bool open, const char* label, const std::
 }
 
 // Play, Pause and Cancel share one button with a fixed width.
-bool PlayButton(const char* id, bool playing, int countdown, const skin::Skin& s, float dpi) {
+// `iconOnly` leaves the word to the caller's tooltip, as in mini.
+bool PlayButton(const char* id, bool playing, int countdown, const skin::Skin& s, float dpi, bool iconOnly = false) {
+    if (iconOnly) return TransportButton(id, playing ? Icon::Pause : countdown ? Icon::Stop : Icon::Play, "", s, dpi, true);
     return TransportButton(id, playing ? Icon::Pause : countdown ? Icon::Stop : Icon::Play,
         playing ? "Pause" : countdown ? "Cancel" : "Play", s, dpi, true, false, {"Play", "Pause", "Cancel"});
 }
@@ -373,20 +385,17 @@ bool TickedItem(const char* label, bool on, const skin::Skin& s, float dpi, floa
 // Combo with the drawn chevron. After BeginCombo opens, the last item belongs
 // to the popup, so capture the combo's rect first and draw the chevron on the
 // combo's own window.
-// muted draws the preview greyed, as a device waiting to come back.
+// muted draws the preview greyed, as a device waiting to come back. A preview
+// too long for the frame ends in an ellipsis before the chevron.
+void DrawEllipsis(const std::string& text, float width, ImVec2 min, ImDrawList* dl = nullptr, ImU32 ink = 0);
 bool ChevronCombo(const char* id, const char* preview, bool muted = false) {
-    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const ImVec2 min = ImGui::GetCursorScreenPos(), pad = ImGui::GetStyle().FramePadding;
     const float width = ImGui::CalcItemWidth(), height = ImGui::GetFrameHeight();
     ImDrawList* list = ImGui::GetWindowDrawList();
-    const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
-    const bool open = ImGui::BeginCombo(id, muted ? "" : preview, ImGuiComboFlags_NoArrowButton);
+    const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text), quiet = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+    const bool open = ImGui::BeginCombo(id, "", ImGuiComboFlags_NoArrowButton);
     const float side = height * .5f;
-    if (muted) {
-        const ImVec2 pad = ImGui::GetStyle().FramePadding;
-        list->PushClipRect(min, ImVec2(min.x + width - height, min.y + height), true);
-        list->AddText(ImVec2(min.x + pad.x, min.y + pad.y), ImGui::GetColorU32(ImGuiCol_TextDisabled), preview);
-        list->PopClipRect();
-    }
+    DrawEllipsis(preview, width - pad.x - height, ImVec2(min.x + pad.x, min.y + pad.y), list, muted ? quiet : ink);
     DrawIcon(list, Icon::Down, ImVec2(min.x + width - side - height * .28f, min.y + (height - side) / 2), side, ink, 1.f);
     return open;
 }
@@ -424,12 +433,9 @@ bool ReadoutClick(const char* id, ImVec2 size, double step, double rest, double*
 
 // Six-pixel groove with a full-size mouse/keyboard hit target. ImGui handles
 // drag, focus, navigation and clamping; only the frame is drawn here. With a
-// `rest`, a middle click puts the value back to it, as on the readouts. With a
-// `density`, the groove is deeper and holds a bar per slice, as tall as the
-// slice is busy: accent where the fill has passed, quiet ink ahead of it.
+// `rest`, a middle click puts the value back to it, as on the readouts.
 bool Groove(const char* id, float* value, float low, float high, float width, float height,
-            const skin::Skin& s, float dpi, bool thumb, std::optional<float> rest = {},
-            const std::vector<uint16_t>* density = nullptr) {
+            const skin::Skin& s, float dpi, bool thumb, std::optional<float> rest = {}) {
     const auto min = ImGui::GetCursorScreenPos();
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, (height - ImGui::GetTextLineHeight()) / 2));
     ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 0);
@@ -440,33 +446,24 @@ bool Groove(const char* id, float* value, float low, float high, float width, fl
     ImGui::PopStyleColor(6); ImGui::PopStyleVar(2);
     if (rest && ImGui::IsItemClicked(ImGuiMouseButton_Middle) && *value != *rest) { *value = *rest; changed = true; }
     auto* draw = ImGui::GetWindowDrawList();
-    const bool strip = density && !density->empty();
-    const float depth = strip ? std::max(6 * dpi, height - 8 * dpi) : 6 * dpi;
+    const float depth = 6 * dpi;
     const ImVec2 track(min.x, min.y + (height - depth) / 2);
     skin::RecessedRect(draw, track, ImVec2(track.x + width, track.y + depth), 3 * dpi, s);
     const float fill = high > low ? std::clamp((*value - low) / (high - low), 0.f, 1.f) * width : 0;
-    if (strip) {
-        // The part played is tinted, and bars stand on the floor 2 px in from each edge.
-        if (fill > 0) draw->AddRectFilled(track, ImVec2(track.x + fill, track.y + depth), Colour(s.accent.accentSoft), 3 * dpi);
-        const uint16_t peak = *std::max_element(density->begin(), density->end());
-        const float inset = 2 * dpi, left = track.x + inset, span = width - 2 * inset, floor = track.y + depth - inset;
-        const float slice = span / static_cast<float>(density->size());
-        const float gap = slice >= 3 * dpi ? dpi : 0.f;
-        for (size_t i = 0; peak > 0 && i < density->size(); ++i) {
-            if (!(*density)[i]) continue;
-            const float x0 = std::round(left + slice * static_cast<float>(i)), x1 = std::max(x0 + 1, std::round(left + slice * static_cast<float>(i + 1) - gap));
-            const float tall = std::max(dpi, std::round((depth - 2 * inset) * (*density)[i] / peak));
-            draw->AddRectFilled(ImVec2(x0, floor - tall), ImVec2(x1, floor),
-                                x0 < track.x + fill ? Colour(s.accent.accent) : Colour(s.ink.tertiary));
-        }
-    } else if (fill > 0) draw->AddRectFilled(track, ImVec2(track.x + fill, track.y + 6 * dpi), Faded(s.accent.accent), 3 * dpi);
+    if (fill > 0) draw->AddRectFilled(track, ImVec2(track.x + fill, track.y + depth), Faded(s.accent.accent), 3 * dpi);
     // A groove without a resting handle fades it in on hover and out on leave.
     const float show = thumb ? 1.f : Ease(ImHashStr("thumb", 0, ImGui::GetItemID()), ImGui::IsItemActive() || ImGui::IsItemHovered() ? 1.f : 0.f);
     if (show > 0) {
         const float x = std::clamp(track.x + fill, track.x + 6 * dpi, track.x + width - 6 * dpi);
         const int first = draw->VtxBuffer.Size;
+        // At either end the handle is flush with the groove, which a panel clips at
+        // its edge, so its shadow may spill past the clip by its own spread.
+        const float reach = std::max(s.ambient.blur, s.contact.blur) + std::max(s.ambient.offsetY, s.contact.offsetY);
+        const ImVec2 clipMin = draw->GetClipRectMin(), clipMax = draw->GetClipRectMax();
+        draw->PushClipRect(ImVec2(clipMin.x - reach, clipMin.y - reach), ImVec2(clipMax.x + reach, clipMax.y + reach));
         skin::RaisedRect(draw, ImVec2(x - 6 * dpi, track.y - 4 * dpi), ImVec2(x + 6 * dpi, track.y + depth + 4 * dpi),
                          3 * dpi, s, Faded(s.surface.elevated));
+        draw->PopClipRect();
         if (show < 1) FadeVertices(draw, first, show);
     }
     return changed;
@@ -537,20 +534,6 @@ bool EstimatedSlider(const char* label, const char* id, float* value, float esti
 // Returns the clicked index, or -1. gapAfter separates segments up to that
 // index from the rest with a hairline. `icons`, one per label, draws an icon
 // before each word.
-// A segment's hairline, left out where the sliding thumb covers it: drawn under
-// the thumb it would cross it mid-glide.
-void SegmentHairline(ImDrawList* draw, ImVec2 a, ImVec2 b, float thumbLeft, float thumbRight, ImU32 hairline, float radius, float dpi) {
-    const float border = ImGui::GetStyle().FrameBorderSize;
-    if (border <= 0 || !(hairline & IM_COL32_A_MASK)) return;
-    if (thumbRight <= thumbLeft) { draw->AddRect(a, b, hairline, radius, 0, border); return; }
-    for (const auto& [left, right] : {std::pair{a.x - dpi, thumbLeft}, std::pair{thumbRight, b.x + dpi}}) {
-        if (right <= left) continue;
-        draw->PushClipRect(ImVec2(left, a.y - dpi), ImVec2(right, b.y + dpi), true);
-        draw->AddRect(a, b, hairline, radius, 0, border);
-        draw->PopClipRect();
-    }
-}
-
 int Segments(const char* id, const std::vector<const char*>& labels, int selected, const skin::Skin& s, float dpi,
              int gapAfter = -1, const std::vector<Icon>& icons = {}) {
     const float height = s.metric.controlHeight, inset = s.spacing.s1;
@@ -568,31 +551,48 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
     const auto xOf = [&](int i) { return well.x + inset + i * (segment + inset) + (i > gapAfter ? divide : 0); };
     // The selection is one raised thumb that slides between segments; the buttons
     // over it are transparent.
+    // Unchosen segments are bare words in the well, parted by short dividers that
+    // fade out beside the thumb, so the control reads as one piece.
     const bool thumb = selected >= 0 && selected < static_cast<int>(labels.size());
-    float thumbX = 0;
+    float thumbX = 0, at = -2;
     if (thumb) {
-        const float at = Ease(ImGui::GetID("##thumb"), static_cast<float>(selected));
+        at = Ease(ImGui::GetID("##thumb"), static_cast<float>(selected));
         const int from = static_cast<int>(std::floor(at)), to = std::min(from + 1, static_cast<int>(labels.size()) - 1);
         thumbX = xOf(from) + (xOf(to) - xOf(from)) * (at - from);
-        draw->AddRectFilled(ImVec2(thumbX, well.y + inset), ImVec2(thumbX + segment, well.y + inset + (height - 2 * inset)),
-                            Faded(s.surface.elevated), s.radius.element);
+    }
+    for (int i = 1; i < static_cast<int>(labels.size()); ++i) {
+        const float x = xOf(i) - (i == gapAfter + 1 ? (divide + inset) / 2 : inset / 2);
+        const float clear = thumb ? std::max({thumbX - x, x - thumbX - segment, 0.f}) : segment;
+        const float show = std::clamp((clear - inset) / (segment / 2), 0.f, 1.f);
+        // The gap's divider stays at full strength; the others are a hairline's.
+        const skin::Argb ink = i == gapAfter + 1 ? s.ink.tertiary : s.border.hairline;
+        if (show > 0)
+            draw->AddLine(ImVec2(x, well.y + 2.5f * inset), ImVec2(x, well.y + height - 2.5f * inset),
+                          Faded(Mix(ink & 0xFFFFFFu, ink, show)), dpi);
+    }
+    if (thumb) {
+        const int first = draw->VtxBuffer.Size;
+        skin::RaisedRect(draw, ImVec2(thumbX, well.y + inset), ImVec2(thumbX + segment, well.y + height - inset),
+                         s.radius.element, s, Colour(s.surface.elevated));
+        FadeVertices(draw, first, std::clamp(ImGui::GetStyle().Alpha, 0.f, 1.f));
     }
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, s.radius.element);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-    const ImU32 hairline = ImGui::GetColorU32(ImGuiCol_Border);
     ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
     int clicked = -1, index = 0;
     for (const char* label : labels) {
         const bool chosen = index == selected;
         const float x = xOf(index);
-        if (gapAfter >= 0 && index == gapAfter + 1)
-            draw->AddLine(ImVec2(x - (divide + inset) / 2, well.y + 2 * inset), ImVec2(x - (divide + inset) / 2, well.y + height - 2 * inset),
-                          Faded(s.ink.tertiary), dpi);
         ImGui::SetCursorScreenPos(ImVec2(x, well.y + inset));
         const ImGuiID key = ImGui::GetID(index);
-        const ImU32 fill = Colour(Mix(0, StyleArgb(ImGuiCol_ButtonHovered), EaseHover(key)));
+        const float hover = EaseHover(key);
+        // Hover fills only the segments the thumb is not on.
+        const float under = 1.f - std::clamp(std::abs(at - index), 0.f, 1.f);
+        const ImU32 fill = Colour(Mix(0, StyleArgb(ImGuiCol_ButtonHovered), hover * (1.f - under)));
         ImGui::PushStyleColor(ImGuiCol_Button, fill);
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, fill);
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, fill);
+        ImGui::PushStyleColor(ImGuiCol_Text, Colour(Mix(s.ink.secondary, s.ink.primary, std::max(hover, under))));
         if (icons.size()) {
             // The button is blank; icon and label are drawn over it, centred as one.
             ImGui::PushID(index);
@@ -606,9 +606,7 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
             draw->AddText(ImVec2(left + iconSide + iconGap, (min.y + max.y - text.y) / 2), ink, label);
         } else if (ImGui::Button(label, ImVec2(segment, height - 2 * inset)) && !chosen) clicked = index;
         NoteHover(key);
-        ImGui::PopStyleColor(2);
-        SegmentHairline(draw, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), thumb ? thumbX : 0.f, thumb ? thumbX + segment : 0.f,
-                        hairline, s.radius.element, dpi);
+        ImGui::PopStyleColor(4);
         ++index;
     }
     ImGui::PopStyleColor();
@@ -734,18 +732,19 @@ void MenuUnderLastItem(const char* popup, float gap, bool alignRight = false) {
     ImGui::SetNextWindowPos(ImVec2(alignRight ? max.x : min.x, max.y + gap), ImGuiCond_Appearing, ImVec2(alignRight ? 1.f : 0.f, 0.f));
 }
 
-void DrawEllipsis(const std::string& text, float width, ImVec2 min) {
+void DrawEllipsis(const std::string& text, float width, ImVec2 min, ImDrawList* dl, ImU32 ink) {
     const float height = ImGui::GetTextLineHeight();
-    auto* dl = ImGui::GetWindowDrawList();
+    if (!dl) dl = ImGui::GetWindowDrawList();
+    if (!ink) ink = ImGui::GetColorU32(ImGuiCol_Text);
     dl->PushClipRect(min, ImVec2(min.x + std::max(1.f, width), min.y + height), true);
     const float measured = ImGui::CalcTextSize(text.c_str()).x;
     if (measured > width && width > ImGui::CalcTextSize("...").x) {
         const float available = width - ImGui::CalcTextSize("...").x;
         dl->PushClipRect(min, ImVec2(min.x + available, min.y + height), true);
-        dl->AddText(min, ImGui::GetColorU32(ImGuiCol_Text), text.c_str());
+        dl->AddText(min, ink, text.c_str());
         dl->PopClipRect();
-        dl->AddText(ImVec2(min.x + available, min.y), ImGui::GetColorU32(ImGuiCol_Text), "...");
-    } else dl->AddText(min, ImGui::GetColorU32(ImGuiCol_Text), text.c_str());
+        dl->AddText(ImVec2(min.x + available, min.y), ink, "...");
+    } else dl->AddText(min, ink, text.c_str());
     dl->PopClipRect();
 }
 
@@ -881,30 +880,57 @@ bool StatePill(const char* label, bool on, const Fonts& fonts, const skin::Skin&
     return clicked;
 }
 
+// The pills shown: all of them, or with `onlyAvailable` (mini) not those that
+// need a MIDI input while none is chosen, nor Velocity under MIDI output.
+// Sustain, unavailable only while a song plays, always shows.
+std::vector<const char*> PillLabels(const EngineSnapshot& state, bool onlyAvailable) {
+    const bool input = !state.liveDevice.empty() || !onlyAvailable;
+    std::vector<const char*> labels;
+    if (input) labels.push_back("Midi2Key");
+    if (!state.outputMidi || !onlyAvailable) labels.push_back("Velocity");
+    labels.push_back("Sustain");
+    labels.push_back(state.eightyEightKeys ? "88 Keys" : "61 Keys");
+    if (input) labels.push_back("MidiConnect");
+    labels.push_back("AutoVol");
+    return labels;
+}
+
+// The pills' row at their natural padding, measured as StatePill sizes each
+// one: the label in the on weight, plus 2 dp.
+float PillsWidth(const Fonts& fonts, const skin::Skin& design, float dpi, const std::vector<const char*>& labels, float pad) {
+    FontScope bold(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
+    float width = (labels.size() - 1) * ImGui::GetStyle().ItemSpacing.x;
+    for (const char* label : labels) width += ImGui::CalcTextSize(label).x + 2 * dpi + 2 * pad;
+    return width;
+}
+
 // With a row width, the pills' padding stretches or shrinks so the row ends
 // exactly there, since text widths don't scale exactly with DPI or theme; 0
 // keeps each pill's natural width.
-bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine, float rowWidth) {
+bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine, float rowWidth,
+                bool onlyAvailable = false) {
     const auto state = engine.Snapshot();
+    const auto labels = PillLabels(*state, onlyAvailable);
+    const auto shown = [&](std::string_view label) {
+        return std::any_of(labels.begin(), labels.end(), [&](const char* each) { return label == each; });
+    };
     float pad = 8.f * dpi;
-    if (rowWidth > 0) {
-        // Measured as StatePill sizes each one: the label in the on weight, plus 2 dp.
-        float labels = 0;
-        { FontScope bold(fonts, design, design.type.body * SpecFontScale(design), Weight::Semibold);
-          for (const char* label : {"Midi2Key", "Velocity", "Sustain", state->eightyEightKeys ? "88 Keys" : "61 Keys", "MidiConnect", "AutoVol"})
-              labels += ImGui::CalcTextSize(label).x + 2 * dpi; }
-        pad = std::max(4 * dpi, (rowWidth - 5 * ImGui::GetStyle().ItemSpacing.x - labels) / 12);
+    if (rowWidth > 0)
+        pad = std::max(4 * dpi, (rowWidth - PillsWidth(fonts, design, dpi, labels, 0)) / (2 * labels.size()));
+    if (shown("Midi2Key")) {
+        if (StatePill("Midi2Key", state->liveActive, fonts, design, dpi, pad,
+                      !state->liveDevice.empty(), nullptr))
+            engine.Send({ShellEngine::Action::LiveActive, {}, 0, 0, !state->liveActive});
+        ImGui::SameLine();
     }
-    if (StatePill("Midi2Key", state->liveActive, fonts, design, dpi, pad,
-                  !state->liveDevice.empty(), nullptr))
-        engine.Send({ShellEngine::Action::LiveActive, {}, 0, 0, !state->liveActive});
-    ImGui::SameLine();
     const bool velocityAvailable = !state->outputMidi;
     // Same label in both states, so switching output to MIDI doesn't resize it.
-    if (StatePill("Velocity", velocityAvailable && state->velocity, fonts, design, dpi, pad, velocityAvailable,
-                  nullptr, velocityAvailable ? nullptr : "Unavailable"))
-        engine.Send({ShellEngine::Action::Velocity, {}, 0, 0, !state->velocity});
-    ImGui::SameLine();
+    if (shown("Velocity")) {
+        if (StatePill("Velocity", velocityAvailable && state->velocity, fonts, design, dpi, pad, velocityAvailable,
+                      nullptr, velocityAvailable ? nullptr : "Unavailable"))
+            engine.Send({ShellEngine::Action::Velocity, {}, 0, 0, !state->velocity});
+        ImGui::SameLine();
+    }
     const bool sustainEnabled = !state->playing && !state->liveActive;
     if (StatePill("Sustain", state->sustain, fonts, design, dpi, pad, sustainEnabled,
                   nullptr))
@@ -914,30 +940,38 @@ bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEn
                   fonts, design, dpi, pad, true, nullptr, nullptr, true))
         engine.Send({ShellEngine::Action::EightyEightKeys, {}, 0, 0, !state->eightyEightKeys});
     ImGui::SameLine();
-    if (StatePill("MidiConnect", state->midiConnect, fonts, design, dpi, pad, !state->liveDevice.empty(),
-        nullptr))
-        engine.Send({ShellEngine::Action::MidiConnect, {}, 0, 0, !state->midiConnect});
-    {
+    if (shown("MidiConnect")) {
+        if (StatePill("MidiConnect", state->midiConnect, fonts, design, dpi, pad, !state->liveDevice.empty(),
+            nullptr))
+            engine.Send({ShellEngine::Action::MidiConnect, {}, 0, 0, !state->midiConnect});
         ImGui::SameLine();
-        // Like every other pill, the label is just the name; the fill carries state.
-        return StatePill("AutoVol", state->autoVolume, fonts, design, dpi, pad, true,
-            nullptr);
     }
-    return false;
+    // Like every other pill, the label is just the name; the fill carries state.
+    return StatePill("AutoVol", state->autoVolume, fonts, design, dpi, pad, true, nullptr);
 }
 
-// muted draws the name greyed, as an input waiting to come back.
-bool DevicePill(const std::string& name, float maxWidth, const skin::Skin& s, float dpi, bool muted = false) {
+// muted draws the name greyed, as an input waiting to come back. bare draws the
+// name and a chevron with no fill until hovered, as in mini.
+bool DevicePill(const std::string& name, float maxWidth, const skin::Skin& s, float dpi, bool muted = false, bool bare = false) {
     const auto min = ImGui::GetCursorScreenPos();
-    const float width = std::min(maxWidth, ImGui::CalcTextSize(name.c_str()).x + 26 * dpi);
+    const float side = 16 * dpi, inset = bare ? s.spacing.s2 : s.spacing.s3;
+    const float trail = bare ? s.spacing.s1 + side + s.spacing.s2 : s.spacing.s6 - s.spacing.s3;
+    const float width = std::min(maxWidth, ImGui::CalcTextSize(name.c_str()).x + (bare ? inset + trail : 26 * dpi));
     // The button comes first so the fill can lift on hover and press in while held.
     const bool clicked = ImGui::InvisibleButton("##device-pill", ImVec2(width, s.metric.controlHeight));
     const float hot = Ease(ImHashStr("hover", 0, ImGui::GetItemID()), ImGui::IsItemHovered() ? 1.f : 0.f);
-    const ImU32 fill = ImGui::IsItemActive() ? Colour(s.surface.recessed) : Colour(Mix(s.surface.card, s.surface.elevatedHot, hot));
-    skin::RaisedRect(ImGui::GetWindowDrawList(), min, ImVec2(min.x + width, min.y + s.metric.controlHeight),
-                     s.radius.control, s, fill);
+    auto* draw = ImGui::GetWindowDrawList();
+    const ImVec2 max(min.x + width, min.y + s.metric.controlHeight);
+    if (bare) {
+        const ImU32 fill = ImGui::IsItemActive() ? ImGui::GetColorU32(ImGuiCol_ButtonActive) : ImGui::GetColorU32(ImGuiCol_ButtonHovered, hot);
+        if (ImGui::IsItemActive() || hot > 0) draw->AddRectFilled(min, max, fill, s.radius.control);
+        DrawIcon(draw, Icon::Down, ImVec2(max.x - s.spacing.s2 - side, min.y + (s.metric.controlHeight - side) / 2), side, Colour(s.ink.secondary), dpi);
+    } else {
+        const ImU32 fill = ImGui::IsItemActive() ? Colour(s.surface.recessed) : Colour(Mix(s.surface.card, s.surface.elevatedHot, hot));
+        skin::RaisedRect(draw, min, max, s.radius.control, s, fill);
+    }
     if (muted) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-    DrawEllipsis(name, width - s.spacing.s6, ImVec2(min.x + s.spacing.s3,
+    DrawEllipsis(name, width - inset - trail, ImVec2(min.x + inset,
         min.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2));
     if (muted) ImGui::PopStyleColor();
     // Full name, for when the pill truncates it. A click opens Settings at the input.
@@ -1934,14 +1968,15 @@ float PopoverWidth(const skin::Skin& design) {
 ImVec2 Panels::DesiredSize() const {
     const skin::Skin design = ActiveSkin();
     const auto grow = GrowthOf(design);
-    // Mini sizes to its content: the state pills plus window padding across, and
-    // the 88 dp strip, rows 8 dp apart and the status bar down. Autoplay adds a
-    // row and the up-next line, and a performer another row. Each height leaves
-    // 8 dp below the last row.
+    // Mini sizes to its content: across, the pills it shows plus window padding,
+    // or the top strip's floor when they need less; down, the 88 dp strip and rows
+    // 8 dp apart, with no status bar. Autoplay adds a row and the up-next line,
+    // and a performer another row. Each height leaves 8 dp below the last row.
     if (miniMode) {
         const int rows = miniAutoplay ? (performerRow_ ? 5 : 4) : 3;
-        return ImVec2(528 + 2 * grow.window + 40 * std::max(0.f, grow.text),
-                      (miniAutoplay ? (performerRow_ ? 290.f : 250.f) + std::max(0.f, grow.meta) : 164.f) + rows * grow.control);
+        const float floor = 416 + 2 * grow.window + 34 * std::max(0.f, grow.text);
+        return ImVec2(miniPillsWidth_ > 0 ? std::max(floor, std::ceil(miniPillsWidth_)) : 528 + 2 * grow.window + 40 * std::max(0.f, grow.text),
+                      (miniAutoplay ? (performerRow_ ? 262.f : 222.f) + std::max(0.f, grow.meta) : 136.f) + rows * grow.control);
     }
     return ImVec2(940 + LeftColumnFloor(design) - 240 + RightColumnFloor(design) - 600 + 2 * grow.window, FullHeight());
 }
@@ -2863,22 +2898,22 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     if (revealSettingsHotkeys) ImGui::SetScrollHereY(0.f);
     SettingSwitch("Block Alt+F4 while playing", preferences.blockAltF4, nullptr, fonts, design, dpi);
     {
-        // Action, its key as a keycap, and a button to unbind it. When armed, the cap
-        // says "Press a key" inside the accent ring. A key held by another program
+        // Action, its key as a keycap, and a bare cross to unbind it. When armed, the
+        // cap says "Press a key" inside the accent ring. A key held by another program
         // has the legend's dead-key ink and a warning mark before it.
         const char* actions[kAppHotkeys]{"Play/Pause", "Skip back", "Skip forward", "Stop", "Previous song", "Next song"};
         const char* laterActions[kLaterHotkeyFields.size()]{"Show/hide window"};
         const float height = s.metric.controlHeight, gap = s.spacing.s2, capWidth = 112 * dpi, mark = 14 * dpi;
         auto* draw = ImGui::GetWindowDrawList();
-        // A cap's text, centred, with the warning mark before it when the key is taken.
-        const auto capText = [&](ImVec2 capMin, float capWidth, const std::string& text, bool dead, bool placeholder) {
+        // A cap's text, centred on its face, with the warning mark before it when the key is taken.
+        const auto capText = [&](ImVec2 faceMin, ImVec2 faceMax, const std::string& text, bool dead, bool placeholder) {
             const ImVec2 size = ImGui::CalcTextSize(text.c_str(), nullptr, false);
-            const float lead = dead ? mark + s.spacing.s1 : 0;
-            const float x = capMin.x + (capWidth - size.x - lead) / 2;
+            const float lead = dead ? mark + s.spacing.s1 : 0, middle = (faceMin.y + faceMax.y) / 2;
+            const float x = faceMin.x + (faceMax.x - faceMin.x - size.x - lead) / 2;
             if (dead)
-                DrawIcon(draw, Icon::Warning, ImVec2(x, capMin.y + (height - mark) / 2), mark,
+                DrawIcon(draw, Icon::Warning, ImVec2(x, middle - mark / 2), mark,
                          ImGui::GetColorU32(Colour(s.accent.warn)), dpi);
-            draw->AddText(ImVec2(x + lead, capMin.y + (height - size.y) / 2),
+            draw->AddText(ImVec2(x + lead, middle - size.y / 2),
                           ImGui::GetColorU32(Colour(dead ? s.ink.tertiary : placeholder ? s.ink.secondary : s.ink.primary)),
                           text.c_str());
         };
@@ -2895,13 +2930,15 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             // Draw the key name separately rather than as the button label: a key named
             // "#" would make the label "###cap", which ImGui treats as empty.
             if (EasedButton("##cap", ImVec2(capWidth, height))) clicked = 1;
-            if (armed) capText(ImGui::GetItemRectMin(), capWidth, "Press a key", false, true);
-            else if (bound) capText(ImGui::GetItemRectMin(), capWidth, HotkeyLabel(key), dead, false);
+            const ImVec2 faceMin = ImGui::GetItemRectMin(), faceMax = ImGui::GetItemRectMax();
+            if (armed) capText(faceMin, faceMax, "Press a key", false, true);
+            else if (bound) capText(faceMin, faceMax, HotkeyLabel(key), dead, false);
             if (armed) CaptureRing(draw, s, dpi);
             ImGui::SameLine(0, gap);
             // The cross keeps its place on every row, greyed while there is nothing to unbind.
             ImGui::BeginDisabled(!bound);
-            if (IconButton("##unbind", Icon::Close, "Unbind", s, dpi)) clicked = 2;
+            { BareButtons quiet;
+              if (IconButton("##unbind", Icon::Close, "Unbind", s, dpi)) clicked = 2; }
             ImGui::EndDisabled();
             return clicked;
         };
@@ -2953,20 +2990,22 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
                 place(width);
                 const ImVec2 min = ImGui::GetCursorScreenPos();
                 const bool pressed = EasedButton("##cap", ImVec2(width, height));
+                const ImVec2 faceMin = ImGui::GetItemRectMin(), faceMax = ImGui::GetItemRectMax();
                 const bool overCross = !armed && ImGui::IsItemHovered() && ImGui::GetMousePos().x >= min.x + width - capPad - cross - s.spacing.s1;
                 if (armed) {
-                    capText(min, width, name, false, true);
+                    capText(faceMin, faceMax, name, false, true);
                     CaptureRing(draw, s, dpi);
                 } else {
+                    const float middle = (faceMin.y + faceMax.y) / 2;
                     float textX = min.x + capPad;
                     if (dead) {
-                        DrawIcon(draw, Icon::Warning, ImVec2(textX, min.y + (height - mark) / 2), mark,
+                        DrawIcon(draw, Icon::Warning, ImVec2(textX, middle - mark / 2), mark,
                                  ImGui::GetColorU32(Colour(s.accent.warn)), dpi);
                         textX += mark + s.spacing.s1;
                     }
-                    draw->AddText(ImVec2(textX, min.y + (height - ImGui::GetTextLineHeight()) / 2),
+                    draw->AddText(ImVec2(textX, middle - ImGui::GetTextLineHeight() / 2),
                                   ImGui::GetColorU32(Colour(dead ? s.ink.tertiary : s.ink.primary)), name.c_str());
-                    DrawIcon(draw, Icon::Close, ImVec2(min.x + width - capPad - cross, min.y + (height - cross) / 2), cross,
+                    DrawIcon(draw, Icon::Close, ImVec2(min.x + width - capPad - cross, middle - cross / 2), cross,
                              ImGui::GetColorU32(Colour(overCross ? s.ink.primary : s.ink.tertiary)), dpi);
                     if (overCross) ImGui::SetTooltip("Unbind");
                 }
@@ -3094,12 +3133,14 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
 }
 
 void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float dpi,
-                             ShellEngine& engine, ImVec2 popupPosition, float popupMaxHeight) {
+                             ShellEngine& engine, ImVec2 popupPosition, float popupMaxHeight, bool bare) {
     const auto s = skin::ScaleGeometry(design, dpi);
     const float popupWidth = PopoverWidth(design) * dpi;
     // Show the button as active while its popover is open.
-    if (IconButton("##settings", Icon::Settings, "Settings", s, dpi, ImGui::IsPopupOpen("Settings")))
-        ImGui::OpenPopup("Settings");
+    { std::optional<BareButtons> quiet;
+      if (bare) quiet.emplace();
+      if (IconButton("##settings", Icon::Settings, "Settings", s, dpi, ImGui::IsPopupOpen("Settings")))
+          ImGui::OpenPopup("Settings"); }
 
     // An explicit position isn't clamped by ImGui, so keep the panel on screen
     // here: in mini mode at the bottom edge, its own window would open off the monitor.
@@ -3287,8 +3328,8 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
     else if (!state.error.empty()) fields.push_back(state.error);
     else if (state.busy) fields.push_back("Loading...");
     else {
-        // The sheet export result comes first while there is one; mini has no Export.
-        if (!miniMode && !sheetNote_.empty()) fields.push_back(sheetNote_);
+        // The sheet export result comes first while there is one.
+        if (!sheetNote_.empty()) fields.push_back(sheetNote_);
         fields.push_back(state.playing ? "Playing" : state.midiConnect ? "MidiConnect" : state.liveActive ? "Live" : "Ready");
         // A conversion outlives its popover, so the status bar reports it.
         if (state.converting) fields.push_back(state.settingUp ? "Installing the converter"
@@ -3299,9 +3340,9 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
     // With no song open there are no tracks to count.
     const auto tracks = state.rows.empty() ? std::string() :
         std::to_string(SilentTracks(state.rows)) + " of " + std::to_string(state.rows.size()) + " tracks silent";
-    // Sized from the label so the caller's frame padding can't clip "Log" in mini mode.
+    // Sized from the label so the caller's frame padding can't clip "Log".
     const float logWidth = ImGui::CalcTextSize("Log").x + s.spacing.s6;
-    const float suffix = logWidth + (miniMode ? 0 : ImGui::CalcTextSize(tracks.c_str()).x + s.spacing.s6);
+    const float suffix = logWidth + ImGui::CalcTextSize(tracks.c_str()).x + s.spacing.s6;
     const float end = min.x + width - s.spacing.windowPad - suffix;
     float x = text.x;
     std::string summary;
@@ -3326,7 +3367,7 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
         if (warn) ImGui::PopStyleColor();
         x += fieldWidth;
     }
-    if (!miniMode) draw->AddText(ImVec2(min.x + width - s.spacing.windowPad - logWidth - s.spacing.s2 - ImGui::CalcTextSize(tracks.c_str()).x, text.y), Colour(s.ink.secondary), tracks.c_str());
+    draw->AddText(ImVec2(min.x + width - s.spacing.windowPad - logWidth - s.spacing.s2 - ImGui::CalcTextSize(tracks.c_str()).x, text.y), Colour(s.ink.secondary), tracks.c_str());
     draw->PopClipRect();
     ImGui::SetCursorScreenPos(text);
     ImGui::InvisibleButton("##status", ImVec2(width - 2 * s.spacing.windowPad - logWidth, ImGui::GetTextLineHeight()));
@@ -3334,7 +3375,7 @@ void Panels::DrawStatus(const Fonts& fonts, const skin::Skin& design, float dpi,
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
     ImGui::SetCursorScreenPos(ImVec2(min.x + width - s.spacing.windowPad - logWidth, min.y + 2 * dpi));
     // Styled as an active IconButton while the log is open, easing like one. Under
-    // the log window, as in mini, that styling would only show at its corner.
+    // the log window that styling would only show at its corner.
     const ImRect logButton(min.x + width - s.spacing.windowPad - logWidth, min.y + 2 * dpi,
                            min.x + width - s.spacing.windowPad, min.y + height - 2 * dpi);
     const ImGuiWindow* logWindow = ImGui::FindWindowByName("Log");
@@ -3493,54 +3534,69 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
     // Two rows (device pill, then state pills) with equal 8 dp gaps above, between
     // and below, as elsewhere in mini.
     const float gap = s.spacing.s2, stripPad = gap;
-    const float strip = 3 * stripPad + 2 * control, status = 28 * dpi;
+    const float strip = 3 * stripPad + 2 * control;
     auto* draw = ImGui::GetWindowDrawList();
     draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + strip), Colour(s.surface.structure));
     draw->AddLine(ImVec2(origin.x, origin.y + strip), ImVec2(origin.x + size.x, origin.y + strip), Colour(s.border.hairline));
-    // Three utility slots.
-    const float utilityX = origin.x + size.x - pad - 3 * control - 2 * s.spacing.s2;
-    const float segmentX = utilityX - 172 * dpi;
-    ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, origin.y + stripPad));
+    // A bare icon at an end of a row hangs its empty frame past the window's
+    // padding, so the glyph, not the frame, lines up with the boxes above and below.
+    const float hang = std::floor((control - 16 * dpi) / 2);
+    // Three bare utility slots, a step apart.
+    const float utilityX = origin.x + size.x - pad + hang - 3 * control - 2 * s.spacing.s1;
+    const float segmentX = utilityX - 124 * dpi - s.spacing.s3;
+    // The device name is bare too, its text on the window's edge and its hover
+    // fill a step out from it.
+    const float deviceX = origin.x + pad - s.spacing.s2;
+    ImGui::SetCursorScreenPos(ImVec2(deviceX, origin.y + stripPad));
+    // The same devices menu in both modes; Live names the keyboard played, and
+    // Autoplay where its notes go.
     { FontScope deviceFont(fonts, design, design.type.body * SpecFontScale(design), Weight::Medium);
-      if (DevicePill(DeviceName(*state), std::max(40 * dpi, segmentX - s.spacing.s3 - origin.x - pad), s, dpi, InputWaiting(*state))) ImGui::OpenPopup("MIDI devices"); }
+      const std::string device = !miniAutoplay ? DeviceName(*state) : state->outputMidi ? OutputDeviceName(*state) : "Keystrokes";
+      const bool waiting = !miniAutoplay ? InputWaiting(*state) : state->outputMidi && state->outputDevice.empty() && !state->outputWaiting.empty();
+      if (DevicePill(device, std::max(40 * dpi, segmentX - s.spacing.s3 - deviceX), s, dpi, waiting, true)) ImGui::OpenPopup("MIDI devices"); }
     ImGui::SetCursorScreenPos(ImVec2(segmentX, origin.y + stripPad));
     {
         FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
         const auto well = ImGui::GetCursorScreenPos();
-        const float segmentWidth = 164 * dpi;
+        const float segmentWidth = 124 * dpi;
         skin::RecessedRect(draw, well, ImVec2(well.x + segmentWidth, well.y + control), s.radius.control, s);
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, s.radius.element);
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
         // One raised thumb slides between the modes under transparent buttons, and
-        // is outlined after them so their hairlines don't cover it.
+        // is outlined after them; the other mode is a bare word, as in Segments.
         const float at = Ease(ImGui::GetID("##mini-mode-thumb"), miniAutoplay ? 1.f : 0.f);
-        const ImVec2 thumbMin(well.x + 4 * dpi + at * 80 * dpi, well.y + 4 * dpi);
-        const ImVec2 thumbMax(thumbMin.x + 76 * dpi, thumbMin.y + (control - 8 * dpi));
-        draw->AddRectFilled(thumbMin, thumbMax, Colour(s.surface.elevated), s.radius.element);
-        const ImU32 hairline = ImGui::GetColorU32(ImGuiCol_Border);
+        const ImVec2 thumbMin(well.x + 4 * dpi + at * 60 * dpi, well.y + 4 * dpi);
+        const ImVec2 thumbMax(thumbMin.x + 56 * dpi, thumbMin.y + (control - 8 * dpi));
+        skin::RaisedRect(draw, thumbMin, thumbMax, s.radius.element, s, Colour(s.surface.elevated));
         for (int mode = 0; mode < 2; ++mode) {
-            ImGui::SetCursorScreenPos(ImVec2(well.x + 4 * dpi + mode * 80 * dpi, well.y + 4 * dpi));
+            ImGui::SetCursorScreenPos(ImVec2(well.x + 4 * dpi + mode * 60 * dpi, well.y + 4 * dpi));
+            const float under = 1.f - std::abs(at - mode);
             ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(0, 0, 0, 0));
             ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0, 0, 0, 0));
-            if (EasedButton(mode ? "Autoplay" : "Live", ImVec2(76 * dpi, control - 8 * dpi))) miniAutoplay = mode == 1;
-            ImGui::PopStyleColor(2);
-            SegmentHairline(draw, ImGui::GetItemRectMin(), ImGui::GetItemRectMax(), thumbMin.x, thumbMax.x, hairline, s.radius.element, dpi);
+            ImGui::PushStyleColor(ImGuiCol_Text, Colour(Mix(s.ink.secondary, s.ink.primary, under)));
+            if (EasedButton(mode ? "Auto" : "Live", ImVec2(56 * dpi, control - 8 * dpi))) miniAutoplay = mode == 1;
+            ImGui::PopStyleColor(3);
         }
         draw->AddRect(thumbMin, thumbMax, Colour(s.accent.accent), s.radius.element, 0, dpi);
         ImGui::PopStyleVar(2);
         ImGui::SetCursorScreenPos(ImVec2(well.x + segmentWidth + s.spacing.s2, well.y));
     }
     ImGui::SetCursorScreenPos(ImVec2(utilityX, origin.y + stripPad));
-    if (IconButton("##restore-full", Icon::Expand, "Full window", s, dpi)) miniMode = false;
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!themes.Active(preferences.theme).paired);
-    if (IconButton("##mini-theme", s.dark ? Icon::Moon : Icon::Sun, s.dark ? "Switch to light" : "Switch to dark", s, dpi)) preferences.dark = !preferences.dark;
-    ImGui::EndDisabled();
-    ImGui::SameLine();
+    { BareButtons quiet;
+      if (IconButton("##restore-full", Icon::Expand, "Full window", s, dpi)) miniMode = false;
+      ImGui::SameLine(0, s.spacing.s1);
+      ImGui::BeginDisabled(!themes.Active(preferences.theme).paired);
+      if (IconButton("##mini-theme", s.dark ? Icon::Moon : Icon::Sun, s.dark ? "Switch to light" : "Switch to dark", s, dpi)) preferences.dark = !preferences.dark;
+      ImGui::EndDisabled(); }
+    ImGui::SameLine(0, s.spacing.s1);
     SettingsControl(fonts, design, dpi, engine,
-                    ImVec2(origin.x + size.x - PopoverWidth(design) * dpi - s.spacing.windowPad, origin.y + stripPad + control + s.spacing.s1), 544 * dpi);
+                    ImVec2(origin.x + size.x - PopoverWidth(design) * dpi - s.spacing.windowPad, origin.y + stripPad + control + s.spacing.s1), 544 * dpi, true);
+    // Mini leaves out the pills that can't be pressed for a while and narrows to
+    // fit the rest; they always span the row, so it ends on the window's edges.
     ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, origin.y + 2 * stripPad + control));
-    if (StatePills(fonts, design, dpi, engine, size.x - 2 * pad)) autoVolumeOpen = true;
+    const float pillsWidth = PillsWidth(fonts, design, dpi, PillLabels(*state, true), 8 * dpi);
+    miniPillsWidth_ = (pillsWidth + 2 * pad) / dpi;
+    if (StatePills(fonts, design, dpi, engine, size.x - 2 * pad, true)) autoVolumeOpen = true;
     const float row = origin.y + strip + gap;
     ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, row));
     const auto number = [&](ShellEngine::Action action, double value) { engine.Send({action, {}, state->generation, 0, false, value}); };
@@ -3576,9 +3632,11 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         draw->AddText(ImVec2(transposeMin.x + std::floor((48 * dpi - ImGui::CalcTextSize(transposeText).x) / 2),
                              transposeMin.y + (control - ImGui::GetTextLineHeight()) / 2), Colour(s.ink.primary), transposeText);
     } else {
-        // Solo Piano is labelled, as on the Tracks panel, so the file name gives up the width.
-        const float soloWidth = 2 * s.spacing.s3 + 16 * dpi + s.spacing.s2 + ImGui::CalcTextSize("Solo Piano").x;
-        ImGui::SetNextItemWidth(size.x - 2 * pad - control - soloWidth - 2 * ImGui::GetStyle().ItemSpacing.x);
+        // The song is the row's one box; Solo Piano and Add are bare icons after it.
+        // Solo Piano is left out for a song that is all piano, where it has nothing
+        // to mute, as the pills that can't be pressed are.
+        const bool solo = state->rows.empty() || !AllPiano(state->rows);
+        ImGui::SetNextItemWidth(size.x - 2 * pad + hang - (solo ? 2 : 1) * (control + s.spacing.s1));
         const auto fileName = state->loaded.empty() ? "Choose MIDI file" : Utf8(state->loaded.filename());
         const bool fileOpen = ChevronCombo("##mini-file", fileName.c_str());
         if (fileOpen) {
@@ -3604,14 +3662,20 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
                 }
             ImGui::EndCombo();
         }
-        ImGui::SameLine(); ImGui::BeginDisabled(state->rows.empty() || state->busy || AllPiano(state->rows));
-        { const bool applied = SoloPianoApplied(state->rows);
-          if (TransportButton("##mini-solo-piano", Icon::Piano, "Solo Piano", s, dpi, false, applied))
-              engine.Send({applied ? ShellEngine::Action::UnmuteAll : ShellEngine::Action::SoloPiano, {}, state->generation}); }
-        ImGui::EndDisabled();
-        ImGui::SameLine();
+        if (solo) {
+            ImGui::SameLine(0, s.spacing.s1); ImGui::BeginDisabled(state->rows.empty() || state->busy);
+            { BareButtons quiet;
+              const bool applied = SoloPianoApplied(state->rows);
+              if (IconButton("##mini-solo-piano", Icon::Piano, "Solo Piano", s, dpi, applied))
+                  engine.Send({applied ? ShellEngine::Action::UnmuteAll : ShellEngine::Action::SoloPiano, {}, state->generation});
+              if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip | ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Solo Piano"); }
+            ImGui::EndDisabled();
+        }
+        ImGui::SameLine(0, s.spacing.s1);
         // The two ways to open files, as behind the full window's plus button.
-        if (IconButton("##mini-open", Icon::Plus, "Add MIDI files", s, dpi)) ImGui::OpenPopup("Add MIDI files");
+        bool add = false;
+        { BareButtons quiet; add = IconButton("##mini-open", Icon::Plus, "Add MIDI files", s, dpi); }
+        if (add) ImGui::OpenPopup("Add MIDI files");
         MenuUnderLastItem("Add MIDI files", s.spacing.s1, true);
         if (ImGui::BeginPopup("Add MIDI files")) {
             if (ImGui::MenuItem("Open MIDI file...")) {
@@ -3624,14 +3688,14 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             }
             ImGui::EndPopup();
         }
-        // The song Next loads, under the open one and in line with its name.
+        // The song Next loads, under the open one, on the same edges as the times under it.
         const float nextLine = (16 + std::max(0.f, GrowthOf(design).meta)) * dpi, nextY = row + control + gap / 2;
         // A looped section's bounds end that line, above the groove its handles are on,
         // as the transport row has no room for them.
         std::string bounds = LoopSection(*state) ? SectionBounds(*state) : std::string();
         if (!state->upNext.empty() || !bounds.empty()) {
             FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
-            const float x = origin.x + pad + ImGui::GetStyle().FramePadding.x, y = nextY + (nextLine - ImGui::GetTextLineHeight()) / 2;
+            const float x = origin.x + pad, y = nextY + (nextLine - ImGui::GetTextLineHeight()) / 2;
             const float boundsWidth = bounds.empty() ? 0.f : ImGui::CalcTextSize(bounds.c_str()).x;
             if (!bounds.empty()) draw->AddText(ImVec2(origin.x + size.x - pad - boundsWidth, y), Colour(s.accent.accent), bounds.c_str());
             if (!state->upNext.empty()) {
@@ -3643,16 +3707,31 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
                 ImGui::PopStyleColor();
             }
         }
-        ImGui::BeginDisabled(state->loaded.empty() || state->rows.empty() || state->busy);
+        const bool noSong = state->loaded.empty() || state->rows.empty() || state->busy;
+        ImGui::BeginDisabled(noSong);
         const float seekHeight = 22 * dpi, seekY = nextY + nextLine + gap / 2, transportY = seekY + seekHeight + gap;
-        const ImVec2 seekMin(origin.x + pad, seekY);
+        // The time played, or the countdown, before the groove and the song's
+        // length after it, as on a music player.
+        const std::string length = Time(state->duration);
+        const std::string played = state->playbackCountdown ? "Starts in " + std::to_string(state->playbackCountdown) + "s"
+                                                            : Time(seeking_ ? seekPosition_ : state->position);
+        float playedWidth = 0, lengthWidth = 0;
+        { FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
+          playedWidth = std::max(ImGui::CalcTextSize(played.c_str()).x, ImGui::CalcTextSize(length.c_str()).x);
+          lengthWidth = ImGui::CalcTextSize(length.c_str()).x;
+          const float textY = seekY + (seekHeight - ImGui::GetTextLineHeight()) / 2;
+          const ImU32 ink = Colour(noSong ? s.ink.tertiary : s.ink.secondary);
+          draw->AddText(ImVec2(origin.x + pad + playedWidth - ImGui::CalcTextSize(played.c_str()).x, textY), ink, played.c_str());
+          draw->AddText(ImVec2(origin.x + size.x - pad - lengthWidth, textY), ink, length.c_str()); }
+        const ImVec2 seekMin(origin.x + pad + playedWidth + s.spacing.s3, seekY);
+        const float seekWidth = size.x - 2 * pad - playedWidth - lengthWidth - 2 * s.spacing.s3;
         const bool section = LoopSection(*state);
-        if (section) SendLoopHandle(SectionHandles(seekMin, size.x - 2 * pad, seekHeight, *state, dpi, loopHandle_, loopHandleAt_), engine, *state);
+        if (section) SendLoopHandle(SectionHandles(seekMin, seekWidth, seekHeight, *state, dpi, loopHandle_, loopHandleAt_), engine, *state);
         ImGui::SetCursorScreenPos(seekMin);
         if (!seeking_ || seekGeneration_ != state->generation) { seekPosition_ = static_cast<float>(state->position); seeking_ = false; }
         const bool changed = Groove("##mini-seek", &seekPosition_, 0, static_cast<float>(std::max(.001, state->duration)),
-            size.x - 2 * pad, seekHeight, s, dpi, false, {}, state->density.get());
-        if (section) DrawSection(ImGui::GetWindowDrawList(), seekMin, size.x - 2 * pad, seekHeight, *state, loopHandle_, loopHandleAt_, s, dpi);
+            seekWidth, seekHeight, s, dpi, false);
+        if (section) DrawSection(ImGui::GetWindowDrawList(), seekMin, seekWidth, seekHeight, *state, loopHandle_, loopHandleAt_, s, dpi);
         if (ImGui::IsItemActivated()) { seeking_ = true; seekGeneration_ = state->generation; }
         if (seeking_ && ImGui::IsItemDeactivatedAfterEdit()) { number(ShellEngine::Action::Seek, seekPosition_); seeking_ = false; }
         else if (changed && !ImGui::IsItemActive()) number(ShellEngine::Action::Seek, seekPosition_);
@@ -3664,9 +3743,7 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             const float at = std::clamp((ImGui::GetIO().MousePos.x - barMin.x - 2) / std::max(1.f, barMax.x - barMin.x - 4), 0.f, 1.f);
             ImGui::SetTooltip("%s", Time(at * state->duration).c_str());
         }
-        ImGui::SetCursorScreenPos(ImVec2(origin.x + pad, transportY));
-        if (PlayButton("##mini-play", state->playing, state->playbackCountdown, s, dpi))
-            engine.Send({ShellEngine::Action::PlayCountdown, {}, state->generation});
+        ImGui::EndDisabled();
         // No legend in mini: each button's hotkey is in its tooltip. A performer key
         // that plays belongs to Play.
         const PerformerTrigger noTrigger;
@@ -3679,25 +3756,49 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         const auto under = [&](size_t hotkey) {
             if (!keyOf(hotkey).empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", keyOf(hotkey).c_str());
         };
-        under(0);
-        ImGui::SameLine();
+        // Spread across the window, Play in the middle and the only filled button:
+        // the song's own controls beside it, the files' outside them and Stop at
+        // the end, bare. The buttons' total width is last frame's, kept in the
+        // window's storage.
+        const std::string back = SeekLabel(state->seekStep, false), forward = SeekLabel(state->seekStep, true);
+        const ImGuiID buttonsId = ImGui::GetID("##mini-transport-buttons");
+        const float span = size.x - 2 * pad + 2 * hang;
+        const float buttons = ImGui::GetStateStorage()->GetFloat(buttonsId, span);
+        const float spread = std::max(s.spacing.s1, std::floor((span - buttons) / 6));
+        float measured = 0;
+        const auto measure = [&] { measured += ImGui::GetItemRectSize().x; };
+        // Whole pixels between the buttons, the rest split between the ends.
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + pad - hang + std::max(0.f, std::floor((span - buttons - 6 * spread) / 2)), transportY));
+        const bool noFiles = state->files->empty() || state->busy;
+        {
+        BareButtons quiet;
+        ImGui::BeginDisabled(noSong);
         if (IconButton("##mini-restart", Icon::Restart, "Restart", s, dpi)) engine.Send({ShellEngine::Action::Restart, {}, state->generation});
-        ImGui::SameLine();
-        // Labelled, as in the full window, so the seek buttons look the same in both layouts.
-        if (TransportButton("##mini-back10", SeekLabel(state->seekStep, false).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Back10, {}, state->generation});
-        under(1);
-        ImGui::SameLine();
-        if (TransportButton("##mini-forward10", SeekLabel(state->seekStep, true).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Forward10, {}, state->generation});
-        under(2);
-        ImGui::EndDisabled();
-        ImGui::SameLine(); ImGui::BeginDisabled(state->files->empty() || state->busy);
+        measure(); ImGui::EndDisabled();
+        ImGui::SameLine(0, spread); ImGui::BeginDisabled(noFiles);
         if (IconButton("##mini-prev", Icon::Left, tipped("Previous MIDI file", 4).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Previous, {}, state->generation});
-        ImGui::SameLine();
+        measure(); ImGui::EndDisabled();
+        ImGui::SameLine(0, spread); ImGui::BeginDisabled(noSong);
+        // Labelled, as in the full window, so the seek buttons look the same in both layouts.
+        if (TransportButton("##mini-back10", back.c_str(), s, dpi)) engine.Send({ShellEngine::Action::Back10, {}, state->generation});
+        measure(); under(1);
+        ImGui::SameLine(0, spread);
+        if (PlayButton("##mini-play", state->playing, state->playbackCountdown, s, dpi, true))
+            engine.Send({ShellEngine::Action::PlayCountdown, {}, state->generation});
+        measure();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip))
+            ImGui::SetTooltip("%s", tipped(state->playing ? "Pause" : state->playbackCountdown ? "Cancel" : "Play", 0).c_str());
+        ImGui::SameLine(0, spread);
+        if (TransportButton("##mini-forward10", forward.c_str(), s, dpi)) engine.Send({ShellEngine::Action::Forward10, {}, state->generation});
+        measure(); under(2);
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, spread); ImGui::BeginDisabled(noFiles);
         if (IconButton("##mini-next", Icon::Right, tipped("Next MIDI file", 5).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Next, {}, state->generation});
-        ImGui::EndDisabled(); ImGui::SameLine();
+        measure(); ImGui::EndDisabled(); ImGui::SameLine(0, spread);
         if (IconButton("##mini-stop", Icon::Stop, tipped("Stop all output and cancel countdown", 3).c_str(), s, dpi)) engine.Send({ShellEngine::Action::Stop});
-        TimeReadout(draw, *state, false, ImGui::GetItemRectMax().x + s.spacing.s3, origin.x + size.x - pad,
-                    transportY + (control - ImGui::GetTextLineHeight()) / 2, s);
+        measure();
+        }
+        ImGui::GetStateStorage()->SetFloat(buttonsId, measured);
         // Performer row, as on the Playback card, without labels to fit the state
         // pills' width.
         if (PerformerRow(*state)) {
@@ -3714,9 +3815,10 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             ImGui::EndDisabled();
         }
     }
-    DrawStatus(fonts, design, dpi, *state, ImVec2(origin.x, origin.y + size.y - status), size.x, status);
     ImGui::PopStyleVar();
-    DrawUpdateToast(fonts, design, dpi, origin, size, origin.y + size.y - status);
+    // No status bar: what only it said comes up as a toast.
+    DrawMiniNotice(fonts, design, dpi, *state, origin, size);
+    DrawUpdateToast(fonts, design, dpi, origin, size, origin.y + size.y);
 }
 
 // Help: search over every question, a chip filtering to this build's additions,
@@ -3948,8 +4050,65 @@ void Panels::DrawTour(const Fonts& fonts, const skin::Skin& design, float dpi, I
     ImGui::EndPopup();
 }
 
+float Panels::UpdateToastHeight(const skin::Skin& design, float dpi) const {
+    if (!preferences.checkForUpdates || update.version.empty() || updateDismissed_ || tourStop >= 0) return 0;
+    const auto s = skin::ScaleGeometry(design, dpi);
+    return s.metric.controlHeight + 2 * s.spacing.s2;
+}
+
+void Panels::DrawMiniNotice(const Fonts& fonts, const skin::Skin& design, float dpi, const EngineSnapshot& state, ImVec2 origin, ImVec2 size) {
+    // The status bar's failure, else a conversion, which outlives its popover.
+    const bool failed = !panelError_.empty() || !state.error.empty();
+    const std::string text = !panelError_.empty() ? panelError_ : !state.error.empty() ? state.error
+        : !state.converting ? std::string() : state.settingUp ? "Installing the converter" : state.signingIn ? "Signing in to YouTube" : "Converting audio";
+    // Closed until it says something else; the same failure coming back later shows again.
+    if (text.empty()) noticeClosed_.clear();
+    if (text.empty() || text == noticeClosed_ || tourStop >= 0) { noticeFade_ = 0; return; }
+    const auto s = skin::ScaleGeometry(design, dpi);
+    // In over 200 ms, rising a few pixels as it fades in, as the update toast does.
+    noticeFade_ = std::min(1.f, noticeFade_ + ImGui::GetIO().DeltaTime / .2f);
+    const float fade = TourEase(noticeFade_);
+    FontScope font(fonts, design, design.type.body * SpecFontScale(design));
+    const float pad = s.spacing.s2, side = 16 * dpi, margin = s.spacing.s3, control = s.metric.controlHeight;
+    const float logWidth = 2 * s.spacing.s3 + ImGui::CalcTextSize("Log").x;
+    const float width = size.x - 2 * margin, height = control + 2 * pad;
+    const float under = UpdateToastHeight(design, dpi);
+    const float bottom = origin.y + size.y - margin - (under > 0 ? under + s.spacing.s2 : 0.f);
+    ImGui::SetNextWindowPos(ImVec2(origin.x + margin, bottom - height + (1 - fade) * 8 * dpi));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    const bool open = ImGui::Begin("##mini-notice", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav);
+    ImGui::PopStyleVar(2);
+    if (open) {
+        ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
+        auto* draw = ImGui::GetWindowDrawList();
+        const int firstVertex = draw->VtxBuffer.Size;
+        const ImVec2 min = ImGui::GetWindowPos(), max(min.x + width, min.y + height);
+        skin::RaisedRect(draw, min, max, s.radius.card, s, Colour(s.surface.elevated));
+        DrawIcon(draw, failed ? Icon::Warning : Icon::Audio, ImVec2(min.x + pad + s.spacing.s2, min.y + (height - side) / 2), side,
+                 Colour(failed ? s.accent.warn : s.accent.accent), dpi);
+        const float textX = min.x + pad + s.spacing.s2 + side + s.spacing.s2;
+        const float textEnd = max.x - pad - control - s.spacing.s1 - logWidth - s.spacing.s2;
+        DrawEllipsis(text, textEnd - textX, ImVec2(textX, min.y + (height - ImGui::GetTextLineHeight()) / 2), draw);
+        // The whole message, for when it is cut.
+        ImGui::SetCursorScreenPos(ImVec2(textX, min.y + pad));
+        ImGui::InvisibleButton("##notice-text", ImVec2(std::max(1.f, textEnd - textX), control));
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", text.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(textEnd + s.spacing.s2, min.y + pad));
+        if (TransportBody("##notice-log", nullptr, "Log", s, dpi, false, logOpen)) logOpen = !logOpen;
+        ImGui::SameLine(0, s.spacing.s1);
+        bool close = false;
+        { BareButtons quiet; close = IconButton("##notice-close", Icon::Close, "Close", s, dpi); }
+        if (close) noticeClosed_ = text;
+        if (fade < 1) FadeVertices(draw, firstVertex, fade);
+    }
+    ImGui::End();
+}
+
 void Panels::DrawUpdateToast(const Fonts& fonts, const skin::Skin& design, float dpi, ImVec2 origin, ImVec2 size, float bottom) {
-    if (!preferences.checkForUpdates || update.version.empty() || updateDismissed_ || tourStop >= 0) return;
+    if (UpdateToastHeight(design, dpi) == 0) return;
     const auto s = skin::ScaleGeometry(design, dpi);
     // In over 200 ms, rising a few pixels as it fades in.
     updateFade_ = std::min(1.f, updateFade_ + ImGui::GetIO().DeltaTime / .2f);

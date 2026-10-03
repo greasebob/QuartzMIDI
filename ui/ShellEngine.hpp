@@ -251,9 +251,6 @@ struct EngineSnapshot {
     // in the list followed (SongsFollowed), or the one Shuffle Play has drawn. Empty when it would be
     // the open song again.
     std::filesystem::path upNext;
-    // Notes struck in each of kDensitySlices slices of the open song, drawn in
-    // the mini window's seek bar; empty with no song open.
-    std::shared_ptr<const std::vector<uint16_t>> density = std::make_shared<const std::vector<uint16_t>>();
     // The lists the Files panel shows besides the folder, kept in library.json
     // beside config.json. Shared, as files is, so a publish copies no list.
     std::shared_ptr<const LibraryLists> library = std::make_shared<const LibraryLists>();

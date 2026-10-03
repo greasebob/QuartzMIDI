@@ -192,6 +192,9 @@ private:
     void DrawHelp(const Fonts&, const skin::Skin&, float, const EngineSnapshot&);
     void DrawTour(const Fonts&, const skin::Skin&, float, ImVec2, ImVec2);
     bool performerRow_ = false;
+    // Mini's pills at their natural width plus the window's padding, in logical
+    // pixels, as last drawn; 0 until mini is drawn.
+    float miniPillsWidth_ = 0;
     char helpSearch_[128]{};
     int helpFolderRevealed_ = -1;
     // Screen rect of each tour stop's control, recorded as it draws, so the tour
@@ -308,14 +311,22 @@ private:
     bool revealShowHideKey_ = false;
     bool volumeWasOpen_ = false;
     GameWindow volumeWindow_;
-    void SettingsControl(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, float);
+    void SettingsControl(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, float, bool bare = false);
     void DrawMini(HWND, const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, ImVec2);
     void DrawStatus(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, float, float);
     // A newer release as a card in the window's bottom-right corner, above the
-    // status bar whose top is `bottom`, until Later or Update closes it.
+    // status bar whose top is `bottom` (mini's bottom edge in mini), until Later
+    // or Update closes it.
     void DrawUpdateToast(const Fonts&, const skin::Skin&, float, ImVec2, ImVec2, float bottom);
     bool updateDismissed_ = false;
     float updateFade_ = 0;
+    // Mini has no status bar: a failure or a running conversion shows as a toast
+    // over its bottom edge, above the update toast, until closed or replaced.
+    // Returns the update toast's height when it shows, so the notice can sit on it.
+    float UpdateToastHeight(const skin::Skin&, float) const;
+    void DrawMiniNotice(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, ImVec2);
+    std::string noticeClosed_;
+    float noticeFade_ = 0;
     // The position and length right-aligned at `right`, with a looped section's
     // bounds before them while there is room after `left`.
     void TimeReadout(ImDrawList*, const EngineSnapshot&, bool section, float left, float right, float y, const skin::Skin&) const;

@@ -1488,27 +1488,12 @@ void ShellEngine::Run(std::stop_token stop) {
         touchConfig();
         flushConfig();
     };
-    // The mini window's busy strip counts the notes of the tracks heard only.
-    const auto countDensity = [&] {
-        if (!player) return;
-        const bool anySolo = AnySolo(state.rows);
-        std::vector<double> strikes;
-        for (const auto& event : player->note_events) {
-            if (event.action != EventType::Press || PedalForName(event.note_or_control) >= 0) continue;
-            const auto row = std::find_if(state.rows.begin(), state.rows.end(),
-                [&](const TrackRow& candidate) { return candidate.index == static_cast<size_t>(event.trackIndex); });
-            if (row != state.rows.end() && TrackAudible(*row, anySolo)) strikes.push_back(static_cast<double>(event.time.count()) / 1e9);
-        }
-        auto density = NoteDensity(strikes, state.duration);
-        if (!state.density || *state.density != density) state.density = std::make_shared<const std::vector<uint16_t>>(std::move(density));
-    };
     const auto applyTracks = [&] {
         if (!player) return;
         for (const auto& row : state.rows) {
             player->set_track_mute(row.index, row.muted);
             player->set_track_solo(row.index, row.solo);
         }
-        countDensity();
     };
     const auto invalidateSheet = [&] {
         state.sheetText = std::make_shared<const std::string>();
@@ -2191,7 +2176,6 @@ void ShellEngine::Run(std::stop_token stop) {
                     state.loaded.clear();
                     state.rows.clear();
                     state.duration = state.position = 0;
-                    state.density = std::make_shared<const std::vector<uint16_t>>();
                     invalidateSheet();
                     ++state.generation;
                     // Drum detection only labels tracks; detected drums are
@@ -2243,7 +2227,6 @@ void ShellEngine::Run(std::stop_token stop) {
                     applyTracks();
                     if (!player->note_events.empty())
                         state.duration = static_cast<double>(player->note_events.back().time.count()) / 1e9;
-                    countDensity();
                     if (sameFile) state.position = std::clamp(keepPosition, 0.0, state.duration);
                     // Another song's section is the whole song until its handles move.
                     if (sameFile && state.loopEnd > state.loopStart && state.loopStart < state.duration)
