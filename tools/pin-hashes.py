@@ -1,4 +1,4 @@
-"""Pin SHA-256 hashes in tools/mp3-to-midi/requirements.txt.
+"""Pin SHA-256 hashes in tools/mp3-to-midi/requirements*.txt.
 
     python tools/pin-hashes.py
 
@@ -73,4 +73,5 @@ def pin(path):
     open(path, 'w', encoding='utf-8', newline='\n').write('\n'.join(out))
 
 
-pin(os.path.join(here, 'requirements.txt'))
+for name in ('requirements.txt', 'requirements-directml.txt', 'requirements-cuda12.txt', 'requirements-cuda13.txt'):
+    pin(os.path.join(here, name))

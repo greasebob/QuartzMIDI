@@ -166,7 +166,8 @@ struct RawNoteEvent {
 };
 
 // The three piano pedals a file can carry, by the controller that sends each.
-// note_or_control names them; only sustain reaches the keystroke target.
+// note_or_control names them; sustain and sostenuto reach the keystroke
+// target, soft only a MIDI port, since the game has no soft pedal bind.
 inline constexpr std::string_view kPedalNames[3] = { "sustain", "sostenuto", "soft" };
 inline constexpr uint8_t kPedalControllers[3] = { 64, 66, 67 };
 
@@ -322,6 +323,10 @@ public:
     // a song plays and while live input is open, over every player. This is
     // how many hold it now.
     static int timer_resolution_holds() noexcept;
+    // Takes or gives back one hold of the finest timer tick; the first hold
+    // asks Windows for it and the last gives it back. MIDIConnect takes one
+    // while its device is open.
+    static void hold_timer_resolution(bool hold) noexcept;
 
     // Static handle for command event
     static HANDLE command_event;
@@ -438,6 +443,13 @@ public:
     SentVelocity sent_velocity;
     bool isSustainPressed{ false };
     WORD sustain_key_code{ 0 };
+    // The sostenuto key, held while the pedal is down; never inverted, and
+    // sent whatever the sustain mode.
+    bool isSostenutoPressed{ false };
+    WORD sostenuto_key_code{ 0 };
+    void release_sostenuto_key();
+    // Takes the pedal up on the old key first, so a held one is not left down.
+    void set_sostenuto_key(WORD vk);
 
     bool ENABLE_OUT_OF_RANGE_TRANSPOSE{ false };
 
@@ -529,9 +541,6 @@ private:
 
     std::mutex buffer_mutex;
     PlaybackControl playback_control;
-    // Takes or gives back one hold of the finest timer tick; the first hold
-    // asks Windows for it and the last gives it back.
-    static void hold_timer_resolution(bool hold) noexcept;
     // Holds live input has taken with hold_live_timer.
     std::atomic<int> live_timer_holds{ 0 };
     // A send that came back short is logged once a song: cleared when a song
@@ -551,6 +560,7 @@ private:
     // produce one keypress.
     std::unordered_map<std::string, std::chrono::nanoseconds> last_strike_time;
     std::set<int> sustain_owners;
+    std::set<int> sostenuto_owners;
     // The MIDI target sends each pedal's value as the file has it. Each track's
     // latest value is kept with its time, since a late batch runs releases
     // before presses; the port gets the highest across tracks. sent is -1 when
@@ -663,6 +673,14 @@ private:
     // down again, or on the MIDI target each pedal's value is sent, merged
     // over tracks as playing merges it. Called with the keys released.
     void restore_pedal(size_t index);
+    // Set by the same jumps and by a pause: the notes the song holds where it
+    // goes on are pressed again once it is heard, as play_song's loop reaches
+    // them. Playback thread only.
+    bool chase_pending = false;
+    // Presses the notes held at index, struck before position and let go at
+    // least 30 ms after it on a track heard, as one batch of the song. A note
+    // whose key is already down is left as it is.
+    void chase_notes(size_t index, std::chrono::nanoseconds position);
     // Lets the pedal go and nothing else, for a Tap loop's wrap, where the
     // keys a tap holds are the tap's to let go.
     void release_pedal();

@@ -1,0 +1,24 @@
+# The CUDA 13 engine, for NVIDIA cards from the RTX 20 series (compute
+# capability 7.5) on, with driver 580 or later. Installed with --no-deps beside
+# requirements.txt; tools\pin-hashes.py writes the hashes.
+#
+# onnxruntime-gpu 1.30 is built with CUDA 13.0, its Windows build holding code
+# for 7.5, 8.6, 8.9 and 12.0, so the RTX 50 series runs it natively. CUDA 13's
+# libraries no longer support Pascal or Volta, which get requirements-cuda12.txt.
+
+onnxruntime-gpu==1.30.0 \
+    --hash=sha256:882da66f936e1f560b155118c5953dc45268cd92893abb8d31a940f4d1effb36
+nvidia-cuda-runtime==13.4.92 \
+    --hash=sha256:08dca5e4aba480c2fd5b55075c0fa71b84ef9dcf0521f2d58baa14a803a7311c
+nvidia-cuda-nvrtc==13.4.92 \
+    --hash=sha256:6af7ac5372920f6a7a560d0699348560fe44cb52c1d722d6afd3119f8af948c4
+nvidia-cublas==13.8.0.4 \
+    --hash=sha256:8c5494423bb8a46822cb6b0cb95d7fa4be2d7b96a31155dff083839ec8297910
+nvidia-cufft==12.4.0.43 \
+    --hash=sha256:4ff7075f2d0b5f69291f70938d37a86ec632cbe5747184c74ba1f50f17accacc
+nvidia-curand==10.4.4.72 \
+    --hash=sha256:e0bce83e083ef25976ee74f59e8f067c15149a74538f1be6c2462e286e7c9c68
+nvidia-nvjitlink==13.4.92 \
+    --hash=sha256:b286f3a4f227a9363efdec263c7b91788cef1478d2b8a5fa8bab7f3e82ff82fd
+nvidia-cudnn-cu13==9.26.0.51 \
+    --hash=sha256:8e37a83d7dd7c2663afcae38b1c95c5e9e7c9754f313800da95ca81439fa37f9

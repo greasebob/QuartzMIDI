@@ -17,7 +17,9 @@
 namespace shell {
 // Global hotkeys, in snapshot/legend/Settings order. The first four match
 // upstream's fields and defaults; the song keys default to unbound. No media
-// key is a default, since RegisterHotKey takes it from every other application.
+// key is a default, since RegisterHotKey takes a bound key from every other
+// application. The keyboard's media keys work without a bind, but only while
+// OwnsMediaKeys says so.
 //
 // Slots after kAppHotkeys belong to a performer add-on's declared triggers, in
 // declaration order. Note keys are excluded because the app's own typing would
@@ -37,6 +39,13 @@ inline constexpr std::array<const char*, kAppHotkeys> kHotkeyFields{
 inline constexpr std::array<const char*, kAppHotkeys> kHotkeyDefaults{"VK_F1", "VK_F2", "VK_F3", "VK_F4", "", ""};
 // True for a place a performer's trigger keys may take.
 inline constexpr bool IsPerformerHotkey(size_t i) { return i >= kAppHotkeys && i < kFirstLaterHotkey; }
+// Whether the app takes the keyboard's Play/Pause, Previous, Next and Stop
+// keys now: only with a song open and the game or the app itself in front.
+// With anything else in front they reach the system, so a video or music
+// player keeps them, and a press never starts a song typing into it.
+inline constexpr bool OwnsMediaKeys(bool songOpen, bool gameInFront, bool appInFront) {
+    return songOpen && (gameInFront || appInFront);
+}
 
 // Named keys without the VK_ prefix; letters, digits and F-keys are computed.
 // Escape (cancels capture), bare modifiers and the left, right and middle

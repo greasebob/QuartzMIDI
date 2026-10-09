@@ -39,7 +39,6 @@ static_assert(sizeof(MIDIConnect) < 32 * 1024,
 HANDLE MIDIConnect::s_mmcssHandle = NULL;
 DWORD MIDIConnect::s_mmcssTaskIndex = 0;
 DWORD_PTR MIDIConnect::s_originalAffinity = 0;
-ULONG MIDIConnect::s_timerResolution = 0;
 
 MIDIConnect::MIDIConnect()
     : m_selectedDevice()
@@ -78,10 +77,8 @@ MIDIConnect::~MIDIConnect() {
 }
 
 bool MIDIConnect::OptimizeSystem() {
-    TIMECAPS tc;
-    timeGetDevCaps(&tc, sizeof(TIMECAPS));
-    s_timerResolution = std::min(std::max(tc.wPeriodMin, (UINT)1), tc.wPeriodMax);
-    timeBeginPeriod(s_timerResolution);
+    // The finest timer tick is held only while a device is open (OpenDevice);
+    // the engine keeps this object for the app's life.
     // The priority class is left alone: raising it would put every thread of
     // the app ahead of the game receiving the keys.
 
@@ -110,11 +107,6 @@ void MIDIConnect::RestoreSystemDefaults() {
     if (s_mmcssHandle != NULL) {
         AvRevertMmThreadCharacteristics(s_mmcssHandle);
         s_mmcssHandle = NULL;
-    }
-
-    if (s_timerResolution > 0) {
-        timeEndPeriod(s_timerResolution);
-        s_timerResolution = 0;
     }
 
     SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
@@ -174,6 +166,7 @@ void MIDIConnect::OpenDevice(const std::wstring& deviceId) {
     // Do not call SetCallbackThreadPriority here: this is the engine worker,
     // not the thread messages arrive on.
     m_selectedDevice = deviceId;
+    if (!m_timerHeld) { VirtualPianoPlayer::hold_timer_resolution(true); m_timerHeld = true; }
 }
 
 void MIDIConnect::CloseDevice() {
@@ -183,6 +176,7 @@ void MIDIConnect::CloseDevice() {
     }
     m_selectedDevice.clear();
     ReleaseHeld();
+    if (m_timerHeld) { VirtualPianoPlayer::hold_timer_resolution(false); m_timerHeld = false; }
 }
 
 void MIDIConnect::ReleaseHeld() {

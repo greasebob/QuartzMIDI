@@ -2,15 +2,12 @@
 # every package it needs is listed here and nothing arrives by resolution.
 #
 # The set is what a conversion, a link download and the sign-in window
-# actually import. onnxruntime-directml also declares flatbuffers, protobuf
-# and sympy; a transcription imports none of them, so they are left out.
-#
-# onnxruntime-directml runs the model on any DirectX 12 GPU, NVIDIA, AMD or
-# Intel, and on the CPU when there is none.
+# actually import. ONNX Runtime is not here: setup.ps1 installs one engine
+# from requirements-directml.txt, requirements-cuda12.txt or
+# requirements-cuda13.txt. Each ONNX Runtime also declares flatbuffers,
+# protobuf and sympy; a transcription imports none of them, so they are left out.
 
 # Transcription
-onnxruntime-directml==1.24.4 \
-    --hash=sha256:f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614
 numpy==2.5.2 \
     --hash=sha256:28ac63476ec7651484215ee7fa15a1f78b57c14621f01e392afe17b9a1390ce4
 scipy==1.18.1 \

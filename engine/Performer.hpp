@@ -83,8 +83,16 @@ struct qm_performer_api {
     // JSON describing the settings section the app draws and saves:
     //   name, tag; config: key in config.json holding the values;
     //   presets: id, field, name (drawn above them, optional), choices[] of
-//   {name, values} (slider targets);
+    //   {name, values (slider targets), value (the whole number from 0 it is
+    //   saved and sent in `settings` as; its index when absent; no two alike),
+    //   earlier (optional: the `values` sets it had before; a saved set that
+    //   sits on one of them, or on `values`, reads as this choice)};
     //   controls: in draw order; triggers.
+    //   A preset's values may name only the row sliders: section sliders with
+    //   no estimate that are not `per_song`. When they name at least one, the
+    //   app adds Custom, the user's own amounts for the row sliders on a
+    //   preset's habits; while it is in use, settings[presets.id] is that
+    //   base preset's value.
     // Control: id (key in `settings`), field (key when saved), type (slider
     //   0..1, switch or choice), name, value (initial).
     //   choice: `choices` (names), value is the chosen index; `panel` draws it
@@ -94,10 +102,16 @@ struct qm_performer_api {
     //   slider: `estimate` starts each song at estimate()'s value for that name
     //     (negative while the estimate is in use; a negative answer hides the
     //     slider); `shows: "note"` displays it as a note between `low` and `high`.
+    //   per_song: true on a section choice or slider keeps it per song while the
+    //     `remembers` switch is on; a song without a value of its own starts at
+    //     `value`. One with an `estimate` is kept per song already.
     //   shown_with: drawn only while the named choice is drawn and off its
     //     first entry.
     //   switch: `estimates` names the slider whose estimate it disables,
-    //     `remembers` keeps slider values per song, `holds` is step()'s argument.
+    //     `remembers` keeps the song controls per song and lets a song be
+    //     pinned to its own preset and amounts, `holds` is step()'s argument.
+    //   ENABLED, CUSTOM, PINNED and fields starting with CUSTOM_ are the app's.
+    //   A section that breaks any of these rules is not drawn.
     // Trigger: the first is the clock. Others either `plays` (while the key is
     //   down) or `steps` (through step(), one tap per key), with `keys` (name,
     //   add, a config field and a default each) and their own `controls`.

@@ -72,6 +72,8 @@ private:
     std::wstring m_selectedDevice;
     std::atomic<bool> m_isActive;
     bool m_busy = false;
+    // Whether this holds the finest timer tick, as it does while a device is open.
+    bool m_timerHeld = false;
     // The notes the game was told are on, and whether the pedal is down.
     std::array<std::atomic<bool>, 128> m_held{};
     std::atomic<bool> m_pedalDown{false};
@@ -82,7 +84,6 @@ private:
     static HANDLE s_mmcssHandle;
     static DWORD s_mmcssTaskIndex;
     static DWORD_PTR s_originalAffinity;
-    static ULONG s_timerResolution;
 
     static bool OptimizeSystem();
     static void RestoreSystemDefaults();

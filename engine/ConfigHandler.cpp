@@ -45,7 +45,8 @@ namespace midi {
         validateKey(SUSTAIN_KEY);
         validateKey(VOLUME_UP_KEY);
         validateKey(VOLUME_DOWN_KEY);
-        // These may be empty (unbound); the three above are sent as keystrokes and are required.
+        validateKey(SOSTENUTO_KEY);
+        // These may be empty (unbound); the four above are sent as keystrokes and are required.
         for (const auto* key : {&PLAY_PAUSE_KEY, &REWIND_KEY, &SKIP_KEY, &EMERGENCY_EXIT_KEY,
                                 &PREVIOUS_SONG_KEY, &NEXT_SONG_KEY})
             if (!key->empty()) validateKey(*key);
@@ -274,7 +275,8 @@ namespace midi {
             {"SKIP_KEY", h.SKIP_KEY},
             {"EMERGENCY_EXIT_KEY", h.EMERGENCY_EXIT_KEY},
             {"PREVIOUS_SONG_KEY", h.PREVIOUS_SONG_KEY},
-            {"NEXT_SONG_KEY", h.NEXT_SONG_KEY}
+            {"NEXT_SONG_KEY", h.NEXT_SONG_KEY},
+            {"SOSTENUTO_KEY", h.SOSTENUTO_KEY}
         };
     }
 
@@ -288,6 +290,7 @@ namespace midi {
         j.at("EMERGENCY_EXIT_KEY").get_to(h.EMERGENCY_EXIT_KEY);
         h.PREVIOUS_SONG_KEY = j.value("PREVIOUS_SONG_KEY", std::string());
         h.NEXT_SONG_KEY = j.value("NEXT_SONG_KEY", std::string());
+        h.SOSTENUTO_KEY = j.value("SOSTENUTO_KEY", std::string("VK_OEM_6"));
         h.validate();
     }
     void to_json(json& j, const PlaybackSettings& p) {

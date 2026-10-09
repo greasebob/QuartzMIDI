@@ -1,0 +1,305 @@
+/* The YouTube window's page (docs/design/youtube-window.md §2, §4). Theme variables only: :root holds
+   the app's built-in dark skin until init brings the one in use, and app.js sets the rest (§4.2). */
+@font-face{font-family:"IBM Plex Sans";font-weight:400;font-style:normal;src:url(/quartzmidi/fonts/IBMPlexSans-Regular.ttf) format("truetype")}
+@font-face{font-family:"IBM Plex Sans";font-weight:500;font-style:normal;src:url(/quartzmidi/fonts/IBMPlexSans-Medium.ttf) format("truetype")}
+@font-face{font-family:"IBM Plex Sans";font-weight:600;font-style:normal;src:url(/quartzmidi/fonts/IBMPlexSans-SemiBold.ttf) format("truetype")}
+:root{--canvas:#191C21;--bar:#20242A;--card:#272B31;--raised:#2E333A;--hot:#363C44;--well:#14171B;
+--ink:#E7E9EC;--ink2:#A3AAB5;--ink3:#79818D;
+--accent:#4EA3EA;--accent-soft:#4EA3EA24;--accent-line:#4EA3EA66;--accent-hot:color-mix(in srgb,var(--accent) 85%,var(--ink));--accent-ink:#101218;
+--ok:#4FB277;--ok-ink:#8FDCAA;--ok-soft:#4FB27729;--ok-line:#4FB27766;--ok-fill:#283B36;--ok-hot:#3A4F4C;
+--warn:#D0A259;--warn-ink:#101218;--bad:#E0685A;--line:#FFFFFF14;--line2:#FFFFFF24;
+--hi:inset 0 1px 0 #FFFFFF0F;--raise:0 1px 1px #0000004D,0 2px 6px #00000038;--sunk:inset 0 1px 2px #00000073;
+--h:32px;--r-window:12px;--r-card:12px;--r-control:10px;--r-element:8px;--pad-window:16px;--pad-panel:16px;
+--fs-meta:12px;--fs-body:14px;--fs-heading:14px;--fs-title:20px;
+--ui:"IBM Plex Sans","Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+--side:416px;--act:128px;color-scheme:dark}
+*{box-sizing:border-box} [hidden]{display:none!important}
+html,body{margin:0;height:100%;overflow:hidden}
+body{display:flex;flex-direction:column;background:var(--canvas);color:var(--ink);font:400 var(--fs-body)/calc(var(--fs-body) + 6px) var(--ui);-webkit-font-smoothing:antialiased}
+button,input{font:inherit;color:inherit;margin:0}
+svg{width:16px;height:16px;flex:none}
+img{display:block}
+.num{font-variant-numeric:tabular-nums}
+.grow{flex:1}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.list .scroll,.tray,.menu{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+
+/* Controls (§2.7, after SheetPage's kPageCss) */
+button{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex:none;height:var(--h);padding:0 12px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--raised);box-shadow:var(--raise),var(--hi);color:var(--ink);font-weight:400;white-space:nowrap;cursor:pointer;transition:background .16s ease-out,box-shadow .16s ease-out}
+button:hover{background:var(--hot)} button:active{background:var(--raised);box-shadow:var(--sunk)}
+button:disabled{background:transparent;border:1px dashed var(--line2);box-shadow:none;color:var(--ink3);cursor:default}
+button.primary{background:var(--accent);border-color:transparent;color:var(--accent-ink);font-weight:600}
+button.primary:hover{background:var(--accent-hot)} button.primary:active{background:var(--accent);box-shadow:var(--sunk)}
+button.icon{width:var(--h);padding:0;color:var(--ink2)} button.icon:hover{color:var(--ink)}
+button.icon:disabled{color:var(--ink3)}
+button.active,button[aria-expanded=true]{background:var(--accent-soft);border-color:var(--accent);box-shadow:none;color:var(--accent)}
+button.active>svg,button[aria-expanded=true]>svg{color:var(--accent)}
+button.ok{background:var(--ok-fill);border-color:var(--ok-line);color:var(--ok-ink);font-weight:600} button.ok:hover{background:var(--ok-hot)}
+button.ok:active{background:var(--ok-fill);box-shadow:var(--sunk)}
+.words{display:inline-flex;flex-direction:column;align-items:center}
+.words::after{content:attr(data-text);height:0;overflow:hidden;visibility:hidden;font-weight:600}
+.pill{padding:0 10px}
+.pill[aria-pressed=true]{background:var(--ok-fill);border-color:var(--ok-line);color:var(--ok-ink);font-weight:600}
+.pill[aria-pressed=true]:hover{background:var(--ok-hot)} .pill:active,.pill[aria-pressed=true]:active{background:var(--well);box-shadow:var(--sunk)}
+.pill[aria-checked=true]{background:var(--accent-soft);border-color:var(--accent);box-shadow:none;color:var(--accent);font-weight:600}
+button.pill:disabled,button.pill:disabled:hover{background:transparent;border:1px dashed var(--line2);box-shadow:none;color:var(--ink3);font-weight:400}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:auto;gap:4px;height:var(--h);padding:3px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--well);box-shadow:var(--sunk)}
+.seg>button{height:auto;min-width:0;padding:0 10px;gap:6px;border:1px solid transparent;border-radius:calc(var(--r-control) - 3px);background:none;box-shadow:none;color:var(--ink2)}
+.seg>button:hover{color:var(--ink);background:none} .seg>button:focus-visible{outline-offset:1px}
+.seg>button[aria-checked=true]{background:var(--raised);box-shadow:var(--raise),var(--hi);color:var(--ink);font-weight:600}
+.check{width:18px;height:18px;padding:0;border:1px solid var(--line2);border-radius:4px;background:var(--well);box-shadow:none;color:var(--accent-ink);transition:none}
+.check:hover{background:var(--well);border-color:var(--ink3)} .check:active{background:var(--well);box-shadow:none}
+.check>svg{width:14px;height:14px;visibility:hidden}
+.check[aria-checked=true],.check[aria-checked=mixed]{background:var(--accent);border-color:var(--accent)}
+.check[aria-checked=true]:hover,.check[aria-checked=mixed]:hover{background:var(--accent-hot);border-color:var(--accent-hot)}
+.check[aria-checked=true]>svg,.check[aria-checked=mixed]>svg{visibility:visible}
+.spin{animation:spin 1s linear infinite} @keyframes spin{to{transform:rotate(360deg)}}
+
+/* Top bar and filter row (§2.1) */
+.bar{position:relative;flex:none;display:flex;align-items:center;gap:8px;padding:0 16px;background:var(--bar);border-bottom:1px solid var(--line)}
+#bar{height:48px}
+#filters,#listbar,#genres{height:40px}
+.end{margin-left:auto}
+#app>img{width:16px;height:16px}
+#account{padding:0;overflow:hidden} #account>img{width:24px;height:24px;border-radius:50%}
+.search{position:relative;flex:1 1 auto;min-width:0;max-width:640px;display:flex;align-items:center;gap:8px;height:var(--h);padding:0 3px 0 11px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--well);box-shadow:var(--sunk);transition:border-color .16s ease-out}
+.search>svg{color:var(--ink3)}
+.search:hover{border-color:var(--line2)}
+.search:focus-within{border-color:var(--accent-line);box-shadow:var(--sunk),0 0 0 1px var(--accent-line)}
+.search input{flex:1;min-width:0;height:100%;padding:0;border:0;outline:0;background:none}
+.search input::placeholder{color:var(--ink3)}
+.search input::-webkit-search-cancel-button{display:none}
+button.inside{width:24px;height:24px;border:0;border-radius:calc(var(--r-control) - 3px);background:none;box-shadow:none}
+button.inside:hover{background:var(--hot)}
+#duration>.chevron{color:var(--ink2)} #duration[aria-expanded=true]>.chevron{color:var(--accent)}
+.loading{position:absolute;left:0;right:0;bottom:-1px;height:2px;overflow:hidden;z-index:3}
+.loading::before{content:"";position:absolute;top:0;bottom:0;left:-30%;width:30%;background:var(--accent);animation:sweep 1.1s ease-in-out infinite}
+@keyframes sweep{to{left:100%}}
+
+/* List view header row (§2.5) */
+#listbar{gap:12px}
+#listbar .heads{flex:1;min-width:0;display:flex;align-items:center;gap:12px}
+#listbar .heads>svg{color:var(--ink2)}
+#listbar .name{flex:0 1 auto;min-width:0;font-size:var(--fs-heading);line-height:calc(var(--fs-heading) + 6px);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#listbar .meta{flex:0 1 auto;min-width:0}
+#listbar .avatar{width:32px;height:32px;margin:0 -4px 0 0;border-radius:50%;background:var(--well);object-fit:cover;align-self:center}
+.bone{display:block;height:12px;border-radius:6px;background:var(--card)}
+#listbar .bone{width:240px;align-self:center}
+
+/* Genre row (§1.1): word-only pills, then Sort; narrow, the pills scroll sideways */
+.pills{flex:1;min-width:0;display:flex;align-items:center;gap:8px;height:100%;padding:0 4px;margin:0 -4px;overflow-x:auto;scrollbar-width:none}
+.pills::-webkit-scrollbar{display:none}
+
+/* Home shelves (§1.2) */
+button.shelf{align-self:flex-start;max-width:calc(100% - 32px);height:40px;margin:8px 0 0 16px;padding:0 8px;gap:8px;border-color:transparent;background:none;box-shadow:none;color:var(--ink2);font-size:var(--fs-heading);font-weight:600}
+button.shelf:hover{background:var(--card);color:var(--ink)} button.shelf:active{background:var(--card);box-shadow:none}
+button.shelf>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+
+/* Pianist strip (§1.4): wide wraps to as many lines as its cards need, narrow is 1 scrolling line */
+.strip{padding:12px 12px 4px}
+.cards{display:flex;flex-wrap:wrap;gap:4px;padding:4px}
+button.card{flex-direction:column;gap:4px;width:80px;height:auto;padding:6px 4px;border-color:transparent;background:none;box-shadow:none;color:var(--ink2)}
+button.card:hover{background:var(--card);color:var(--ink)} button.card:active{background:var(--card);box-shadow:none}
+.face{display:flex;align-items:center;justify-content:center;width:48px;height:48px;border-radius:50%;overflow:hidden;background:var(--raised);color:var(--ink2);font-size:20px;line-height:24px;font-weight:600}
+.face>img{width:100%;height:100%;object-fit:cover}
+.card>.name{max-width:72px;overflow:hidden;text-overflow:ellipsis;font-size:var(--fs-meta);line-height:16px}
+.cards>.divider{flex:none;width:1px;margin:8px 4px;background:var(--line)}
+
+/* Columns, banners and the list (§2.1, §2.9) */
+.columns{flex:1;display:flex;min-height:0}
+.list{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--canvas)}
+.list .scroll{position:relative;flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}
+.banners{flex:none}
+.banner{display:flex;align-items:center;gap:8px;height:40px;padding:0 8px 0 16px;background:var(--card);border-bottom:1px solid var(--line);font-size:calc(var(--fs-body) - 1px)}
+.banner>svg{color:var(--ink2)} .banner>svg.warn{color:var(--warn)}
+.banner>span{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.banner>button{height:calc(var(--h) - 4px);padding:0 10px}
+.listhead{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:12px;height:40px;padding:0 16px;background:var(--canvas);border-bottom:1px solid var(--line)}
+.tick{flex:none;width:32px;display:flex;align-items:center;justify-content:center}
+.counted{color:var(--ink2);white-space:nowrap} .counted>.num{margin-left:2px;color:var(--ink)}
+.listhead>.grow{min-width:0}
+.listhead>button{flex:none}
+/* Save to (discovery §5.1): the folder's icon, its last name, a chevron; the name ends in an ellipsis */
+button.save{min-width:56px;gap:4px;padding:0 8px}
+.save>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.save>.chevron{color:var(--ink2)} .save[aria-expanded=true]>.chevron{color:var(--accent)}
+.listhead>.save{flex:0 1 auto;max-width:200px}
+#untick{margin-left:-4px}
+.empty{padding:64px 16px;text-align:center;color:var(--ink2)}
+.tail{display:flex;align-items:center;justify-content:center;height:48px;color:var(--ink2)}
+
+/* Rows (§2.2) */
+.rows{display:flex;flex-direction:column;padding:4px 0 16px}
+.row{position:relative;display:flex;align-items:center;gap:12px;height:104px;padding:8px 16px;outline:0;transition:background .16s ease-out;content-visibility:auto;contain-intrinsic-size:auto 104px}
+.row:hover{background:var(--card)}
+.row.ticked{background:var(--accent-soft)}
+.row:focus-visible{box-shadow:inset 0 0 0 2px var(--accent)}
+.row>.body{flex:1;min-width:0;display:flex;align-items:center;gap:12px;align-self:stretch;cursor:pointer}
+.thumb{position:relative;flex:none;width:160px;height:90px;border-radius:var(--r-element);overflow:hidden;background:var(--well)}
+.thumb>img{width:100%;height:100%;object-fit:cover}
+.thumb.round{background:none;overflow:visible}
+.thumb.round>img{width:90px;height:90px;margin:0 auto;border-radius:50%;background:var(--well)}
+.badge{position:absolute;right:4px;bottom:4px;display:flex;align-items:center;gap:3px;height:18px;padding:0 5px;border-radius:5px;background:color-mix(in srgb,var(--canvas) 85%,transparent);color:var(--ink);font-size:var(--fs-meta);line-height:16px;font-weight:600;font-variant-numeric:tabular-nums}
+.badge>svg{width:12px;height:12px}
+.badge.warn{background:var(--warn);color:var(--warn-ink)}
+.word{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--canvas) 70%,transparent);color:var(--ink);font-size:var(--fs-meta);line-height:16px;font-weight:600}
+.text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.row .title{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font-weight:500;overflow-wrap:anywhere}
+.meta,.status{font-size:var(--fs-meta);line-height:calc(var(--fs-meta) + 4px);color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status{display:flex;align-items:center;gap:4px} .status>svg{width:14px;height:14px}
+.status>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.status.bad{color:var(--bad)}
+.row.dim .thumb,.row.dim .text{opacity:.45;transition:opacity .16s ease-out}
+.row.dim:hover .thumb,.row.dim:hover .text,.row.dim:focus-within .thumb,.row.dim:focus-within .text,.row.dim:focus .thumb,.row.dim:focus .text{opacity:1}
+.row.now .thumb{box-shadow:0 0 0 2px var(--accent)} .row.now .title{color:var(--accent)}
+.act{flex:none;display:flex;align-items:center;gap:4px;min-width:var(--act)}
+.act>.convert{flex:1}
+.row.skeleton{pointer-events:none}
+.row.skeleton .thumb{background:var(--card)}
+.row.skeleton .text{gap:8px} .row.skeleton .bone:first-child{width:70%;height:14px} .row.skeleton .bone:last-child{width:40%}
+
+/* The Convert control (§2.8). Inert states keep their place and never look disabled. */
+.convert{min-width:0}
+.convert>span{overflow:hidden;text-overflow:ellipsis}
+.convert.ghost,.convert.ghost:hover,.convert.ghost:active{background:none;border-color:transparent;box-shadow:none;color:var(--ink2);cursor:default}
+.convert.work,.convert.work:hover{color:var(--accent)}
+.convert.fill,.convert.fill:hover,.convert.fill:active{background:linear-gradient(90deg,var(--accent-soft) var(--fill,0%),transparent var(--fill,0%));border-color:var(--accent-line);box-shadow:none;color:var(--ink);font-variant-numeric:tabular-nums;cursor:default}
+.convert.ok.inert,.convert.ok.inert:hover,.convert.ok.inert:active{background:var(--ok-fill);box-shadow:none;cursor:default}
+.convert.failed>svg{color:var(--bad)}
+.probe{position:absolute!important;left:-10000px;top:0;visibility:hidden;content-visibility:visible}
+
+/* Dock (§2.3) */
+.side{flex:none;width:var(--side);display:flex;flex-direction:column;min-height:0;background:var(--bar);border-left:1px solid var(--line)}
+.dock{flex:none;display:flex;flex-direction:column;gap:8px;padding:16px}
+.slot{position:relative;width:100%;aspect-ratio:16/9;border-radius:var(--r-card);background:var(--well)}
+.frame{position:absolute;inset:0;overflow:hidden;border-radius:var(--r-card);background:var(--well)}
+#player{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent}
+.poster{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none}
+.frame>.word{font-size:var(--fs-body);line-height:calc(var(--fs-body) + 6px)}
+.frame>.ad{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:color-mix(in srgb,var(--ink) 80%,transparent);pointer-events:none}
+.frame>.ad>svg{width:24px;height:24px}
+.frame>.ad::after{content:"";position:absolute;bottom:0;left:-30%;width:30%;height:2px;background:var(--accent);animation:sweep 1.1s ease-in-out infinite}
+.frame.loading::after{content:"";position:absolute;inset:0;background:var(--well)}
+.dock.empty>:not(.slot){visibility:hidden}
+html.enlarged .frame{position:fixed;z-index:5;left:0;right:calc(var(--side) + 1px);top:88px;bottom:0;border-radius:0;background:var(--canvas);container-type:size}
+html.enlarged #player,html.enlarged .frame.loading::after{inset:0;margin:auto;width:min(100cqw,100cqh * 16 / 9);height:min(100cqh,100cqw * 9 / 16)}
+html.enlarged .poster{object-fit:contain}
+.titlerow{display:flex;align-items:flex-start;gap:8px;height:56px}
+.titlerow>.titles{flex:1;min-width:0}
+.titlerow .name{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font-weight:600;overflow-wrap:anywhere}
+.titlerow .meta{line-height:16px}
+#dock-channel{max-width:100%;height:16px;justify-content:flex-start;padding:0;gap:4px;border:0;border-radius:4px;background:none;box-shadow:none;color:var(--ink2)}
+#dock-channel:hover{background:none;color:var(--ink)} #dock-channel:active{box-shadow:none}
+#dock-channel:disabled{border:0;color:var(--ink2)}
+#dock-channel>svg{width:12px;height:12px}
+#dock-channel>span{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.transport{display:flex;align-items:center;gap:8px;height:var(--h)}
+.seek{position:relative;flex:1;height:var(--h);cursor:pointer;touch-action:none;--at:0%}
+.seek:focus-visible{outline-offset:0;border-radius:6px}
+.groove{position:absolute;left:0;right:0;top:calc(50% - 2px);height:4px;border-radius:2px;background:var(--well);box-shadow:var(--sunk);overflow:hidden}
+.groove>.fill{height:100%;width:var(--at);background:var(--accent)}
+.knob{position:absolute;top:calc(50% - 6px);left:calc(var(--at) - 6px);width:12px;height:12px;border:1px solid var(--line);border-radius:50%;background:var(--raised);box-shadow:var(--raise),var(--hi)}
+.seek.idle{cursor:default} .seek.idle .knob{display:none}
+.seek.ad{cursor:default} .seek.ad .knob{display:none} .seek.ad .fill{width:30%;position:relative;animation:sweep-fill 1.1s ease-in-out infinite}
+@keyframes sweep-fill{from{left:-30%}to{left:100%}}
+.tip{position:absolute;bottom:calc(100% - 2px);transform:translateX(-50%);padding:0 6px;border:1px solid var(--line);border-radius:6px;background:var(--raised);box-shadow:var(--raise);font-size:var(--fs-meta);line-height:20px;pointer-events:none;white-space:nowrap}
+.time{flex:none;font-size:var(--fs-meta);line-height:16px;color:var(--ink2)}
+.actions{display:flex;align-items:center;gap:8px;height:var(--h)}
+.actions>button:first-child{flex:1}
+:root:not(.narrow) .actions>button:first-child,.sheet .actions>button:first-child{min-width:96px}
+#dock-save{flex:0 1 auto;max-width:160px}
+.popover{position:fixed;z-index:21;display:flex;align-items:center;gap:8px;padding:6px 12px 6px 6px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--raised);box-shadow:var(--raise),var(--hi)}
+.range{width:120px;height:20px;margin:0;background:none;-webkit-appearance:none;appearance:none;cursor:pointer;--v:100%}
+.range::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(90deg,var(--accent) var(--v),var(--well) var(--v));box-shadow:var(--sunk)}
+.range::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;margin-top:-4px;border:1px solid var(--line);border-radius:50%;background:var(--raised);box-shadow:var(--raise),var(--hi)}
+.range:focus-visible{outline-offset:4px;border-radius:4px}
+
+/* Queue tray (§2.4) */
+.tray{flex:1;min-height:0;overflow-y:auto;border-top:1px solid var(--line);padding-bottom:8px}
+.tray h2{display:flex;align-items:center;height:32px;margin:0;padding:0 16px;font-size:var(--fs-meta);line-height:16px;font-weight:600;color:var(--ink2)}
+.entry{position:relative;display:flex;align-items:center;gap:8px;height:48px;padding:0 12px 0 8px;background:var(--bar)}
+.entry:hover{background:var(--card)}
+.entry.dragging{z-index:2;background:var(--raised);box-shadow:var(--raise),var(--hi)}
+.grip{flex:none;display:flex;width:16px;color:var(--ink3);cursor:grab;touch-action:none}
+.dragging .grip{cursor:grabbing}
+.mini{position:relative;flex:none;width:64px;height:36px;border-radius:6px;overflow:hidden;background:var(--well)}
+.mini>img{width:100%;height:100%;object-fit:cover}
+.mini>.badge{right:2px;bottom:2px;height:14px;padding:0 3px;border-radius:4px}
+.mini>.badge>svg{width:10px;height:10px}
+.entry>.lines{flex:1;min-width:0}
+.entry .name{font-size:calc(var(--fs-body) - 1px);line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.entry .state{font-size:var(--fs-meta);line-height:16px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.entry .state.bad{color:var(--bad)}
+.entry .state:has(>.chip){display:flex;align-items:center;gap:6px}
+.entry .state>span:not(.chip){min-width:0;overflow:hidden;text-overflow:ellipsis}
+.entry .chip{flex:0 1 auto;min-width:0;max-width:60%;height:18px;padding:0 6px;gap:4px;border-radius:6px;font-size:var(--fs-meta);line-height:16px;font-weight:400}
+.entry .chip>svg{width:12px;height:12px}
+.entry span.chip{display:inline-flex;align-items:center;padding:0;color:var(--ink2)}
+.entry>button.icon{width:28px;height:28px}
+.entry>.ok{height:28px;padding:0 10px}
+.progress{position:absolute;left:8px;right:12px;bottom:0;height:2px;overflow:hidden;border-radius:1px;background:var(--accent-soft)}
+.progress::before{content:"";position:absolute;top:0;bottom:0;left:0;width:var(--fill,0%);background:var(--accent)}
+.progress.busy::before{left:-30%;width:30%;animation:sweep 1.1s ease-in-out infinite}
+
+/* Menus and suggestions (§2.7, §2.10, §3.3) */
+.menu{position:fixed;z-index:20;display:flex;flex-direction:column;min-width:176px;max-height:360px;overflow-y:auto;padding:4px;border:1px solid var(--line);border-radius:var(--r-control);background:var(--raised);box-shadow:var(--raise),var(--hi)}
+.menu.suggest{position:absolute;left:-1px;right:-1px;top:calc(100% + 4px);min-width:0}
+.menu-item{width:100%;height:32px;flex:none;justify-content:flex-start;gap:8px;padding:0 8px;border:0;border-radius:var(--r-element);background:none;box-shadow:none;text-align:left;transition:none}
+.menu-item>svg{color:var(--ink2)}
+.menu-item:hover,.menu-item.hl,.menu-item:focus-visible{background:var(--hot);outline:0} .menu-item:active{background:var(--hot);box-shadow:none}
+.menu-item>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.menu-item>.mark{color:var(--accent)}
+.menu-item b{font-weight:600}
+.menu.fields{width:288px;padding-top:0;scroll-padding-top:calc(var(--h) + 4px)}
+.menu-field{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:8px;flex:none;height:var(--h);margin:0 -4px 4px;padding:0 12px;border-bottom:1px solid var(--line);background:var(--raised)}
+.menu-field>svg{color:var(--ink3)} .menu-field:focus-within>svg{color:var(--accent)}
+.menu-field input{flex:1;min-width:0;height:100%;padding:0;border:0;outline:0;background:none}
+.menu-field input::placeholder{color:var(--ink3)}
+.menu-note{display:flex;align-items:center;height:32px;padding:0 8px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* Narrow layout (§2.6): under 900 CSS px, html.narrow. Controls keep their icons and lose their words. */
+html.narrow :is(#signin,#app,#duration){width:var(--h);padding:0;color:var(--ink2)}
+html.narrow :is(#signin,#app,#duration):hover{color:var(--ink)}
+html.narrow :is(#signin,#app,#duration,#type>button)>span,html.narrow #duration>.chevron{display:none}
+html.narrow #type>button{padding:0 7px}
+html.narrow #listbar:has(>.seg){flex-wrap:wrap;height:auto;row-gap:4px;padding-bottom:4px}
+html.narrow #listbar:has(>.seg)>.heads{flex:1 0 100%;height:40px}
+html.narrow :is(.listhead,.actions)>.save{flex:none}
+html.narrow :is(.listhead,.actions)>.save>span{display:none}
+html.narrow #convert-ticked .clip{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+html.narrow .row{height:72px;padding:0 16px;contain-intrinsic-size:auto 72px}
+html.narrow .thumb{width:112px;height:63px}
+html.narrow .thumb.round>img{width:63px;height:63px}
+html.narrow .row .title{font-size:calc(var(--fs-body) - 1px);line-height:18px}
+html.narrow .text:has(>.status:not([hidden]))>.title{-webkit-line-clamp:1}
+html.narrow .act{justify-content:flex-end}
+html.narrow .act>.convert{flex:none}
+html.narrow :is(.act,.listhead)>.convert{padding:0 8px}
+html.narrow .convert.bare{width:var(--h);padding:0}
+html.narrow .columns{padding-bottom:64px}
+html.narrow .cards{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none}
+html.narrow .cards::-webkit-scrollbar{display:none}
+
+/* The bottom sheet: the dock and the tray, fixed over the list. Collapsed, it is one 64 px row. */
+html.narrow .side{position:fixed;z-index:4;left:0;right:0;bottom:0;width:auto;border-left:0}
+html.narrow:not(.sheet) .side{display:grid;grid-template-columns:96px minmax(0,1fr) auto auto auto;grid-template-rows:27px 27px;height:64px;padding:4px 8px 5px;border-top:1px solid var(--line);cursor:pointer}
+html.narrow:not(.sheet) .side:focus-visible{outline-offset:-2px}
+html.narrow:not(.sheet) :is(.dock,.titlerow,.titles,.transport,.actions){display:contents}
+html.narrow:not(.sheet) :is(#tray,#dock-channel,#copy,#youtube,#seek,#volume,#enlarge,.actions>button:not(#dock-convert)){display:none}
+html.narrow:not(.sheet) .slot{grid-area:1/1/3/2;width:96px;height:54px;border-radius:var(--r-element)}
+html.narrow:not(.sheet) .frame{border-radius:var(--r-element)}
+html.narrow:not(.sheet) #dock-name{grid-area:1/2;align-self:end;margin-left:8px;font-size:calc(var(--fs-body) - 1px);line-height:18px;-webkit-line-clamp:1}
+html.narrow:not(.sheet) #time{grid-area:2/2;align-self:start;margin-left:8px}
+html.narrow:not(.sheet) :is(#play,#dock-convert,#queue-button){grid-row:1/3;margin-left:8px}
+html.narrow:not(.sheet) #play{grid-column:3} html.narrow:not(.sheet) #dock-convert{grid-column:4} html.narrow:not(.sheet) #queue-button{grid-column:5}
+
+/* Expanded, from the top bar down: Collapse, the frame as large as the fixed rows leave room for, then the tray. */
+html.narrow.sheet .side{top:48px;overflow-y:auto;overscroll-behavior:contain;container-type:size;scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+html.narrow.sheet #collapse{align-self:flex-start;margin:4px 8px}
+html.narrow.sheet #queue-button{position:absolute;top:4px;right:16px}
+html.narrow.sheet .dock{padding:0 16px 16px}
+html.narrow.sheet .slot{align-self:center;width:auto;max-width:100%;height:max(120px,min((100cqw - 32px) * 9 / 16,100cqh - 200px))}
+html.narrow.sheet .tray{flex:none;min-height:auto;overflow:visible}
+html.narrow.enlarged .frame{position:absolute;inset:0;border-radius:0}
+html.narrow.sheet.enlarged :is(#collapse,#queue-button,.titlerow){display:none}
+html.narrow.sheet.enlarged .slot{align-self:stretch;width:auto;max-width:none;height:max(120px,100cqh - 96px);aspect-ratio:auto;margin:0 -16px;border-radius:0;background:var(--canvas)}

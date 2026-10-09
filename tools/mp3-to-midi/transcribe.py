@@ -7,6 +7,10 @@ below are adapted from Pianoscribe's piano_engine.py, Copyright (c) Justagwas,
 GPL-3.0, https://github.com/Justagwas/Pianoscribe. On a 2.4 minute song they
 give the notes Transkun's own PyTorch code gives, in a third of its time on
 the CPU and a tenth on a DirectX 12 GPU through DirectML.
+
+The engine is whichever ONNX Runtime setup.ps1 installed: onnxruntime-gpu runs
+the model with CUDA on NVIDIA cards, onnxruntime-directml with DirectML on any
+DirectX 12 card, and both fall back to the CPU.
 """
 
 import json
@@ -19,8 +23,24 @@ from dataclasses import dataclass
 import numpy as np
 
 MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
+CUDA = "CUDAExecutionProvider"
 DML = "DmlExecutionProvider"
 CPU = "CPUExecutionProvider"
+# What the step lines call each provider; the CPU is named by "on the CPU".
+ENGINES = {CUDA: "CUDA", DML: "DirectML", CPU: ""}
+
+
+def load_cuda_libraries(ort):
+    """Makes the CUDA and cuDNN DLLs of the nvidia-* wheels loadable. Every
+    folder holding DLLs is added, since cuFFT loads nvJitLink from a folder of
+    its own under CUDA 12; preload_dlls then loads them in the order ONNX
+    Runtime needs."""
+    nvidia = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(ort.__file__))), "nvidia")
+    for folder, _, files in os.walk(nvidia):
+        if any(name.lower().endswith(".dll") for name in files):
+            os.add_dll_directory(folder)
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls(directory="")
 
 
 @dataclass(slots=True)
@@ -53,9 +73,12 @@ class Model:
         self.threads = threads
 
         ort.set_default_logger_severity(3)
-        wanted = [DML, CPU] if device != "cpu" and DML in ort.get_available_providers() else [CPU]
+        available = ort.get_available_providers()
+        gpu = None if device == "cpu" else next((name for name in (CUDA, DML) if name in available), None)
+        if gpu == CUDA:
+            load_cuda_libraries(ort)
         self.scorer = self.attributes = None
-        for providers in ([wanted, [CPU]] if wanted[0] == DML else [wanted]):
+        for providers in ([[gpu, CPU], [CPU]] if gpu else [[CPU]]):
             options = ort.SessionOptions()
             options.intra_op_num_threads = threads
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -66,12 +89,24 @@ class Model:
             try:
                 self.scorer = ort.InferenceSession(os.path.join(MODEL, "scorer.onnx"), options, providers=providers)
                 self.attributes = ort.InferenceSession(os.path.join(MODEL, "attributes.onnx"), options, providers=providers)
+                # ONNX Runtime drops CUDA without raising when its libraries do not load.
+                for session in (self.scorer, self.attributes):
+                    if session.get_providers()[0] != providers[0]:
+                        raise RuntimeError(f"{ENGINES[providers[0]]} did not load")
                 break
             except Exception as failure:
                 if providers == [CPU]:
                     raise
                 print(f"The GPU could not load the model ({failure}); using the CPU.", flush=True)
-        self.gpu = self.scorer.get_providers()[0] == DML
+        self.engine = ENGINES[self.scorer.get_providers()[0]]
+        self.gpu = bool(self.engine)
+
+    def check(self):
+        """Runs the scorer once on a segment of quiet noise, which raises where a
+        GPU engine loads but has no code for the card. setup.ps1 calls it."""
+        length = math.ceil(self.segment_seconds * self.sample_rate)
+        noise = np.random.default_rng(0).normal(0, 1e-3, (2, length)).astype(np.float32)
+        self.scorer.run(["interval_scores", "skip_scores", "context"], {"mel_features": self.features(noise)})
 
     def features(self, segment):
         from scipy.fft import rfft
@@ -191,8 +226,9 @@ def read_audio(path, sample_rate):
 
 
 def transcribe(path, device="auto", threads=None, progress=None):
-    """The notes and pedals of the audio at path. progress(done, total, gpu) is
-    called after each 8 second step."""
+    """The notes and pedals of the audio at path. progress(done, total, engine)
+    is called after each 8 second step, engine being "CUDA", "DirectML" or ""
+    for the CPU."""
     threads = threads or os.cpu_count() or 1
     model = Model(device, threads)
     channels = read_audio(path, model.sample_rate)
@@ -246,7 +282,7 @@ def transcribe(path, device="auto", threads=None, progress=None):
                 elif event.has_onset:
                     found.append(event)
             if progress:
-                progress(cursor + index + 1, len(starts), model.gpu)
+                progress(cursor + index + 1, len(starts), model.engine)
         cursor += count
 
     for found in by_symbol.values():

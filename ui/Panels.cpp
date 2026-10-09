@@ -109,7 +109,7 @@ enum class Icon { Folder, Open, Refresh, Settings, Sun, Moon, Play, Pause, Back,
                   Mini, Expand, Copy, Rename, Check, Sort, Undo, Redo, Anchor, Clear,
                   Draw, Delete,
                   Hold, Tap, Audio, Discord, Roblox, Help,
-                  Repeat, Repeat1, Stop, Restart, More, Warning, Upgrade };
+                  Repeat, Repeat1, Stop, Restart, More, Warning, Upgrade, Opacity, YouTube, Pin, Tune };
 
 // Icons are Lucide, flattened to polylines by tools/gen-icons.py into
 // ui/IconData.hpp. Vector rather than a raster atlas so they stay crisp at
@@ -166,47 +166,68 @@ void DrawChevron(ImDrawList* dl, ImVec2 min, float side, ImU32 ink, float dpi, f
 // Brand marks are filled in the brand's colour: the first path is filled and
 // later paths are cut out of it. Coverage is computed per pixel, even-odd, from
 // 8x8 samples, because ImGui's concave fill mangles these shapes. It is cached
-// per mark and size, so redraws cost only the rects.
-void DrawMark(ImDrawList* dl, Icon icon, ImVec2 min, float side, ImU32 fill) {
+// per mark and size, so redraws cost only the rects. `inner`, when it has
+// alpha, fills what is cut out, such as YouTube's play triangle.
+void DrawMark(ImDrawList* dl, Icon icon, ImVec2 min, float side, ImU32 fill, ImU32 inner = 0) {
     static std::map<std::pair<int, int>, std::vector<unsigned char>> cache;
     const int pixels = std::max(1, static_cast<int>(std::round(side)));
+    const size_t plane = static_cast<size_t>(pixels) * pixels;
     auto [entry, fresh] = cache.try_emplace({static_cast<int>(icon), pixels});
+    // The fill's coverage, then the holes'.
     auto& coverage = entry->second;
     if (fresh) {
         constexpr int kSamples = 8;
         const auto& glyph = icon_data::kGlyphs[static_cast<int>(icon)];
         const float unit = icon_data::kGrid * icon_data::kUnit / pixels;
-        coverage.resize(static_cast<size_t>(pixels) * pixels);
+        coverage.resize(2 * plane);
         for (int y = 0; y < pixels; ++y)
             for (int x = 0; x < pixels; ++x) {
-                int inside = 0;
+                int inside = 0, holes = 0;
                 for (int sy = 0; sy < kSamples; ++sy)
                     for (int sx = 0; sx < kSamples; ++sx) {
                         const float px = (x + (sx + .5f) / kSamples) * unit, py = (y + (sy + .5f) / kSamples) * unit;
-                        bool in = false;
+                        bool in = false, any = false;
                         for (unsigned short p = 0; p < glyph.count; ++p) {
                             const auto& path = icon_data::kPaths[glyph.first + p];
+                            bool inPath = false;
                             for (unsigned short i = 0, j = path.count - 1; i < path.count; j = i++) {
                                 const short* a = &icon_data::kPoints[2 * (path.first + i)];
                                 const short* b = &icon_data::kPoints[2 * (path.first + j)];
-                                if ((a[1] > py) != (b[1] > py) && px < a[0] + (py - a[1]) * (b[0] - a[0]) / (b[1] - a[1])) in = !in;
+                                if ((a[1] > py) != (b[1] > py) && px < a[0] + (py - a[1]) * (b[0] - a[0]) / (b[1] - a[1])) inPath = !inPath;
                             }
+                            in ^= inPath;
+                            any |= inPath;
                         }
                         inside += in;
+                        holes += any && !in;
                     }
-                coverage[static_cast<size_t>(y) * pixels + x] = static_cast<unsigned char>(inside * 255 / (kSamples * kSamples));
+                const size_t at = static_cast<size_t>(y) * pixels + x;
+                coverage[at] = static_cast<unsigned char>(inside * 255 / (kSamples * kSamples));
+                coverage[plane + at] = static_cast<unsigned char>(holes * 255 / (kSamples * kSamples));
             }
     }
     const ImVec2 origin(std::floor(min.x), std::floor(min.y));
-    const ImU32 alpha = fill >> IM_COL32_A_SHIFT & 0xFF;
+    const ImU32 fillAlpha = fill >> IM_COL32_A_SHIFT & 0xFF, innerAlpha = inner >> IM_COL32_A_SHIFT & 0xFF;
     const ImDrawListFlags flags = dl->Flags;
     dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
-    for (int y = 0; y < pixels; ++y)
-        for (int x = 0; x < pixels; ++x)
-            if (const ImU32 c = coverage[static_cast<size_t>(y) * pixels + x] * alpha / 255)
-                dl->AddRectFilled(ImVec2(origin.x + x, origin.y + y), ImVec2(origin.x + x + 1, origin.y + y + 1),
-                                  (fill & ~IM_COL32_A_MASK) | (c << IM_COL32_A_SHIFT));
+    for (size_t at = 0; at < plane; ++at) {
+        // A pixel on the edge between fill and hole takes both colours by their
+        // share, so the background never shows through the seam.
+        const ImU32 a = coverage[at] * fillAlpha / 255, b = coverage[plane + at] * innerAlpha / 255;
+        if (a + b == 0) continue;
+        ImU32 colour = std::min<ImU32>(a + b, 255) << IM_COL32_A_SHIFT;
+        for (const int shift : {IM_COL32_R_SHIFT, IM_COL32_G_SHIFT, IM_COL32_B_SHIFT})
+            colour |= ((fill >> shift & 0xFF) * a + (inner >> shift & 0xFF) * b) / (a + b) << shift;
+        const float x = origin.x + static_cast<float>(at % pixels), y = origin.y + static_cast<float>(at / pixels);
+        dl->AddRectFilled(ImVec2(x, y), ImVec2(x + 1, y + 1), colour);
+    }
     dl->Flags = flags;
+}
+
+// YouTube's mark in its own colours: red with a white play triangle.
+void DrawYouTubeMark(ImDrawList* dl, ImVec2 min, float side) {
+    const int alpha = static_cast<int>(255 * ImGui::GetStyle().Alpha);
+    DrawMark(dl, Icon::YouTube, min, side, IM_COL32(0xFF, 0, 0, alpha), IM_COL32(0xFF, 0xFF, 0xFF, alpha));
 }
 
 bool IconButton(const char* id, Icon icon, const char* tip, const skin::Skin& s, float dpi, bool active = false) {
@@ -224,9 +245,12 @@ bool IconButton(const char* id, Icon icon, const char* tip, const skin::Skin& s,
     // The icon is custom-drawn, so fade it by hand for a disabled button.
     const ImU32 ink = Colour(Mix(s.ink.secondary, s.accent.accent, on));
     const ImU32 alpha = static_cast<ImU32>((ink >> IM_COL32_A_SHIFT & 0xFF) * ImGui::GetStyle().Alpha);
-    DrawIcon(ImGui::GetWindowDrawList(), icon, ImVec2(min.x + (height - 16.f * dpi) / 2,
-             min.y + (height - 16.f * dpi) / 2), 16.f * dpi,
-             (ink & ~IM_COL32_A_MASK) | (alpha << IM_COL32_A_SHIFT), dpi);
+    const ImVec2 at(min.x + (height - 16.f * dpi) / 2, min.y + (height - 16.f * dpi) / 2);
+    // YouTube's mark keeps its own colours.
+    if (icon == Icon::YouTube)
+        DrawYouTubeMark(ImGui::GetWindowDrawList(), at, 16.f * dpi);
+    else
+        DrawIcon(ImGui::GetWindowDrawList(), icon, at, 16.f * dpi, (ink & ~IM_COL32_A_MASK) | (alpha << IM_COL32_A_SHIFT), dpi);
     // An active toggle gets an outline, so its state isn't carried by colour alone;
     // this matches the selected segment of the mini Live/Autoplay control.
     if (on > 0)
@@ -387,7 +411,7 @@ bool TickedItem(const char* label, bool on, const skin::Skin& s, float dpi, floa
 // combo's own window.
 // muted draws the preview greyed, as a device waiting to come back. A preview
 // too long for the frame ends in an ellipsis before the chevron.
-void DrawEllipsis(const std::string& text, float width, ImVec2 min, ImDrawList* dl = nullptr, ImU32 ink = 0);
+void DrawEllipsis(std::string_view text, float width, ImVec2 min, ImDrawList* dl = nullptr, ImU32 ink = 0);
 bool ChevronCombo(const char* id, const char* preview, bool muted = false) {
     const ImVec2 min = ImGui::GetCursorScreenPos(), pad = ImGui::GetStyle().FramePadding;
     const float width = ImGui::CalcItemWidth(), height = ImGui::GetFrameHeight();
@@ -413,6 +437,51 @@ bool EasedButton(const char* label, ImVec2 size = ImVec2(0, 0)) {
     NoteHover(key);
     return clicked;
 }
+
+// The YouTube mark beside "Search YouTube", centred as one unit in an eased
+// button; 0 wide fits them. The mark keeps its own colours.
+bool SearchYouTubeButton(const char* id, float width, const skin::Skin& s, float dpi) {
+    const float side = 16 * dpi, label = ImGui::CalcTextSize("Search YouTube").x;
+    if (width <= 0) width = side + s.spacing.s2 + label + 2 * s.spacing.s3;
+    const ImVec2 min = ImGui::GetCursorScreenPos();
+    const bool clicked = EasedButton(id, ImVec2(width, s.metric.controlHeight));
+    auto* draw = ImGui::GetWindowDrawList();
+    const float x = std::floor(min.x + (width - side - s.spacing.s2 - label) / 2);
+    DrawYouTubeMark(draw, ImVec2(x, min.y + (s.metric.controlHeight - side) / 2), side);
+    draw->AddText(ImVec2(x + side + s.spacing.s2, min.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2),
+                  ImGui::GetColorU32(ImGuiCol_Text), "Search YouTube");
+    return clicked;
+}
+
+// Text typed where a link goes, without its outer spaces.
+std::string Trimmed(std::string_view text) {
+    const size_t first = text.find_first_not_of(" \t"), last = text.find_last_not_of(" \t");
+    return first == std::string_view::npos ? std::string() : std::string(text.substr(first, last - first + 1));
+}
+
+// Words to search YouTube for: text that is not a link, which has "://" or
+// starts with "www." or "youtu", nor a pasted file path, quoted or not, which
+// the converter takes as well. A quoted phrase is still words.
+bool YouTubeWords(std::string_view text) {
+    const std::string trimmed = audio_to_midi::LinkText(text);
+    const auto starts = [&](std::string_view prefix) {
+        return trimmed.size() >= prefix.size() &&
+               std::equal(prefix.begin(), prefix.end(), trimmed.begin(),
+                          [](char a, char b) { return a == std::tolower(static_cast<unsigned char>(b)); });
+    };
+    const bool path = audio_to_midi::IsPastedPath(trimmed);
+    return !trimmed.empty() && trimmed.find("://") == std::string::npos && !starts("www.") && !starts("youtu") && !path;
+}
+
+// The skin and CPU share last sent to an engine for the YouTube window and the
+// converter, so each is sent first and again on a change, and whether the
+// folder picker the window asked for was opened.
+struct ConverterSent {
+    const void* engine = nullptr;
+    uint64_t skin = 0;
+    int cpu = 0;
+    bool folderAsked = false;
+} g_converterSent;
 
 // Clickable readout: left click steps down, right steps up, middle resets to
 // the default. Returns true when the value should change.
@@ -530,21 +599,40 @@ bool EstimatedSlider(const char* label, const char* id, float* value, float esti
     return changed;
 }
 
+// One segment's width as Segments draws it: the widest word, its icon, or both.
+float SegmentWidth(const std::vector<const char*>& labels, const skin::Skin& s, float dpi, bool icons, bool iconsOnly) {
+    float segment = 0;
+    if (!iconsOnly)
+        for (const char* label : labels) segment = std::max(segment, ImGui::CalcTextSize(label).x);
+    if (icons) segment += 14 * dpi + (iconsOnly ? 0 : 6 * dpi);
+    return segment + s.spacing.s4 + s.spacing.s1;
+}
+
+// The whole control's width as Segments draws it.
+float SegmentsWidth(const std::vector<const char*>& labels, const skin::Skin& s, float dpi, int gapAfter, bool icons, bool iconsOnly) {
+    const float inset = s.spacing.s1;
+    return 2 * inset + SegmentWidth(labels, s, dpi, icons, iconsOnly) * labels.size() + inset * (labels.size() - 1) +
+           (gapAfter >= 0 ? 3 * inset : 0);
+}
+
 // Recessed segmented control; the selected segment is raised and outlined.
 // Returns the clicked index, or -1. gapAfter separates segments up to that
 // index from the rest with a hairline. `icons`, one per label, draws an icon
-// before each word.
+// before each word, or alone with the word on hover when iconsOnly. With none
+// selected, `outlined` marks a segment with a hairline. Given `room`, the
+// segments narrow toward their words to fit it.
 int Segments(const char* id, const std::vector<const char*>& labels, int selected, const skin::Skin& s, float dpi,
-             int gapAfter = -1, const std::vector<Icon>& icons = {}) {
+             int gapAfter = -1, const std::vector<Icon>& icons = {}, bool iconsOnly = false, int outlined = -1, float room = 0) {
     const float height = s.metric.controlHeight, inset = s.spacing.s1;
     const float divide = gapAfter >= 0 ? 3 * inset : 0;
-    const float iconSide = 14 * dpi, iconGap = 6 * dpi;
-    float segment = 0;
-    for (const char* label : labels) segment = std::max(segment, ImGui::CalcTextSize(label).x);
-    if (icons.size()) segment += iconSide + iconGap;
-    segment += s.spacing.s4 + s.spacing.s1;
+    iconsOnly = iconsOnly && icons.size();
+    const float iconSide = 14 * dpi, iconGap = iconsOnly ? 0 : 6 * dpi;
+    const float count = static_cast<float>(labels.size());
+    float segment = SegmentWidth(labels, s, dpi, icons.size(), iconsOnly);
+    if (room > 0 && count > 0)
+        segment = std::clamp((room - 2 * inset - inset * (count - 1) - divide) / count, segment - s.spacing.s4 + s.spacing.s1, segment);
     const ImVec2 well = ImGui::GetCursorScreenPos();
-    const float width = 2 * inset + segment * labels.size() + inset * (labels.size() - 1) + divide;
+    const float width = 2 * inset + segment * count + inset * (count - 1) + divide;
     auto* draw = ImGui::GetWindowDrawList();
     skin::RecessedRect(draw, well, ImVec2(well.x + width, well.y + height), s.radius.control, s);
     ImGui::PushID(id);
@@ -554,7 +642,8 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
     // Unchosen segments are bare words in the well, parted by short dividers that
     // fade out beside the thumb, so the control reads as one piece.
     const bool thumb = selected >= 0 && selected < static_cast<int>(labels.size());
-    float thumbX = 0, at = -2;
+    const bool outline = !thumb && outlined >= 0 && outlined < static_cast<int>(labels.size());
+    float thumbX = outline ? xOf(outlined) : 0, at = -2;
     if (thumb) {
         at = Ease(ImGui::GetID("##thumb"), static_cast<float>(selected));
         const int from = static_cast<int>(std::floor(at)), to = std::min(from + 1, static_cast<int>(labels.size()) - 1);
@@ -562,7 +651,7 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
     }
     for (int i = 1; i < static_cast<int>(labels.size()); ++i) {
         const float x = xOf(i) - (i == gapAfter + 1 ? (divide + inset) / 2 : inset / 2);
-        const float clear = thumb ? std::max({thumbX - x, x - thumbX - segment, 0.f}) : segment;
+        const float clear = thumb || outline ? std::max({thumbX - x, x - thumbX - segment, 0.f}) : segment;
         const float show = std::clamp((clear - inset) / (segment / 2), 0.f, 1.f);
         // The gap's divider stays at full strength; the others are a hairline's.
         const skin::Argb ink = i == gapAfter + 1 ? s.ink.tertiary : s.border.hairline;
@@ -599,21 +688,23 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
             if (ImGui::Button("##segment", ImVec2(segment, height - 2 * inset)) && !chosen) clicked = index;
             ImGui::PopID();
             const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
-            const ImVec2 text = ImGui::CalcTextSize(label);
+            const ImVec2 text = iconsOnly ? ImVec2() : ImGui::CalcTextSize(label);
             const float left = min.x + (max.x - min.x - iconSide - iconGap - text.x) / 2;
             const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
             DrawIcon(draw, *(icons.begin() + index), ImVec2(left, (min.y + max.y - iconSide) / 2), iconSide, ink, dpi);
-            draw->AddText(ImVec2(left + iconSide + iconGap, (min.y + max.y - text.y) / 2), ink, label);
+            if (!iconsOnly) draw->AddText(ImVec2(left + iconSide + iconGap, (min.y + max.y - text.y) / 2), ink, label);
+            else if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) ImGui::SetTooltip("%s", label);
         } else if (ImGui::Button(label, ImVec2(segment, height - 2 * inset)) && !chosen) clicked = index;
         NoteHover(key);
         ImGui::PopStyleColor(4);
         ++index;
     }
     ImGui::PopStyleColor();
-    // Outlined after the buttons so their hairlines don't cover it.
-    if (thumb)
+    // Outlined after the buttons so their hairlines don't cover it; the marked
+    // segment, flat, in a quieter ink.
+    if (thumb || outline)
         draw->AddRect(ImVec2(thumbX, well.y + inset), ImVec2(thumbX + segment, well.y + inset + (height - 2 * inset)),
-                      Faded(s.accent.accent), s.radius.element, 0, dpi);
+                      Faded(thumb ? s.accent.accent : s.ink.tertiary), s.radius.element, 0, dpi);
     ImGui::PopStyleVar(2);
     ImGui::PopID();
     ImGui::SetCursorScreenPos(well);
@@ -621,20 +712,12 @@ int Segments(const char* id, const std::vector<const char*>& labels, int selecte
     return clicked;
 }
 
-// Segments' width without icons or a gap, as Segments measures it.
-float SegmentsWidth(const std::vector<const char*>& labels, const skin::Skin& s) {
-    float segment = 0;
-    for (const char* label : labels) segment = std::max(segment, ImGui::CalcTextSize(label).x);
-    segment += s.spacing.s4 + s.spacing.s1;
-    return 2 * s.spacing.s1 + segment * labels.size() + s.spacing.s1 * (labels.size() - 1);
-}
-
 // A setting with a few choices: its label, and the segments at the row's right
 // end as a switch's rail is, or under the label when the row has no room.
 int SettingSegments(const char* label, const char* id, const std::vector<const char*>& labels, int selected,
                     const skin::Skin& s, float dpi) {
     const ImVec2 start = ImGui::GetCursorScreenPos();
-    const float room = ImGui::GetContentRegionAvail().x, width = SegmentsWidth(labels, s);
+    const float room = ImGui::GetContentRegionAvail().x, width = SegmentsWidth(labels, s, dpi, -1, false, false);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
     if (ImGui::CalcTextSize(label).x + s.spacing.s4 + width <= room) {
@@ -646,14 +729,21 @@ int SettingSegments(const char* label, const char* id, const std::vector<const c
 
 // Performer triggers with icons for how each drives the song: clock, key held,
 // key tapped.
-int TriggerSegments(const char* id, const EngineSnapshot& state, const skin::Skin& s, float dpi) {
+int TriggerSegments(const char* id, const EngineSnapshot& state, const skin::Skin& s, float dpi, bool iconsOnly) {
     std::vector<const char*> names;
     std::vector<Icon> icons;
     for (const auto& trigger : state.performer.triggers) {
         names.push_back(trigger.name.c_str());
         icons.push_back(trigger.plays ? Icon::Hold : trigger.steps ? Icon::Tap : Icon::Play);
     }
-    return Segments(id, names, state.trigger, s, dpi, -1, icons);
+    return Segments(id, names, state.trigger, s, dpi, -1, icons, iconsOnly);
+}
+
+// The triggers' width with their words, less their width as drawn.
+float TriggerWordsWidth(const EngineSnapshot& state, const skin::Skin& s, float dpi, bool iconsOnly) {
+    std::vector<const char*> names;
+    for (const auto& trigger : state.performer.triggers) names.push_back(trigger.name.c_str());
+    return SegmentsWidth(names, s, dpi, -1, true, false) - SegmentsWidth(names, s, dpi, -1, true, iconsOnly);
 }
 
 // A performer that is on gets its own panel row when it has a choice to show
@@ -671,6 +761,12 @@ bool PerformerRow(const EngineSnapshot& state) {
 template <class Label>
 void PerformerPanelRow(const char* id, const EngineSnapshot& state, ShellEngine& engine, const skin::Skin& s, float dpi, Label&& label) {
     ImGui::PushID(id);
+    // The triggers show icons alone when the row with their words, as the last
+    // frame measured it, would run past the window.
+    auto* storage = ImGui::GetStateStorage();
+    const ImGuiID wordsKey = ImGui::GetID("##words-width");
+    const float start = ImGui::GetCursorScreenPos().x, room = ImGui::GetContentRegionAvail().x;
+    const bool iconsOnly = storage->GetFloat(wordsKey, 0) > room;
     bool first = true;
     for (const auto& control : state.performer.controls) {
         if (!control.isChoice || !control.panel || !state.performer.Drawn(control)) continue;
@@ -687,9 +783,12 @@ void PerformerPanelRow(const char* id, const EngineSnapshot& state, ShellEngine&
     if (state.performer.triggers.size() > 1) {
         if (!first) ImGui::SameLine(0, s.spacing.s3);
         label("Trigger");
-        if (const int trigger = TriggerSegments("##trigger", state, s, dpi); trigger >= 0)
+        if (const int trigger = TriggerSegments("##trigger", state, s, dpi, iconsOnly); trigger >= 0)
             engine.Send({ShellEngine::Action::Trigger, {}, 0, static_cast<size_t>(trigger)});
     }
+    if (!first || state.performer.triggers.size() > 1)
+        storage->SetFloat(wordsKey, ImGui::GetItemRectMax().x - start +
+            (state.performer.triggers.size() > 1 ? TriggerWordsWidth(state, s, dpi, iconsOnly) : 0));
     ImGui::PopID();
 }
 
@@ -732,19 +831,22 @@ void MenuUnderLastItem(const char* popup, float gap, bool alignRight = false) {
     ImGui::SetNextWindowPos(ImVec2(alignRight ? max.x : min.x, max.y + gap), ImGuiCond_Appearing, ImVec2(alignRight ? 1.f : 0.f, 0.f));
 }
 
-void DrawEllipsis(const std::string& text, float width, ImVec2 min, ImDrawList* dl, ImU32 ink) {
+// A view, so a list row can draw part of its name without copying it.
+void DrawEllipsis(std::string_view text, float width, ImVec2 min, ImDrawList* dl, ImU32 ink) {
     const float height = ImGui::GetTextLineHeight();
     if (!dl) dl = ImGui::GetWindowDrawList();
     if (!ink) ink = ImGui::GetColorU32(ImGuiCol_Text);
     dl->PushClipRect(min, ImVec2(min.x + std::max(1.f, width), min.y + height), true);
-    const float measured = ImGui::CalcTextSize(text.c_str()).x;
+    const char* const begin = text.data();
+    const char* const end = begin + text.size();
+    const float measured = ImGui::CalcTextSize(begin, end).x;
     if (measured > width && width > ImGui::CalcTextSize("...").x) {
         const float available = width - ImGui::CalcTextSize("...").x;
         dl->PushClipRect(min, ImVec2(min.x + available, min.y + height), true);
-        dl->AddText(min, ink, text.c_str());
+        dl->AddText(min, ink, begin, end);
         dl->PopClipRect();
         dl->AddText(ImVec2(min.x + available, min.y), ink, "...");
-    } else dl->AddText(min, ink, text.c_str());
+    } else dl->AddText(min, ink, begin, end);
     dl->PopClipRect();
 }
 
@@ -880,6 +982,13 @@ bool StatePill(const char* label, bool on, const Fonts& fonts, const skin::Skin&
     return clicked;
 }
 
+// The keys pill carries Octaves when it is on, so doubling never plays unseen.
+const char* KeysLabel(const EngineSnapshot& state) {
+    static constexpr const char* k88[5] = {"88 Keys", "88 Keys \xc3\x97" "2", "88 Keys \xc3\x97" "3", "88 Keys \xc3\x97" "4", "88 Keys \xc3\x97" "5"};
+    static constexpr const char* k61[5] = {"61 Keys", "61 Keys \xc3\x97" "2", "61 Keys \xc3\x97" "3", "61 Keys \xc3\x97" "4", "61 Keys \xc3\x97" "5"};
+    return (state.eightyEightKeys ? k88 : k61)[std::clamp(state.octaves, 1, 5) - 1];
+}
+
 // The pills shown: all of them, or with `onlyAvailable` (mini) not those that
 // need a MIDI input while none is chosen, nor Velocity under MIDI output.
 // Sustain, unavailable only while a song plays, always shows.
@@ -889,7 +998,7 @@ std::vector<const char*> PillLabels(const EngineSnapshot& state, bool onlyAvaila
     if (input) labels.push_back("Midi2Key");
     if (!state.outputMidi || !onlyAvailable) labels.push_back("Velocity");
     labels.push_back("Sustain");
-    labels.push_back(state.eightyEightKeys ? "88 Keys" : "61 Keys");
+    labels.push_back(KeysLabel(state));
     if (input) labels.push_back("MidiConnect");
     labels.push_back("AutoVol");
     return labels;
@@ -936,7 +1045,7 @@ bool StatePills(const Fonts& fonts, const skin::Skin& design, float dpi, ShellEn
                   nullptr))
         engine.Send({ShellEngine::Action::Sustain, {}, 0, 0, !state->sustain});
     ImGui::SameLine();
-    if (StatePill(state->eightyEightKeys ? "88 Keys" : "61 Keys", true,
+    if (StatePill(KeysLabel(*state), true,
                   fonts, design, dpi, pad, true, nullptr, nullptr, true))
         engine.Send({ShellEngine::Action::EightyEightKeys, {}, 0, 0, !state->eightyEightKeys});
     ImGui::SameLine();
@@ -1206,7 +1315,7 @@ std::string Panels::SectionBounds(const EngineSnapshot& state) const {
 
 void Panels::TimeReadout(ImDrawList* draw, const EngineSnapshot& state, bool section, float left, float right, float y,
                          const skin::Skin& s) const {
-    const std::string position = Time(seeking_ ? seekPosition_ : state.position);
+    const std::string position = Time(seeking_ ? seekPosition_ : state.Position());
     std::string time = state.playbackCountdown ? "Starts in " + std::to_string(state.playbackCountdown) + "s" :
         position + " / " + Time(state.duration);
     // A looped section's bounds, following a handle while it is dragged, go before
@@ -1265,6 +1374,7 @@ void Panels::LoadPreferences(const std::filesystem::path& path) {
         // Bounded so an edited file can't overflow the window size; the work area
         // clamps it further.
         preferences.windowExtra = std::clamp(value("windowExtra", 0.f), 0.f, 16384.f);
+        preferences.windowWider = std::clamp(value("windowWider", 0.f), 0.f, 16384.f);
         preferences.maximized = value("maximized", false);
         const auto folder = value("midiFolder", std::string());
         preferences.folder = std::filesystem::path(std::u8string(folder.begin(), folder.end()));
@@ -1298,7 +1408,8 @@ void Panels::SavePreferences(const std::filesystem::path& path, bool exiting) co
                         {"miniAutoplay", miniAutoplay},
                         {"tracksOpen", tracksExpanded}, {"velocityOpen", velocityExpanded},
                         {"curveTool", curveTool_},
-                        {"windowExtra", preferences.windowExtra}, {"maximized", preferences.maximized},
+                        {"windowExtra", preferences.windowExtra}, {"windowWider", preferences.windowWider},
+                        {"maximized", preferences.maximized},
                         {"tourSeen", preferences.tourSeen}, {"helpBuild", preferences.helpBuild},
                         {"windowX", preferences.windowX}, {"windowY", preferences.windowY}, {"windowWidth", preferences.windowWidth},
                         {"hideFromCapture", preferences.hideFromCapture}, {"hideFromTaskbar", preferences.hideFromTaskbar},
@@ -1321,11 +1432,24 @@ void Panels::SaveThemes() const {
         ReportError("Could not save the themes.", "Could not write " + Utf8(themesPath_.filename()) + ".");
 }
 
-void Panels::CaptureRing(ImDrawList* draw, const skin::Skin& s, float dpi) const {
+// A ring over the last item: the accent, or for a refused key the warning colour
+// with a tint of it inside.
+static void ItemRing(ImDrawList* draw, const skin::Skin& s, float dpi, bool refused) {
     const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
-    const bool refused = captureRefusedAt >= 0 && ImGui::GetTime() - captureRefusedAt < kRefusedFlash;
     if (refused) draw->AddRectFilled(min, max, Colour((s.accent.warn & 0xFFFFFFu) | 0x38000000u), s.radius.control);
     draw->AddRect(min, max, Colour(refused ? s.accent.warn : s.accent.accent), s.radius.control, 0, 2 * dpi);
+}
+
+void Panels::CaptureRing(ImDrawList* draw, const skin::Skin& s, float dpi) const {
+    ItemRing(draw, s, dpi, captureRefusedAt >= 0 && ImGui::GetTime() - captureRefusedAt < kRefusedFlash);
+}
+
+void Panels::HideSwitchClicked(const EngineSnapshot& state) {
+    if (state.hotkeys[kShowHideHotkey].empty()) {
+        hotkeyCapture = static_cast<int>(kShowHideHotkey);
+        hideOnShowHideKey = true;
+    } else showHideTakenAt = ImGui::GetTime();
+    revealShowHideKey_ = true;
 }
 
 void Panels::ReportError(const std::string& result, const std::string& detail) const {
@@ -1967,14 +2091,17 @@ ImVec2 Panels::DesiredSize() const {
     // Mini sizes to its content: across, the pills it shows plus window padding,
     // or the top strip's floor when they need less; down, the 88 dp strip and rows
     // 8 dp apart, with no status bar. Autoplay adds a row and the up-next line,
-    // and a performer another row. Each height leaves 8 dp below the last row.
+    // and a performer another row. Each height leaves 8 dp below the last row, and
+    // grows by the toasts showing, which sit under it.
     if (miniMode) {
         const int rows = miniAutoplay ? (performerRow_ ? 5 : 4) : 3;
-        const float floor = 416 + 2 * grow.window + 34 * std::max(0.f, grow.text);
+        const float floor = 452 + 2 * grow.window + 34 * std::max(0.f, grow.text);
         return ImVec2(miniPillsWidth_ > 0 ? std::max(floor, std::ceil(miniPillsWidth_)) : 528 + 2 * grow.window + 40 * std::max(0.f, grow.text),
-                      (miniAutoplay ? (performerRow_ ? 262.f : 222.f) + std::max(0.f, grow.meta) : 136.f) + rows * grow.control);
+                      (miniAutoplay ? (performerRow_ ? 262.f : 222.f) + std::max(0.f, grow.meta) : 136.f) + rows * grow.control +
+                      MiniToastsHeight(design, 1.f));
     }
-    return ImVec2(940 + LeftColumnFloor(design) - 240 + RightColumnFloor(design) - 600 + 2 * grow.window, FullHeight());
+    // The full window opens at its narrowest; any width beyond it is the player's.
+    return ImVec2(MinimumSize().x, FullHeight());
 }
 
 float Panels::HeightGrowth(bool tracksOpen, bool velocityOpen) const {
@@ -1996,10 +2123,14 @@ float Panels::FullHeight() const {
 ImVec2 Panels::MinimumSize() const {
     const skin::Skin design = ActiveSkin();
     const auto grow = GrowthOf(design);
-    return ImVec2(884 + LeftColumnFloor(design) - 240 + RightColumnFloor(design) - 600 + 2 * grow.window, 604 + HeightGrowth(true, false));
+    return ImVec2(928 + LeftColumnFloor(design) - 240 + RightColumnFloor(design) - 600 + 2 * grow.window, 604 + HeightGrowth(true, false));
 }
 
-void Panels::SyncLayout(const EngineSnapshot& state) { performerRow_ = PerformerRow(state); }
+void Panels::SyncLayout(const EngineSnapshot& state) {
+    performerRow_ = PerformerRow(state);
+    const auto notice = MiniNoticeText(state);
+    miniNotice_ = !notice.empty() && notice != noticeClosed_ && tourStop < 0;
+}
 
 namespace {
 const char* BackendName(MidiBackend backend) {
@@ -2008,6 +2139,7 @@ const char* BackendName(MidiBackend backend) {
     case MidiBackend::KernelStreaming: return "Kernel Streaming";
     case MidiBackend::WootingAnalog: return "Wooting Analog";
     case MidiBackend::NamedPort: return "QuartzMIDI port";
+    case MidiBackend::Qwerty: return "QWERTY keyboard";
     default: return "WinRT";
     }
 }
@@ -2262,13 +2394,16 @@ void Panels::DrawVelocity(const Fonts& fonts, const skin::Skin& design, float dp
             histogramHeights_[i] = largest ? static_cast<float>(played.buckets[i]) / largest : 0.f;
     }
     if (histogramVisible_) {
+        // The bar the last note fell in is lit in the ring's colour, under the
+        // ring, so each note is seen landing on its bar.
+        const int lastBar = played.last ? velocity_telemetry::bucketFor(played.last) : -1;
         const float barWidth = (plotMax.x - plotMin.x) / histogramHeights_.size();
         for (size_t i = 0; i < histogramHeights_.size(); ++i) {
             const float height = histogramHeights_[i] * (plotMax.y - plotMin.y) * .32f;
             if (height <= 0) continue;
             draw->AddRectFilled(ImVec2(plotMin.x + i * barWidth + dpi, plotMax.y - height),
                                 ImVec2(plotMin.x + (i + 1) * barWidth - dpi, plotMax.y),
-                                Colour(s.accent.accentSoft), 1.5f * dpi);
+                                Colour(static_cast<int>(i) == lastBar ? s.accent.accent : s.accent.accentSoft), 1.5f * dpi);
         }
     }
     for (int i = 1; i < 4; ++i) {
@@ -2753,7 +2888,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
                                            state->autoTranspose ? 1 : 0, s, dpi); chosen >= 0)
         engine.Send({ShellEngine::Action::AutoTranspose, {}, 0, 0, chosen == 1});
     // Performer switch and section, only when the add-on is present.
-    const auto& performer = state->performer;
+    const auto& performer = settingsPerformer ? *settingsPerformer : state->performer;
     const auto performerControl = [&](const PerformerControl& control) {
         const auto send = [&](double amount) {
             ShellEngine::Command command{ShellEngine::Action::PerformerValue, {}, 0, 0, false, amount};
@@ -2771,7 +2906,8 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(control.name.c_str());
             std::vector<const char*> names;
             for (const auto& choice : control.choices) names.push_back(choice.c_str());
-            if (const int chosen = Segments(id.c_str(), names, static_cast<int>(control.value), s, dpi, 0); chosen >= 0) send(chosen);
+            if (const int chosen = Segments(id.c_str(), names, static_cast<int>(control.value), s, dpi, 0, {}, false, -1, ImGui::GetContentRegionAvail().x);
+                chosen >= 0) send(chosen);
             return;
         }
         const float shown = static_cast<float>(performer.Shown(control));
@@ -2818,14 +2954,47 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             draw->AddText(ImVec2(tagMin.x + padX, tagMin.y + 2 * dpi), Colour(s.accent.warn), performer.tag.c_str());
         }
     }
+    playerRowDrawn = false;
     if (performer.on) {
-        // Choosing a preset sets the sliders to its values; after that the user owns them.
+        // A lit preset shows its own values; moving one lights Custom.
         if (!performer.presets.empty()) {
-            if (!performer.presetName.empty()) { ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(performer.presetName.c_str()); }
+            const ImVec2 start = ImGui::GetCursorScreenPos();
+            const float room = ImGui::GetContentRegionAvail().x;
+            // The word, the pin beside it while the open song can keep its own
+            // row, and Custom at the line's right end as SettingSegments places
+            // segments, or under them when the line has no room.
+            const bool pin = performer.Remembers() && !state->loaded.empty();
+            const std::vector<const char*> customLabel{"Custom"};
+            const float customWidth = performer.rowIds.empty() ? 0 : SegmentsWidth(customLabel, s, dpi, -1, true, false);
+            const float line = (performer.presetName.empty() ? 0 : ImGui::CalcTextSize(performer.presetName.c_str()).x + s.spacing.s2) +
+                               s.metric.controlHeight + s.spacing.s4 + customWidth;
+            playerLabelRoom = room - line;
+            bool started = false;
+            if (!performer.presetName.empty()) {
+                ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(performer.presetName.c_str());
+                started = true;
+            }
+            if (pin) {
+                if (started) ImGui::SameLine(0, s.spacing.s2);
+                if (IconButton("##performer-pin", Icon::Pin, "Pin to Song", s, dpi, performer.pinned))
+                    engine.Send({ShellEngine::Action::PerformerPin, {}, 0, 0, !performer.pinned});
+                started = true;
+            }
+            if (!performer.rowIds.empty()) {
+                if (line <= room) {
+                    if (started) ImGui::SameLine(0, 0);
+                    ImGui::SetCursorScreenPos(ImVec2(start.x + room - customWidth, start.y));
+                }
+                if (Segments("##performer-custom", customLabel, performer.custom ? 0 : -1, s, dpi, -1, {Icon::Tune}) >= 0)
+                    engine.Send({ShellEngine::Action::PerformerPreset, {}, 0, performer.presets.size()});
+            }
             std::vector<const char*> names;
             for (const auto& preset : performer.presets) names.push_back(preset.c_str());
-            if (const int preset = Segments("##performer-preset", names, performer.preset, s, dpi); preset >= 0)
+            if (const int preset = Segments("##performer-preset", names, performer.custom ? -1 : performer.preset, s, dpi, -1, {}, false,
+                                            performer.custom ? performer.preset : -1, room); preset >= 0)
                 engine.Send({ShellEngine::Action::PerformerPreset, {}, 0, static_cast<size_t>(preset)});
+            playerRowRoom = start.x + room - ImGui::GetItemRectMax().x;
+            playerRowDrawn = true;
         }
         for (const auto& control : performer.controls) if (control.trigger < 0) performerControl(control);
     }
@@ -2838,8 +3007,28 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     if (SettingSwitch("Fold out-of-range notes onto the keys", outRange,
         nullptr, fonts, design, dpi))
         engine.Send({ShellEngine::Action::OutRange, {}, 0, 0, outRange});
-    if (const int octaves = SettingSegments("Octaves", "##octaves", {"1", "2", "3", "4", "5"}, state->octaves - 1, s, dpi); octaves >= 0)
+    if (const int octaves = SettingSegments("Octaves", "##octaves", {"Off", "2", "3", "4", "5"}, state->octaves - 1, s, dpi); octaves >= 0)
         engine.Send({ShellEngine::Action::Octaves, {}, 0, 0, false, static_cast<double>(octaves + 1)});
+    {
+        // The key the app holds for the sostenuto pedal, the one bound to it in the
+        // game. Its cap captures the next key, as a hotkey's does.
+        const float height = s.metric.controlHeight, capWidth = 112 * dpi;
+        const auto min = ImGui::GetCursorScreenPos();
+        const float width = ImGui::GetContentRegionAvail().x;
+        DrawEllipsis("Sostenuto pedal", width - capWidth - s.spacing.s2,
+                     ImVec2(min.x, min.y + (height - ImGui::GetTextLineHeight()) / 2));
+        ImGui::SetCursorScreenPos(ImVec2(min.x + width - capWidth, min.y));
+        if (EasedButton("##sostenuto-cap", ImVec2(capWidth, height))) {
+            sostenutoCapture = !sostenutoCapture;
+            hotkeyCapture = -1;
+        }
+        auto* draw = ImGui::GetWindowDrawList();
+        const std::string cap = sostenutoCapture ? std::string("Press a key") : HotkeyLabel(state->sostenutoKey);
+        const ImVec2 capMin = ImGui::GetItemRectMin(), size = ImGui::CalcTextSize(cap.c_str(), nullptr, false);
+        draw->AddText(ImVec2(capMin.x + (capWidth - size.x) / 2, capMin.y + (height - size.y) / 2),
+                      ImGui::GetColorU32(Colour(sostenutoCapture ? s.ink.secondary : s.ink.primary)), cap.c_str());
+        if (sostenutoCapture) CaptureRing(draw, s, dpi);
+    }
     ImGui::Separator();
     section("Velocity");
     // The modifier only matters while velocity is on.
@@ -2876,17 +3065,16 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     {
         // The show/hide key is the way back to a window with no taskbar button, so
         // the switch works only while that key is bound and registered. Clicked
-        // greyed, it arms that key's capture, and the key taken turns it on.
+        // greyed, it arms that key's capture, and the key taken turns it on; a
+        // bound key another program holds flashes instead (HideSwitchClicked).
         const bool canHide = !state->hotkeys[kShowHideHotkey].empty() && transportKeysAvailable[kShowHideHotkey];
         if (hideOnceShowHideWorks && canHide && hotkeyCapture < 0) { preferences.hideFromTaskbar = true; hideOnceShowHideWorks = false; }
         bool hidden = preferences.hideFromTaskbar && canHide;
         ImGui::BeginDisabled(!canHide);
         if (SettingSwitch("Hide from taskbar and Alt+Tab", hidden, nullptr, fonts, design, dpi)) preferences.hideFromTaskbar = hidden;
         ImGui::EndDisabled();
-        if (!canHide && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            hotkeyCapture = static_cast<int>(kShowHideHotkey);
-            hideOnShowHideKey = revealShowHideKey_ = true;
-        }
+        if (!canHide && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            HideSwitchClicked(*state);
     }
     if (captureExclusionOffered) SettingSwitch("Hide from screen capture", preferences.hideFromCapture, nullptr, fonts, design, dpi);
     ImGui::Separator();
@@ -2914,7 +3102,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
                           text.c_str());
         };
         // Returns 1 when the cap is clicked and 2 when the unbind cross is.
-        const auto keyRow = [&](const std::string& action, const std::string& key, bool armed, bool available) {
+        const auto keyRow = [&](const std::string& action, const std::string& key, bool armed, bool available, bool flash = false) {
             int clicked = 0;
             const auto min = ImGui::GetCursorScreenPos();
             const float width = ImGui::GetContentRegionAvail().x;
@@ -2930,6 +3118,7 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
             if (armed) capText(faceMin, faceMax, "Press a key", false, true);
             else if (bound) capText(faceMin, faceMax, HotkeyLabel(key), dead, false);
             if (armed) CaptureRing(draw, s, dpi);
+            else if (flash) ItemRing(draw, s, dpi, true);
             ImGui::SameLine(0, gap);
             // The cross keeps its place on every row, greyed while there is nothing to unbind.
             ImGui::BeginDisabled(!bound);
@@ -2941,8 +3130,10 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
         const auto hotkeyRow = [&](size_t i, const std::string& action) {
             ImGui::PushID(static_cast<int>(i));
             const bool armed = hotkeyCapture == static_cast<int>(i);
-            const int clicked = keyRow(action, state->hotkeys[i], armed, transportKeysAvailable[i]);
-            if (clicked == 1) hotkeyCapture = armed ? -1 : static_cast<int>(i);
+            // The Show/hide key the greyed Hide from taskbar switch was clicked for.
+            const bool flash = i == kShowHideHotkey && showHideTakenAt >= 0;
+            const int clicked = keyRow(action, state->hotkeys[i], armed, transportKeysAvailable[i], flash);
+            if (clicked == 1) { hotkeyCapture = armed ? -1 : static_cast<int>(i); sostenutoCapture = false; }
             if (clicked == 2) {
                 ShellEngine::Command command{ShellEngine::Action::Hotkey};
                 command.track = i; engine.Send(std::move(command));
@@ -3026,7 +3217,6 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     }
     ImGui::Separator();
     section("Appearance");
-    SettingSlider("Window opacity", "##window-opacity", &preferences.opacity, 40, 100, "%d%%", s, dpi, nullptr, 100);
     // All themes by name, built-ins first. Customise opens the editor on the chosen
     // theme, or on a copy of a built-in.
     {
@@ -3128,6 +3318,22 @@ void Panels::DrawSettings(const Fonts& fonts, const skin::Skin& design, float dp
     ImGui::PopStyleVar();
 }
 
+// An explicit position isn't clamped by ImGui, so keep a popover on screen
+// here: in mini mode at the bottom edge, its own window would open off the
+// monitor. Under the full window's strip it scrolls shorter rather than rising
+// over the button that opened it and the window's buttons; mini's sits beside it.
+static void FitPopover(ImVec2& position, float& maxHeight, float width, float dpi, bool beside) {
+    for (const auto& monitor : ImGui::GetPlatformIO().Monitors) {
+        const ImVec2 min = monitor.WorkPos, max(monitor.WorkPos.x + monitor.WorkSize.x, monitor.WorkPos.y + monitor.WorkSize.y);
+        if (position.x < min.x - width || position.x >= max.x || position.y < min.y || position.y >= max.y) continue;
+        maxHeight = std::min(maxHeight, max.y - min.y);
+        if (!beside) maxHeight = std::min(maxHeight, std::max(max.y - position.y, 240 * dpi));
+        position.y = std::max(min.y, std::min(position.y, max.y - maxHeight));
+        position.x = std::clamp(position.x, min.x, std::max(min.x, max.x - width));
+        break;
+    }
+}
+
 void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float dpi,
                              ShellEngine& engine, ImVec2 popupPosition, float popupMaxHeight, bool bare) {
     const auto s = skin::ScaleGeometry(design, dpi);
@@ -3138,16 +3344,7 @@ void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float
       if (IconButton("##settings", Icon::Settings, "Settings", s, dpi, ImGui::IsPopupOpen("Settings")))
           ImGui::OpenPopup("Settings"); }
 
-    // An explicit position isn't clamped by ImGui, so keep the panel on screen
-    // here: in mini mode at the bottom edge, its own window would open off the monitor.
-    for (const auto& monitor : ImGui::GetPlatformIO().Monitors) {
-        const ImVec2 min = monitor.WorkPos, max(monitor.WorkPos.x + monitor.WorkSize.x, monitor.WorkPos.y + monitor.WorkSize.y);
-        if (popupPosition.x < min.x - popupWidth || popupPosition.x >= max.x || popupPosition.y < min.y || popupPosition.y >= max.y) continue;
-        popupMaxHeight = std::min(popupMaxHeight, max.y - min.y);
-        popupPosition.y = std::max(min.y, std::min(popupPosition.y, max.y - popupMaxHeight));
-        popupPosition.x = std::clamp(popupPosition.x, min.x, std::max(min.x, max.x - popupWidth));
-        break;
-    }
+    FitPopover(popupPosition, popupMaxHeight, popupWidth, dpi, bare);
     // The device popup takes Settings' position and height. Anchored at the pill
     // it overflowed the window, and a popup that leaves the window becomes its own
     // OS window.
@@ -3172,6 +3369,7 @@ void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float
         ImGui::EndPopup();
     } else {
         hotkeyCapture = -1;
+        sostenutoCapture = false;
         hideOnceShowHideWorks = false;
     }
 }
@@ -3180,6 +3378,18 @@ void Panels::SettingsControl(const Fonts& fonts, const skin::Skin& design, float
 // and becomes Cancel while its run is going. Choosing a file is a secondary
 // icon at the end of the field; sign-in is the row below. Errors use the bad
 // colour; the accent is reserved for selection.
+constexpr const char* kConvertHint = "Paste a YouTube or audio link";
+// Two rows on one grid (source, then account), each ending in a button of the
+// same width at the same edge. The width fits the widest label either shows,
+// with the mark beside Search YouTube, so nothing moves when Convert becomes
+// Cancel.
+template <class Geometry> float ConvertActionWidth(const Geometry& s, float dpi) {
+    float actionWidth = ImGui::CalcTextSize("Search YouTube").x + 16 * dpi + s.spacing.s2 + 2 * s.spacing.s3;
+    for (const char* label : {"Convert", "Cancel", "Close", "Sign in", "Sign in again", "Install"})
+        actionWidth = std::max(actionWidth, ImGui::CalcTextSize(label).x + 2 * s.spacing.s3);
+    return actionWidth;
+}
+
 void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine) {
     const auto state = engine.Snapshot();
     const auto s = skin::ScaleGeometry(design, dpi);
@@ -3193,12 +3403,15 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     const bool busy = state->converting; // true while the sign-in window is open too
     const bool ready = !state->folder.empty();
     const bool playlistLink = audio_to_midi::IsPlaylistLink(convertLink_);
-    // Two rows on one grid (source, then account), each ending in a button of the
-    // same width at the same edge. The width fits the widest label either shows,
-    // so nothing moves when Convert becomes Cancel.
-    float actionWidth = 0;
-    for (const char* label : {"Convert", "Cancel", "Close", "Sign in", "Sign in again", "Install"})
-        actionWidth = std::max(actionWidth, ImGui::CalcTextSize(label).x + 2 * s.spacing.s3);
+    const bool words = YouTubeWords(convertLink_);
+    const float actionWidth = ConvertActionWidth(s, dpi);
+    // The YouTube window, opening Home to find piano recordings, or searching for
+    // words when given. It stays open through a conversion; what is picked there
+    // meanwhile waits its turn.
+    const auto browse = [&](const std::string& search) {
+        engine.Send({ShellEngine::Action::YouTubeBrowse, {}, 0, 0, false, 0, search});
+        yieldTopmost = true;
+    };
     const float rowStart = ImGui::GetCursorPosX();
     // Progress: a bar while running, filled to the step's percentage when it
     // gives one and moving back and forth otherwise, then the converter's last
@@ -3229,15 +3442,27 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
             ImGui::PopTextWrapPos();
             ImGui::PopStyleColor();
         }
+        if (state->conversionsWaiting) {
+            ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
+            ImGui::Text("%zu more waiting", state->conversionsWaiting);
+            ImGui::PopStyleColor();
+        }
     };
     // Add-on present but not installed: show the install row on the same grid;
-    // the popover becomes the converter once it's installed. One install runs
-    // on any DirectX 12 GPU, and on the CPU without one.
+    // the popover becomes the converter once it's installed. Setup picks CUDA
+    // on an NVIDIA card, whose libraries take 1.9 GB for CUDA 13 and 2.8 GB for
+    // CUDA 12, and DirectML on any other DirectX 12 GPU or the CPU.
     if (!state->converterInstalled && (state->converterCanSetUp || state->settingUp)) {
+        const bool nvidia = std::any_of(state->converterEngines.begin(), state->converterEngines.end(),
+                                        [](const std::string& engine) { return engine.starts_with("cuda"); });
         ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Converter, 610 MB");
+        ImGui::TextUnformatted(nvidia ? "Converter, 2.5 to 3.4 GB" : "Converter, 610 MB");
         ImGui::PopStyleColor();
+        ImGui::SameLine();
+        // Installs the converter, then opens the window.
+        ImGui::SetCursorPosX(rowStart + width - actionWidth - s.metric.controlHeight - s.spacing.s2);
+        if (IconButton("##convert-youtube", Icon::YouTube, "YouTube", s, dpi, state->browsingYouTube)) browse({});
         ImGui::SameLine();
         ImGui::SetCursorPosX(rowStart + width - actionWidth);
         if (EasedButton(busy ? "Cancel" : "Install", ImVec2(actionWidth, s.metric.controlHeight)))
@@ -3246,31 +3471,50 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
         ImGui::PopStyleVar(2);
         return;
     }
-    ImGui::BeginDisabled(busy || !ready);
-    ImGui::SetNextItemWidth(width - actionWidth - s.metric.controlHeight - 2 * s.spacing.s2);
-    ImGui::InputTextWithHint("##convert-link", "Paste a YouTube or audio link", convertLink_, sizeof(convertLink_));
+    // While a conversion runs, a link or file added here waits its turn.
+    ImGui::BeginDisabled(!ready);
+    ImGui::SetNextItemWidth(width - actionWidth - 2 * s.metric.controlHeight - 3 * s.spacing.s2);
+    ImGui::InputTextWithHint("##convert-link", kConvertHint, convertLink_, sizeof(convertLink_));
+    ImGui::EndDisabled();
     ImGui::SameLine();
+    // Never disabled: without a MIDI folder the window still opens, and a pick
+    // there asks for one. Words in the field become its search.
+    if (IconButton("##convert-youtube", Icon::YouTube, "YouTube", s, dpi, state->browsingYouTube)) {
+        browse(words ? Trimmed(convertLink_) : std::string());
+        if (words) convertLink_[0] = 0;
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!ready);
     // Audio file picker, at the end of the link field.
     if (IconButton("##convert-file", Icon::Open, "Choose an audio file", s, dpi)) {
         const auto path = PickFile(hwnd, PickKind::Audio);
-        if (!path.empty()) engine.Send({ShellEngine::Action::ConvertAudio, path, 0, 0, false, static_cast<double>(preferences.converterCpu)});
+        if (!path.empty()) engine.Send({ShellEngine::Action::ConvertAudio, path});
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    if (busy) {
+    // Words search YouTube. A link converts, or waits its turn while a run goes;
+    // the field is emptied once it is sent, and Cancel shows while it is empty.
+    if (words) {
+        if (SearchYouTubeButton("##convert-search", actionWidth, s, dpi)) {
+            browse(Trimmed(convertLink_));
+            convertLink_[0] = 0;
+        }
+    } else if (busy && !convertLink_[0]) {
         if (EasedButton(state->signingIn ? "Close" : "Cancel", ImVec2(actionWidth, s.metric.controlHeight)))
             engine.Send({ShellEngine::Action::ConvertCancel});
     } else {
         ImGui::BeginDisabled(!ready || !convertLink_[0]);
-        if (EasedButton("Convert", ImVec2(actionWidth, s.metric.controlHeight)))
-            engine.Send({ShellEngine::Action::ConvertAudio, {}, 0, 0, playlistLink && convertPlaylist_,
-                         static_cast<double>(preferences.converterCpu), convertLink_});
+        if (EasedButton("Convert", ImVec2(actionWidth, s.metric.controlHeight))) {
+            engine.Send({ShellEngine::Action::ConvertAudio, {}, 0, 0, playlistLink && convertPlaylist_, 0,
+                         audio_to_midi::LinkText(convertLink_)});
+            convertLink_[0] = 0;
+        }
         ImGui::EndDisabled();
     }
     // Only for links that name a playlist. Unchecked, a video opened from a
     // playlist converts alone.
     if (playlistLink) {
-        ImGui::BeginDisabled(busy || !ready);
+        ImGui::BeginDisabled(!ready);
         SettingSwitch("Whole playlist", convertPlaylist_, nullptr, fonts, design, dpi);
         ImGui::EndDisabled();
     }
@@ -3286,10 +3530,36 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
         ImGui::TextUnformatted("Processor");
         ImGui::PopStyleColor();
         ImGui::SameLine();
-        const float segmentsWidth = SegmentsWidth({"25%", "50%", "75%", "100%"}, s);
+        const float segmentsWidth = SegmentsWidth({"25%", "50%", "75%", "100%"}, s, dpi, -1, false, false);
         ImGui::SetCursorPosX(rowStart + width - segmentsWidth);
         if (const int picked = Segments("##converter-cpu", {"25%", "50%", "75%", "100%"}, chosen, s, dpi); picked >= 0)
             preferences.converterCpu = kShares[picked];
+    }
+
+    // The engine setup picked, beside the others this PC's GPU can run, in case
+    // another runs better. Picking one installs it.
+    {
+        auto choices = state->converterEngines;
+        if (!state->converterEngine.empty() &&
+            std::find(choices.begin(), choices.end(), state->converterEngine) == choices.end())
+            choices.push_back(state->converterEngine);
+        if (choices.size() > 1) {
+            std::vector<std::string> names;
+            for (const auto& choice : choices) names.push_back(audio_to_midi::EngineName(choice));
+            std::vector<const char*> labels;
+            for (const auto& name : names) labels.push_back(name.c_str());
+            const int chosen = static_cast<int>(std::find(choices.begin(), choices.end(), state->converterEngine) - choices.begin());
+            ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted("GPU");
+            ImGui::PopStyleColor();
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(rowStart + width - SegmentsWidth(labels, s, dpi, -1, false, false));
+            ImGui::BeginDisabled(busy);
+            if (const int picked = Segments("##converter-engine", labels, chosen, s, dpi); picked >= 0 && picked != chosen)
+                engine.Send({ShellEngine::Action::ConverterEngine, {}, 0, 0, false, 0, choices[picked]});
+            ImGui::EndDisabled();
+        }
     }
 
     // Account status, in quieter ink than the button beside it.
@@ -3299,7 +3569,8 @@ void Panels::DrawConvert(HWND hwnd, const Fonts& fonts, const skin::Skin& design
     ImGui::PopStyleColor();
     ImGui::SameLine();
     ImGui::SetCursorPosX(rowStart + width - actionWidth);
-    ImGui::BeginDisabled(busy);
+    // A window of this version signs in itself; an older one signs in from its own page.
+    ImGui::BeginDisabled(state->browsingYouTube ? !state->youtubeWindowSignsIn : busy);
     if (EasedButton(state->youtubeSignedIn ? "Sign in again" : "Sign in", ImVec2(actionWidth, s.metric.controlHeight)))
         engine.Send({ShellEngine::Action::YouTubeSignIn});
     ImGui::EndDisabled();
@@ -3412,48 +3683,68 @@ void Panels::DrawLog(HWND hwnd, const Fonts& fonts, const skin::Skin& design, fl
         const auto state = engine.Snapshot();
         if (IconButton("##clear-log", Icon::Clear, "Clear Log", s, dpi)) engine.Send({ShellEngine::Action::ClearLog});
         ImGui::SameLine();
-        if (IconButton("##copy-log", Icon::Copy, "Copy Log", s, dpi)) CopyUtf8ToClipboard(hwnd, *state->log);
+        if (IconButton("##copy-log", Icon::Copy, "Copy Log", s, dpi)) CopyUtf8ToClipboard(hwnd, state->log->Text());
         // Lines wrap to the panel: a long line (a Python warning, a path) would
         // otherwise run off the right edge.
         ImGui::BeginChild("##log-output", ImVec2(0, 0), ImGuiChildFlags_Borders);
         const bool atBottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4 * dpi;
-        const std::string& text = *state->log;
+        const LogView& log = *state->log;
+        const auto chunk = [&](uint64_t number) -> const std::string& { return *log.chunks[static_cast<size_t>(number - log.first)]; };
         const float width = std::max(ImGui::GetContentRegionAvail().x, 40 * dpi), size = ImGui::GetFontSize();
         // A wrapped line's later rows are indented, so they don't read as new lines.
         const float indent = 2 * size;
-        const auto continues = [&](size_t row) { return row > 0 && text[row - 1] != '\n'; };
-        if (logWrappedText != state->log || logWrappedWidth != width || logWrappedFont != size) {
-            logWrappedText = state->log; logWrappedWidth = width; logWrappedFont = size;
+        const auto continues = [&](const LogRow& row) { return row.begin > 0 && chunk(row.chunk)[row.begin - 1] != '\n'; };
+        if (logWrappedWidth != width || logWrappedFont != size) {
+            logWrappedWidth = width; logWrappedFont = size;
+            logWrapped.reset();
             logRows.clear();
-            const char* const begin = text.data();
-            for (size_t start = 0; start < text.size();) {
-                size_t end = text.find('\n', start);
-                const size_t next = end == std::string::npos ? text.size() : end + 1;
-                if (end == std::string::npos) end = text.size();
-                if (end > start && text[end - 1] == '\r') --end;
-                const char* p = begin + start;
-                const char* const lineEnd = begin + end;
-                if (p == lineEnd) logRows.emplace_back(start, start);
-                while (p < lineEnd) {
-                    const char* cut = ImGui::GetFont()->CalcWordWrapPosition(size, p, lineEnd,
-                                                                             p == begin + start ? width : width - indent);
-                    if (cut <= p) { // one glyph wider than the panel still takes a row
-                        cut = p + 1;
-                        while (cut < lineEnd && (static_cast<unsigned char>(*cut) & 0xc0) == 0x80) ++cut;
+            logWrapChunk = 0; logWrapFrom = 0;
+        }
+        if (logWrapped != state->log) {
+            logWrapped = state->log;
+            // Rows of chunks cut or cleared away go, and those of the unfinished
+            // line, which is wrapped again with what came since.
+            logRows.erase(logRows.begin(), std::find_if(logRows.begin(), logRows.end(), [&](const LogRow& row) { return row.chunk >= log.first; }));
+            if (logWrapChunk < log.first) { logWrapChunk = log.first; logWrapFrom = 0; }
+            while (!logRows.empty() && logRows.back().chunk == logWrapChunk && logRows.back().begin >= logWrapFrom) logRows.pop_back();
+            for (uint64_t number = logWrapChunk; number < log.first + log.chunks.size(); ++number) {
+                const std::string& text = chunk(number);
+                const char* const begin = text.data();
+                size_t start = number == logWrapChunk ? logWrapFrom : 0;
+                logWrapChunk = number;
+                logWrapFrom = start;
+                while (start < text.size()) {
+                    size_t end = text.find('\n', start);
+                    const size_t next = end == std::string::npos ? text.size() : end + 1;
+                    if (end == std::string::npos) end = text.size();
+                    else logWrapFrom = next;
+                    if (end > start && text[end - 1] == '\r') --end;
+                    const char* p = begin + start;
+                    const char* const lineEnd = begin + end;
+                    if (p == lineEnd) logRows.push_back({number, start, start});
+                    while (p < lineEnd) {
+                        const char* cut = ImGui::GetFont()->CalcWordWrapPosition(size, p, lineEnd,
+                                                                                 p == begin + start ? width : width - indent);
+                        if (cut <= p) { // one glyph wider than the panel still takes a row
+                            cut = p + 1;
+                            while (cut < lineEnd && (static_cast<unsigned char>(*cut) & 0xc0) == 0x80) ++cut;
+                        }
+                        logRows.push_back({number, static_cast<size_t>(p - begin), static_cast<size_t>(cut - begin)});
+                        p = cut;
+                        while (p < lineEnd && *p == ' ') ++p;
                     }
-                    logRows.emplace_back(p - begin, cut - begin);
-                    p = cut;
-                    while (p < lineEnd && *p == ' ') ++p;
+                    start = next;
                 }
-                start = next;
             }
         }
         ImGuiListClipper clipper;
         clipper.Begin(static_cast<int>(logRows.size()), ImGui::GetTextLineHeightWithSpacing());
         while (clipper.Step())
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                if (continues(logRows[i].first)) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
-                ImGui::TextUnformatted(text.data() + logRows[i].first, text.data() + logRows[i].second);
+                const auto& row = logRows[i];
+                if (continues(row)) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + indent);
+                const char* const text = chunk(row.chunk).data();
+                ImGui::TextUnformatted(text + row.begin, text + row.end);
             }
         if (atBottom) ImGui::SetScrollHereY(1.f);
         ImGui::EndChild();
@@ -3520,6 +3811,19 @@ float Panels::DrawTransportHints(ImDrawList* draw, const skin::Skin& s, float dp
     return std::max(0.f, x - origin.x - pairGap);
 }
 
+// A player fades the window over the game, so its opacity is a click away in
+// either mode, and this button is the only place it is set.
+void Panels::OpacityControl(const skin::Skin& s, float dpi) {
+    if (IconButton("##opacity", Icon::Opacity, "Window opacity", s, dpi, ImGui::IsPopupOpen("##opacity-popup")))
+        ImGui::OpenPopup("##opacity-popup");
+    MenuUnderLastItem("##opacity-popup", s.spacing.s1, true);
+    ImGui::SetNextWindowSize(ImVec2(240 * dpi, 0));
+    if (ImGui::BeginPopup("##opacity-popup")) {
+        SettingSlider("Window opacity", "##popup-window-opacity", &preferences.opacity, 40, 100, "%d%%", s, dpi, nullptr, 100);
+        ImGui::EndPopup();
+    }
+}
+
 void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine,
                      ImVec2 origin, ImVec2 size) {
     const auto state = engine.Snapshot();
@@ -3537,8 +3841,8 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
     // A bare icon at an end of a row hangs its empty frame past the window's
     // padding, so the glyph, not the frame, lines up with the boxes above and below.
     const float hang = std::floor((control - 16 * dpi) / 2);
-    // Three bare utility slots, a step apart.
-    const float utilityX = origin.x + size.x - pad + hang - 3 * control - 2 * s.spacing.s1;
+    // Four bare utility slots, a step apart.
+    const float utilityX = origin.x + size.x - pad + hang - 4 * control - 3 * s.spacing.s1;
     const float segmentX = utilityX - 124 * dpi - s.spacing.s3;
     // The device name is bare too, its text on the window's edge and its hover
     // fill a step out from it.
@@ -3580,6 +3884,8 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
     ImGui::SetCursorScreenPos(ImVec2(utilityX, origin.y + stripPad));
     { BareButtons quiet;
       if (IconButton("##restore-full", Icon::Expand, "Full window", s, dpi)) miniMode = false;
+      ImGui::SameLine(0, s.spacing.s1);
+      OpacityControl(s, dpi);
       ImGui::SameLine(0, s.spacing.s1);
       ImGui::BeginDisabled(!themes.Active(preferences.theme).paired);
       if (IconButton("##mini-theme", s.dark ? Icon::Moon : Icon::Sun, s.dark ? "Switch to light" : "Switch to dark", s, dpi)) preferences.dark = !preferences.dark;
@@ -3649,20 +3955,20 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
             // don't cost a row per file every frame.
             // It opens at the loaded song: on the first frame the clipper also submits
             // that row, whose default focus scrolls the list to it.
-            int loadedIndex = -1;
-            if (ImGui::IsWindowAppearing())
-                for (size_t i = 0; i < state->files->size(); ++i)
-                    if ((*state->files)[i].path == state->loaded) { loadedIndex = static_cast<int>(i); break; }
+            IndexLibrary(*state);
+            const auto loadedAt = state->loaded.empty() ? fileIndex_.end() : fileIndex_.find(state->loaded);
+            const int loadedIndex = loadedAt == fileIndex_.end() ? -1 : static_cast<int>(loadedAt->second);
+            const bool appearing = ImGui::IsWindowAppearing();
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(state->files->size()));
-            if (loadedIndex >= 0) clipper.IncludeItemByIndex(loadedIndex);
+            if (appearing && loadedIndex >= 0) clipper.IncludeItemByIndex(loadedIndex);
             while (clipper.Step())
                 for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                     const auto& file = (*state->files)[static_cast<size_t>(i)];
                     ImGui::PushID(i);
-                    if (ImGui::Selectable(file.name.c_str(), file.path == state->loaded))
+                    if (ImGui::Selectable(file.name.c_str(), i == loadedIndex))
                         engine.Send({ShellEngine::Action::Load, file.path, 0, 0, preferences.autoSolo});
-                    if (i == loadedIndex) ImGui::SetItemDefaultFocus();
+                    if (appearing && i == loadedIndex) ImGui::SetItemDefaultFocus();
                     ImGui::PopID();
                 }
             ImGui::EndCombo();
@@ -3719,7 +4025,7 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         // length after it, as on a music player.
         const std::string length = Time(state->duration);
         const std::string played = state->playbackCountdown ? "Starts in " + std::to_string(state->playbackCountdown) + "s"
-                                                            : Time(seeking_ ? seekPosition_ : state->position);
+                                                            : Time(seeking_ ? seekPosition_ : state->Position());
         float playedWidth = 0, lengthWidth = 0;
         { FontScope meta(fonts, design, design.type.meta * SpecFontScale(design));
           playedWidth = std::max(ImGui::CalcTextSize(played.c_str()).x, ImGui::CalcTextSize(length.c_str()).x);
@@ -3733,7 +4039,7 @@ void Panels::DrawMini(HWND hwnd, const Fonts& fonts, const skin::Skin& design, f
         const bool section = LoopSection(*state);
         if (section) SendLoopHandle(SectionHandles(seekMin, seekWidth, seekHeight, *state, dpi, loopHandle_, loopHandleAt_), engine, *state);
         ImGui::SetCursorScreenPos(seekMin);
-        if (!seeking_ || seekGeneration_ != state->generation) { seekPosition_ = static_cast<float>(state->position); seeking_ = false; }
+        if (!seeking_ || seekGeneration_ != state->generation) { seekPosition_ = static_cast<float>(state->Position()); seeking_ = false; }
         const bool changed = Groove("##mini-seek", &seekPosition_, 0, static_cast<float>(std::max(.001, state->duration)),
             seekWidth, seekHeight, s, dpi, false);
         if (section) DrawSection(ImGui::GetWindowDrawList(), seekMin, seekWidth, seekHeight, *state, loopHandle_, loopHandleAt_, s, dpi);
@@ -4061,11 +4367,23 @@ float Panels::UpdateToastHeight(const skin::Skin& design, float dpi) const {
     return s.metric.controlHeight + 2 * s.spacing.s2;
 }
 
-void Panels::DrawMiniNotice(const Fonts& fonts, const skin::Skin& design, float dpi, const EngineSnapshot& state, ImVec2 origin, ImVec2 size) {
+float Panels::MiniToastsHeight(const skin::Skin& design, float dpi) const {
+    const auto s = skin::ScaleGeometry(design, dpi);
+    const float notice = miniNotice_ ? s.metric.controlHeight + 2 * s.spacing.s2 : 0.f, update = UpdateToastHeight(design, dpi);
+    if (notice == 0 && update == 0) return 0;
+    // Stacked as DrawMiniNotice and DrawUpdateToast place them, the margin under the last.
+    return notice + update + (notice > 0 && update > 0 ? s.spacing.s2 : 0.f) + s.spacing.s3;
+}
+
+std::string Panels::MiniNoticeText(const EngineSnapshot& state) const {
     // The status bar's failure, else a conversion, which outlives its popover.
-    const bool failed = !panelError_.empty() || !state.error.empty();
-    const std::string text = !panelError_.empty() ? panelError_ : !state.error.empty() ? state.error
+    return !panelError_.empty() ? panelError_ : !state.error.empty() ? state.error
         : !state.converting ? std::string() : state.settingUp ? "Installing the converter" : state.signingIn ? "Signing in to YouTube" : "Converting audio";
+}
+
+void Panels::DrawMiniNotice(const Fonts& fonts, const skin::Skin& design, float dpi, const EngineSnapshot& state, ImVec2 origin, ImVec2 size) {
+    const bool failed = !panelError_.empty() || !state.error.empty();
+    const std::string text = MiniNoticeText(state);
     // Closed until it says something else; the same failure coming back later shows again.
     if (text.empty()) noticeClosed_.clear();
     if (text.empty() || text == noticeClosed_ || tourStop >= 0) { noticeFade_ = 0; return; }
@@ -4160,25 +4478,59 @@ void Panels::DrawUpdateToast(const Fonts& fonts, const skin::Skin& design, float
     ImGui::End();
 }
 
+namespace {
+// The sheet editor in a window of its own, with no tabs or address bar: Edge's
+// app mode, which every Windows 10 and 11 has, else the default browser.
+bool OpenSheetWindow(HWND hwnd, const std::wstring& path) {
+    wchar_t edge[MAX_PATH];
+    DWORD size = sizeof(edge);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe", nullptr,
+                     RRF_RT_REG_SZ, nullptr, edge, &size) == ERROR_SUCCESS) {
+        std::wstring url = L"file:///";
+        for (const wchar_t c : path) {
+            if (c == L'\\') url += L'/';
+            else if (c == L' ' || c == L'#' || c == L'%' || c == L'?') { wchar_t hex[4]; swprintf(hex, 4, L"%%%02X", c); url += hex; }
+            else url += c;
+        }
+        const std::wstring arguments = L"--app=\"" + url + L"\"";
+        if (reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", edge, arguments.c_str(), nullptr, SW_SHOWNORMAL)) > 32) return true;
+    }
+    return reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+}
+}
+
+void Panels::IndexLibrary(const EngineSnapshot& state) {
+    if (indexedFiles_ != state.files) {
+        fileIndex_ = IndexFiles(*state.files);
+        indexedFiles_ = state.files;
+    }
+    if (indexedLibrary_ != state.library) {
+        favourites_ = PathSet(state.library->favourites.begin(), state.library->favourites.end());
+        indexedLibrary_ = state.library;
+    }
+}
+
 void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float dpi, ShellEngine& engine) {
     // Set again by any transition still moving this frame.
     g_motion = false;
     convertBarDrawn_ = false;
+    if (showHideTakenAt >= 0 && ImGui::GetTime() - showHideTakenAt >= kRefusedFlash) showHideTakenAt = -1;
     const auto s = skin::ScaleGeometry(design, dpi);
     auto state = engine.Snapshot();
     SyncLayout(*state);
     fileSort_ = state->fileSort;
     descendingFiles_ = state->descendingFiles;
+    IndexLibrary(*state);
     if (state->sheetReady && state->sheetRevision != handledSheetRevision_) {
         handledSheetRevision_ = state->sheetRevision;
         sheetStatusGeneration_ = state->generation;
         sheetPending_ = false;
         if (!state->sheetSaved.empty()) {
             // The engine provides the URL; the panel opens it, so a test engine never
-            // launches a browser.
-            const auto opened = reinterpret_cast<INT_PTR>(ShellExecuteW(hwnd, L"open", state->sheetSaved.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
-            sheetStatus_ = opened > 32 ? "Opened the sheet editor in your browser."
-                                       : "Could not open a browser. The page is at " + Utf8(state->sheetSaved) + ".";
+            // launches a window.
+            yieldTopmost = true;
+            sheetStatus_ = OpenSheetWindow(hwnd, state->sheetSaved.native()) ? "Opened the sheet editor."
+                                       : "Could not open the sheet editor. The page is at " + Utf8(state->sheetSaved) + ".";
         }
         else if (!state->sheetFilesSaved.empty()) sheetStatus_ = "Saved the sheet in " + Utf8(state->sheetFilesSaved) + ".";
         else if (state->sheetText->empty() || state->sheetNotes == 0) sheetStatus_ = "No mapped notes to copy.";
@@ -4209,6 +4561,43 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     const auto load = [&](const std::filesystem::path& path) {
         if (!path.empty()) engine.Send({ShellEngine::Action::Load, path, 0, 0, preferences.autoSolo});
     };
+    // The YouTube window, searching for words when given. Until the converter is
+    // installed, the Convert popover opens too, showing its install.
+    const auto findOnYouTube = [&](const std::string& search) {
+        engine.Send({ShellEngine::Action::YouTubeBrowse, {}, 0, 0, false, 0, search});
+        yieldTopmost = true;
+        if (!state->converterInstalled) openConvert = true;
+    };
+    // The YouTube window follows the skin: the design skin before scaling, so a
+    // custom theme is included. It and the converter's CPU share are sent first
+    // and again on a change.
+    const uint64_t skinSignature = SkinSignature(design);
+    if (g_converterSent.engine != &engine || g_converterSent.skin != skinSignature) {
+        skin::Skin copy = design;
+        std::vector<std::pair<std::string, std::string>> colours;
+        for (const auto& colour : ThemeColours()) colours.emplace_back(colour.key, ColourText(colour.at(copy)));
+        std::vector<std::pair<std::string, float>> shape;
+        for (const auto& number : ThemeNumbers()) shape.emplace_back(number.key, number.at(copy));
+        engine.Send({ShellEngine::Action::BrowseTheme, {}, 0, 0, false, 0, audio_to_midi::ThemeMessage(colours, shape, design.dark)});
+    }
+    if (g_converterSent.engine != &engine || g_converterSent.cpu != preferences.converterCpu)
+        engine.Send({ShellEngine::Action::ConverterCpu, {}, 0, 0, false, static_cast<double>(preferences.converterCpu)});
+    if (g_converterSent.engine != &engine) g_converterSent.folderAsked = false;
+    g_converterSent.engine = &engine;
+    g_converterSent.skin = skinSignature;
+    g_converterSent.cpu = preferences.converterCpu;
+    // The YouTube window asked for a MIDI folder: the picker Choose MIDI folder
+    // opens, once per ask. The queue goes on once the folder is scanned.
+    if (!state->folderWanted) g_converterSent.folderAsked = false;
+    else if (hwnd && !g_converterSent.folderAsked) {
+        g_converterSent.folderAsked = true;
+        engine.Send({ShellEngine::Action::FolderAsked});
+        if (const auto path = PickFolder(hwnd); !path.empty()) {
+            preferences.folder = path;
+            browse_.clear();
+            engine.Send({ShellEngine::Action::Scan, path});
+        }
+    }
 
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 size = ImGui::GetContentRegionAvail();
@@ -4227,7 +4616,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     const float strip = 2 * stripPad + s.metric.controlHeight, status = 28 * dpi;
     dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + strip), Colour(s.surface.structure));
     dl->AddLine(ImVec2(origin.x, origin.y + strip), ImVec2(origin.x + size.x, origin.y + strip), Colour(s.border.hairline));
-    const float utilityX = origin.x + size.x - s.spacing.windowPad - 5 * s.metric.controlHeight - 4 * s.spacing.s2;
+    const float utilityX = origin.x + size.x - s.spacing.windowPad - 6 * s.metric.controlHeight - 5 * s.spacing.s2;
     const auto tourRect = [&](TourStop stop, ImVec2 min, ImVec2 max) {
         tourRects_[static_cast<size_t>(stop)] = {min.x, min.y, max.x, max.y};
     };
@@ -4250,6 +4639,8 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     ImGui::SameLine();
     if (IconButton("##key-mapping", Icon::Keyboard, "Key Mapping", s, dpi, preferences.keyMappingOpen))
         preferences.keyMappingOpen = !preferences.keyMappingOpen;
+    ImGui::SameLine();
+    OpacityControl(s, dpi);
     ImGui::SameLine();
     // A theme with a single palette has no other variant to switch to.
     ImGui::BeginDisabled(!themes.Active(preferences.theme).paired);
@@ -4281,8 +4672,11 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         }
     }
     if (openHelp) { ImGui::OpenPopup("Help"); openHelp = false; }
-    ImGui::SetNextWindowSizeConstraints(ImVec2(popupWidth, 0), ImVec2(popupWidth, popupMaxHeight));
-    ImGui::SetNextWindowPos(popupPosition);
+    ImVec2 helpPosition = popupPosition;
+    float helpMaxHeight = popupMaxHeight;
+    FitPopover(helpPosition, helpMaxHeight, popupWidth, dpi, false);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(popupWidth, 0), ImVec2(popupWidth, helpMaxHeight));
+    ImGui::SetNextWindowPos(helpPosition);
     if (ImGui::BeginPopup("Help")) {
         DrawHelp(fonts, design, dpi, *state);
         ImGui::EndPopup();
@@ -4321,7 +4715,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     if (!ImGui::IsPopupOpen("##lists")) listsByDrag_ = false;
     if (ImGui::BeginPopup("##lists")) {
         if (listsByDrag_ && !ImGui::GetDragDropPayload()) ImGui::CloseCurrentPopup();
-        float itemWidth = ImGui::CalcTextSize("New playlist...").x;
+        float itemWidth = std::max(ImGui::CalcTextSize("New playlist...").x, ImGui::CalcTextSize("Find on YouTube...").x);
         for (const auto& playlist : library.playlists) itemWidth = std::max(itemWidth, ImGui::CalcTextSize(playlist.name.c_str()).x);
         itemWidth += 44 * dpi;
         const auto open = [&](int wanted) {
@@ -4363,6 +4757,13 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         ImGui::Separator();
         if (ImGui::Selectable("New playlist...", false, 0, ImVec2(itemWidth, 0))) namePlaylist_ = true;
         if (const auto song = dropped(); !song.empty()) { playlistFirstSong_ = song; namePlaylist_ = true; }
+        // The YouTube mark sits where the others' tick does.
+        if (ImGui::Selectable("Find on YouTube...", false, 0, ImVec2(itemWidth, 0))) findOnYouTube({});
+        {
+            const ImVec2 min = ImGui::GetItemRectMin(), max = ImGui::GetItemRectMax();
+            const float side = 16 * dpi;
+            DrawYouTubeMark(ImGui::GetWindowDrawList(), ImVec2(max.x - side - 2 * dpi, min.y + (max.y - min.y - side) / 2), side);
+        }
         if (namePlaylist_ || renamePlaylist_ >= 0 || deletePlaylist_ >= 0) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
@@ -4378,7 +4779,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         ImGui::OpenPopup("File sort");
     MenuUnderLastItem("File sort", s.spacing.s1);
     if (ImGui::BeginPopup("File sort")) {
-        const char* labels[]{"Name", "Size", "Date modified"};
+        const char* labels[]{"Name", "Length", "Date modified"};
         // Widest label, a gap, then the tick.
         const float itemWidth = ImGui::CalcTextSize("Date modified").x + 44 * dpi;
         for (int i = 0; i < 3; ++i) {
@@ -4425,7 +4826,14 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         ImGui::EndPopup();
     }
     if (convertRequested) ImGui::OpenPopup("Convert audio");
-    ImGui::SetNextWindowSizeConstraints(ImVec2(400 * dpi, 0), ImVec2(400 * dpi, 10000 * dpi));
+    // Wide enough for the link field's whole hint beside YouTube, a file and Convert.
+    float convertWidth = 400 * dpi;
+    {
+        FontScope font(fonts, design, design.type.body * SpecFontScale(design));
+        convertWidth = std::max(convertWidth, ImGui::CalcTextSize(kConvertHint).x + 2 * s.spacing.s3 + ConvertActionWidth(s, dpi) +
+                                                  2 * s.metric.controlHeight + 3 * s.spacing.s2 + 2 * ImGui::GetStyle().WindowPadding.x);
+    }
+    ImGui::SetNextWindowSizeConstraints(ImVec2(convertWidth, 0), ImVec2(convertWidth, 10000 * dpi));
     // Under its button, as the sort and add menus open under theirs.
     if (ImGui::IsPopupOpen("Convert audio"))
         ImGui::SetNextWindowPos(ImVec2(convertMin.x, convertMax.y + s.spacing.s1), ImGuiCond_Appearing);
@@ -4466,26 +4874,25 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         const auto* songs = library.Songs(list);
         const std::vector<MidiEntry>& source = songs ? listEntries_ : *state->files;
         const bool reorder = songs && query.empty();
+        // The folder shown is filtered again only when its files change, not the
+        // lists: a star set there leaves it as it is.
         if (filteredFiles_ != state->files || filteredQuery_ != query || filteredFolders_ != preferences.folders ||
-            filteredLibrary_ != state->library || filteredList_ != list) {
+            (list != kFolderList && filteredLibrary_ != state->library) || filteredList_ != list ||
+            (songs && filteredOutside_ != state->outside)) {
             filteredFolders_ = preferences.folders;
             fileFilter_.clear();
             folderRows_.clear();
             listEntries_.clear();
+            listIndex_.clear();
             if (songs) {
-                std::unordered_map<std::wstring, size_t> listed;
-                for (size_t i = 0; i < state->files->size(); ++i) listed.emplace((*state->files)[i].path.native(), i);
-                for (const auto& song : *songs) {
-                    const auto found = listed.find(song.native());
-                    std::error_code missing;
-                    const auto bytes = found == listed.end() ? std::filesystem::file_size(song, missing) : 0;
-                    listEntries_.push_back(found != listed.end() ? (*state->files)[found->second]
-                        : MidiEntry{song, Utf8(song), missing ? 0 : bytes});
-                }
+                // A song from outside the library comes as the engine read it,
+                // so the list never waits on the disk.
+                listEntries_ = ListEntries(*songs, *state->files, fileIndex_, *state->outside);
+                listIndex_ = IndexFiles(listEntries_);
                 fileFilter_ = SearchFolder(listEntries_, "", query);
             } else if (!browsing) {
                 for (const size_t i : SearchFolder(*state->files, "", query))
-                    if (library.Favourite((*state->files)[i].path)) fileFilter_.push_back(i);
+                    if (favourites_.contains((*state->files)[i].path)) fileFilter_.push_back(i);
             } else if (query.empty() && !preferences.folders) {
                 fileFilter_.resize(state->files->size());
                 std::iota(fileFilter_.begin(), fileFilter_.end(), size_t{0});
@@ -4506,6 +4913,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             filteredQuery_ = query;
             filteredLibrary_ = state->library;
             filteredList_ = list;
+            filteredOutside_ = state->outside;
         }
         if (openTopResult && !query.empty() && !fileFilter_.empty() && !state->busy) load(source[fileFilter_.front()].path);
         // A song that Next, Previous, a hotkey or shuffle loads is scrolled into view
@@ -4525,16 +4933,24 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         const float rowPitch = s.metric.controlHeight + s.spacing.s2;
         // A just-located file: its folder is open by now, so scroll its row to a third
         // of the way down, leaving context around it. A row already in view stays put.
+        // A song's place in source by its index, then its row by a search of the
+        // rows shown, which list source in order.
+        const auto& sourceIndex = songs ? listIndex_ : fileIndex_;
+        const auto placeOf = [&](const std::filesystem::path& song) {
+            const auto found = song.empty() ? sourceIndex.end() : sourceIndex.find(song);
+            return found == sourceIndex.end() ? SIZE_MAX : found->second;
+        };
         if (!revealFile_.empty()) {
-            for (size_t row = 0; row < fileFilter_.size(); ++row)
-                if (source[fileFilter_[row]].path == revealFile_) {
-                    const float rowTop = (fileStart + static_cast<int>(row)) * rowPitch;
-                    if (rowTop < ImGui::GetScrollY() || rowTop + rowPitch > ImGui::GetScrollY() + listSize.y)
-                        ImGui::SetScrollY(std::max(0.f, rowTop - listSize.y / 3));
-                    break;
-                }
+            const size_t place = placeOf(revealFile_);
+            if (const auto at = std::lower_bound(fileFilter_.begin(), fileFilter_.end(), place); at != fileFilter_.end() && *at == place) {
+                const float rowTop = (fileStart + static_cast<int>(at - fileFilter_.begin())) * rowPitch;
+                if (rowTop < ImGui::GetScrollY() || rowTop + rowPitch > ImGui::GetScrollY() + listSize.y)
+                    ImGui::SetScrollY(std::max(0.f, rowTop - listSize.y / 3));
+            }
             revealFile_.clear();
         }
+        // The open song's row is known by its place, with no path compared per row.
+        const size_t loadedPlace = placeOf(state->loaded);
         ImGuiListClipper clipper;
         clipper.Begin(fileStart + static_cast<int>(fileFilter_.size()), s.metric.controlHeight + s.spacing.s2);
         while (clipper.Step()) for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
@@ -4568,14 +4984,14 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             ImGui::BeginDisabled(state->busy);
             // The star is its own button over the row's right end.
             ImGui::SetNextItemAllowOverlap();
-            if (ImGui::Selectable("##file", file.path == state->loaded, 0, ImVec2(width, s.metric.controlHeight))) {
+            const bool selected = fileFilter_[row] == loadedPlace;
+            if (ImGui::Selectable("##file", selected, 0, ImVec2(width, s.metric.controlHeight))) {
                 load(file.path);
                 clickedFile_ = file.path;
             }
             ImGui::EndDisabled();
             const bool rowHovered = ImGui::IsItemHovered();
             const bool rowHot = ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenOverlappedByItem | ImGuiHoveredFlags_AllowWhenDisabled);
-            const bool outside = std::filesystem::path(std::u8string(file.name.begin(), file.name.end())).is_absolute();
             // Any song can be dragged onto a playlist in the list menu.
             if (ImGui::BeginDragDropSource()) {
                 ImGui::SetDragDropPayload("QM_SONG", file.path.c_str(), (file.path.native().size() + 1) * sizeof(wchar_t));
@@ -4598,8 +5014,6 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                 }
                 ImGui::EndDragDropTarget();
             }
-            // Like Explorer's search results: go to the file's location, which ends the
-            // search and opens its folder at its row. The other lists go there too.
             if (ImGui::BeginPopupContextItem("##file-menu")) {
                 if (ImGui::MenuItem("Play next")) engine.Send({ShellEngine::Action::AddToList, file.path, 0, 0, false, static_cast<double>(kQueueList)});
                 if (ImGui::BeginMenu("Add to playlist")) {
@@ -4618,20 +5032,12 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                 if (songs && ImGui::MenuItem(list == kQueueList ? "Remove from queue" : "Remove from playlist"))
                     engine.Send({ShellEngine::Action::RemoveFromList, file.path, 0, 0, false, static_cast<double>(list)});
                 ImGui::Separator();
-                if ((!query.empty() || !browsing) && !outside && preferences.folders && ImGui::MenuItem("Open file location")) {
-                    moved = true;
-                    moveTo = FolderOf(file.name);
-                    revealFile_ = file.path;
-                    search_[0] = 0;
-                    if (!browsing) engine.Send({ShellEngine::Action::OpenList, {}, 0, 0, false, static_cast<double>(kFolderList)});
-                }
                 if (ImGui::MenuItem("Show in Explorer"))
                     ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + file.path.native() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
                 ImGui::Separator();
                 if (ImGui::MenuItem("Delete")) engine.Send({ShellEngine::Action::DeleteSong, file.path});
                 ImGui::EndPopup();
             }
-            const bool selected = file.path == state->loaded;
             auto* listDraw = ImGui::GetWindowDrawList();
             // The bar spans the row's highlight, which Selectable extends by half the item
             // spacing above and the rest below.
@@ -4641,7 +5047,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                                         Colour(s.accent.accent));
             }
             // A favourite's star stays; the open song's row and a hovered one show an empty one.
-            const bool favourite = state->library->Favourite(file.path);
+            const bool favourite = favourites_.contains(file.path);
             const float starSide = 16 * dpi, starX = pos.x + width - s.spacing.s3 - starSide;
             ImGui::SetCursorScreenPos(ImVec2(starX - s.spacing.s1, pos.y));
             if (ImGui::InvisibleButton("##star", ImVec2(starSide + 2 * s.spacing.s1, s.metric.controlHeight)))
@@ -4650,7 +5056,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             if (favourite || rowHot || selected)
                 DrawStar(listDraw, ImVec2(starX, pos.y + (s.metric.controlHeight - starSide) / 2), starSide,
                          Colour(favourite ? s.accent.accent : starHot ? s.ink.primary : s.ink.secondary), favourite);
-            // The row's menu is on a button too, in the size's place while the row is hovered.
+            // The row's menu is on a button too, in the length's place while the row is hovered.
             const float moreX = starX - s.spacing.s2 - starSide;
             // Always submitted, like the star: pressing it takes the row's hover away,
             // and a button that vanished before the release would never be clicked.
@@ -4664,28 +5070,37 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
                 DrawIcon(listDraw, Icon::More, ImVec2(moreX, pos.y + (s.metric.controlHeight - starSide) / 2), starSide,
                          Colour(moreHot || menuOpen ? s.ink.primary : s.ink.secondary), dpi);
             FontScope rowFont(fonts, design, design.type.body * SpecFontScale(design), selected ? Weight::Semibold : Weight::Regular);
-            const auto bytes = std::to_string((file.bytes + 1023) / 1024) + " KB";
-            const float sizeWidth = ImGui::CalcTextSize(bytes.c_str()).x;
+            // m:ss, and nothing while the length is still being read.
+            char length[16] = "";
+            if (file.seconds >= 0) {
+                const long long whole = std::llround(file.seconds);
+                std::snprintf(length, sizeof(length), "%lld:%02lld", whole / 60, whole % 60);
+            }
+            const float sizeWidth = *length ? ImGui::CalcTextSize(length).x : 0;
             const float textY = pos.y + (s.metric.controlHeight - ImGui::GetTextLineHeight()) / 2;
             // Search results and favourites show their folder; browsed rows are already under
             // theirs. The song name comes first and the folder takes the remaining width.
-            const std::string shown = file.name.substr(browsing ? browse_.size() : 0);
+            // Views into the name, so a row copies none of it.
+            const std::string_view shown = std::string_view(file.name).substr(browsing ? std::min(browse_.size(), file.name.size()) : 0);
             const size_t cut = shown.find_last_of("\\/");
-            const std::string leaf = cut == std::string::npos ? shown : shown.substr(cut + 1);
+            const std::string_view leaf = cut == std::string_view::npos ? shown : shown.substr(cut + 1);
             const float room = width - sizeWidth - starSide - s.spacing.s2 - 3 * s.spacing.s3;
             DrawEllipsis(leaf, room, ImVec2(pos.x + s.spacing.s3, textY));
-            const float used = ImGui::CalcTextSize(leaf.c_str()).x + s.spacing.s3;
-            if (cut != std::string::npos && room - used > 3 * ImGui::CalcTextSize("...").x) {
+            const float used = ImGui::CalcTextSize(leaf.data(), leaf.data() + leaf.size()).x + s.spacing.s3;
+            if (cut != std::string_view::npos && room - used > 3 * ImGui::CalcTextSize("...").x) {
                 ImGui::PushStyleColor(ImGuiCol_Text, Colour(s.ink.secondary));
                 DrawEllipsis(shown.substr(0, cut), room - used, ImVec2(pos.x + s.spacing.s3 + used, textY));
                 ImGui::PopStyleColor();
             }
-            if (!showMore) listDraw->AddText(ImVec2(starX - s.spacing.s2 - sizeWidth, textY), Colour(s.ink.secondary), bytes.c_str());
+            if (!showMore && *length) listDraw->AddText(ImVec2(starX - s.spacing.s2 - sizeWidth, textY), Colour(s.ink.secondary), length);
             if (rowHovered) ImGui::SetTooltip("%s\n%llu bytes", file.name.c_str(), static_cast<unsigned long long>(file.bytes));
             ImGui::PopID();
         }
-        if (fileFilter_.empty() && fileStart == 0)
+        if (fileFilter_.empty() && fileStart == 0) {
             ImGui::TextDisabled(!query.empty() ? "No matching files" : songs ? "No songs" : "No favourites");
+            // Not here: the YouTube window opens searching for the typed words.
+            if (!query.empty() && SearchYouTubeButton("##search-youtube", 0, s, dpi)) findOnYouTube(Trimmed(search_));
+        }
         if (moved) {
             browse_ = std::move(moveTo);
             filteredFiles_.reset();
@@ -4813,7 +5228,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
         // for the open file or the whole list.
         ImGui::BeginDisabled(!haveFile);
         if (ImGui::MenuItem("Copy sheet to clipboard")) request(ShellEngine::Action::CopySheet, "Preparing sheet...");
-        if (ImGui::MenuItem("Open sheet editor in browser")) request(ShellEngine::Action::OpenSheetEditor, "Opening the sheet editor...");
+        if (ImGui::MenuItem("Open sheet editor")) request(ShellEngine::Action::OpenSheetEditor, "Opening the sheet editor...");
         if (ImGui::MenuItem("Save sheet files for this MIDI")) request(ShellEngine::Action::SaveSheetFiles, "Saving sheet files...");
         ImGui::EndDisabled();
         if (state->sheetBatchRunning) {
@@ -4835,13 +5250,13 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
             const auto path = PickFolder(hwnd);
             if (!path.empty()) engine.Send({ShellEngine::Action::SheetsFolder, path});
         }
-        const std::string styleLabel = state->sheetStylePage.empty() ? "Sheet style: editor defaults..."
+        const std::string styleLabel = state->sheetStylePage.empty() ? "Sheet style: the editor's..."
                                                                        : "Sheet style: " + Utf8(state->sheetStylePage.filename()) + "...";
         if (ImGui::MenuItem(styleLabel.c_str())) {
             const auto path = PickFile(hwnd, PickKind::Page);
             if (!path.empty()) engine.Send({ShellEngine::Action::SheetStylePage, path});
         }
-        if (!state->sheetStylePage.empty() && ImGui::MenuItem("Back to the editor's defaults")) engine.Send({ShellEngine::Action::SheetStylePage, {}});
+        if (!state->sheetStylePage.empty() && ImGui::MenuItem("Back to the editor's style")) engine.Send({ShellEngine::Action::SheetStylePage, {}});
         ImGui::EndPopup();
     }
     ImGui::EndDisabled();
@@ -4900,7 +5315,7 @@ void Panels::Draw(HWND hwnd, const Fonts& fonts, const skin::Skin& design, float
     if (section) SendLoopHandle(SectionHandles(seekMin, contentWidth, seekHeight, *state, dpi, loopHandle_, loopHandleAt_), engine, *state);
     ImGui::SetCursorScreenPos(seekMin);
     if (!seeking_ || seekGeneration_ != state->generation) {
-        seekPosition_ = static_cast<float>(state->position);
+        seekPosition_ = static_cast<float>(state->Position());
         seeking_ = false;
     }
     const bool seekChanged = Groove("##seek", &seekPosition_, 0, static_cast<float>(std::max(.001, state->duration)),

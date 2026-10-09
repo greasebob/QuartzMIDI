@@ -38,6 +38,10 @@ struct PageInput {
     Look look;
     std::vector<PedalChange> pedals;               // sustain, in seconds
     bool styled = false;                           // options and look come from the style page, over the browser's own
+    // Where the editor sends its style for the app to keep, and whether the app
+    // has kept none yet (the page then brings it the browser's own).
+    std::string keepUrl;
+    bool keepFirst = false;
     Header header;
 };
 
@@ -150,6 +154,7 @@ inline std::string PageJson(const PageInput& in, const std::string& expectedText
              std::to_string(in.pedals[i].track) + "]";
     j += "],\"options\":" + JsonOptions(in.options) + ",\"page\":{\"fontSize\":" + JsonNumber(in.look.fontSizePt) +
          ",\"lineHeight\":" + JsonNumber(in.look.lineHeightPercent) + "},\"look\":" + JsonLook(in.look) + ",\"header\":" + JsonHeader(in.header) + (in.styled ? ",\"styled\":true" : "") +
+         (in.keepUrl.empty() ? std::string() : ",\"keep\":{\"to\":" + JsonString(in.keepUrl) + ",\"first\":" + (in.keepFirst ? "true" : "false") + "}") +
          ",\"expected\":" + JsonString(expectedText) + "}";
     return j;
 }
@@ -1016,12 +1021,13 @@ function fullLook(l) {
 const CREDITS = {title: true, subtitle: true, artist: true, arranger: true};
 const full = s => ({options: fixMarks(Object.assign(SheetCore.defaults(), s && s.options)), page: Object.assign({}, PAGE, s && s.page), look: fullLook(s && s.look),
                     header: Object.assign({}, SheetCore.HEADER, s && s.header, CREDITS)});
-// The style the page came with: a saved page's own, the app's style page, or
-// the defaults. A page the app just wrote without a style page starts from
-// what the user last chose in this browser.
+// The style the page came with: a saved page's own, the app's style page, the
+// style the app kept from the editor, or the defaults. A page the app wrote
+// before it kept any style starts from what the user last chose in this browser.
 const own = () => full({options: data.options, page: data.page, look: data.look, header: data.header});
 const ownImage = () => data.look && typeof data.look.image === "string" ? data.look.image : "";
-const stored = data.saved || data.styled ? null : readStore(STORE);
+const keep = data.saved ? null : data.keep;
+const stored = data.saved || data.styled || keep && !keep.first ? null : readStore(STORE);
 // A header from before the words decided: a credit switched off printed nothing.
 const incoming = Object.assign({}, data.header, stored ? stored.header : null);
 const S = stored ? full({options: Object.assign({}, data.options, fixMarks(stored.options || {})), page: Object.assign({}, data.page, stored.page),
@@ -1032,12 +1038,32 @@ let image = typeof storedImage === "string" ? storedImage : ownImage(), keptImag
 const styleOf = () => ({options: S.options, page: S.page, look: S.look, header: S.header});
 const readPresets = () => { const list = readStore(PRESETS); return Array.isArray(list) ? list.filter(p => p && typeof p.name === "string" && p.style) : []; };
 let keptPresets = JSON.stringify(readPresets());
+// The app that opened the page keeps the style too, so Save sheet files
+// draws what the editor last showed; it is sent a moment after a change.
+let keptForApp = null, keepTimer = 0;
+const styleForApp = () => JSON.stringify({options: S.options, page: S.page, look: Object.assign({}, S.look, S.look.ground === 1 && image ? {image} : {}), header: S.header});
+function tellApp(leaving) {
+  clearTimeout(keepTimer);
+  keepTimer = 0;
+  const body = styleForApp();
+  if (!keep || typeof keep.to !== "string" || body === keptForApp) return;
+  keptForApp = body;
+  try {
+    if (leaving && navigator.sendBeacon && navigator.sendBeacon(keep.to, body)) return;
+    fetch(keep.to, {method: "POST", mode: "no-cors", body, keepalive: body.length < 60000}).catch(() => {});
+  } catch (e) {}
+}
+addEventListener("pagehide", () => { if (keepTimer) tellApp(true); });
 function remember() {
   writeStore(STORE, styleOf());
   if (image !== keptImage) { writeStore(IMAGE, image); keptImage = image; }
   const list = JSON.stringify(presets);
   if (list !== keptPresets) { writeStore(PRESETS, presets); keptPresets = list; }
+  if (keep) { clearTimeout(keepTimer); keepTimer = setTimeout(tellApp, 300); }
 }
+// What the app kept is what the page opened with; a first page brings it this browser's style.
+if (keep) keptForApp = stored ? null : styleForApp();
+if (keep && stored) keepTimer = setTimeout(tellApp, 0);
 const unpackRegion = r => ({from: r[0], to: r[1], semitones: r[2], kind: r[3] || SheetCore.NOTES_SHIFTED});
 const notes = data.notes.map(n => ({seconds: n[0], midi: n[1], end: n.length > 2 ? n[2] : -1}));
 const tempos = data.tempos.map(t => ({seconds: t[0], bpm: t[1]}));
@@ -2727,6 +2753,7 @@ $("save").onclick = () => {
   const saved = Object.assign({}, data, {saved: true, options: S.options, page: S.page, look: Object.assign({}, S.look, L().ground === 1 && image ? {image} : {}),
                                          header: S.header, song: songText(), regions: regions.map(r => [r.from, r.to, r.semitones, r.kind]), expected: result.text});
   delete saved.styled;
+  delete saved.keep;
   const element = $("sheet-data");
   const before = element.textContent;
   element.textContent = JSON.stringify(saved).replace(/<\//g, "<\\/");

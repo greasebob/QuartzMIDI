@@ -8,13 +8,34 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace shell {
+// The log as it stood at one moment, in shared chunks that never change, so a
+// snapshot is a list of pointers and not a copy of the text. Chunks end at a
+// line's end but the last; a later view may hold a longer copy of the last one.
+struct LogView {
+    std::vector<std::shared_ptr<const std::string>> chunks;
+    // The number of chunks[0], counted from the app's start; a chunk cut or
+    // cleared away never gives its number to another.
+    uint64_t first = 0;
+    bool empty() const { return chunks.empty(); }
+    size_t size() const { size_t total = 0; for (const auto& chunk : chunks) total += chunk->size(); return total; }
+    std::string Text() const {
+        std::string text;
+        text.reserve(size());
+        for (const auto& chunk : chunks) text += *chunk;
+        return text;
+    }
+};
+
 // Shared by the native host and engine snapshots. The host installs the stream
 // redirect (CaptureShellLog), so test runners keep their console output.
 class ShellLog {
 public:
     static constexpr size_t Capacity = 256 * 1024;
+    // A chunk takes lines until it is this long; only the last is copied to grow.
+    static constexpr size_t ChunkSize = 16 * 1024;
     // The log file's size before it starts again, the one before kept beside it.
     static constexpr uint64_t FileCapacity = 1024 * 1024;
     static ShellLog& Instance() { static ShellLog log; return log; }
@@ -44,21 +65,46 @@ public:
         if (text.empty()) return;
         std::lock_guard lock(mutex_);
         WriteFileText(text);
-        text_ += text;
-        if (text_.size() > Capacity) {
-            // Trim to 7/8 of Capacity so a full log isn't shifted on every append.
-            size_t first = text_.size() - (Capacity - Capacity / 8);
-            const auto newline = text_.find('\n', first);
-            if (newline != std::string::npos) first = newline + 1;
-            while (first < text_.size() && (static_cast<unsigned char>(text_[first]) & 0xc0) == 0x80) ++first;
-            text_.erase(0, first);
+        // The last chunk grows by a copy while it is short or ends mid-line;
+        // views that hold the old one keep it.
+        if (!chunks_.empty() && (chunks_.back()->size() < ChunkSize || chunks_.back()->back() != '\n')) {
+            auto grown = std::make_shared<std::string>();
+            grown->reserve(chunks_.back()->size() + text.size());
+            *grown += *chunks_.back();
+            *grown += text;
+            chunks_.back() = std::move(grown);
+        } else chunks_.push_back(std::make_shared<const std::string>(text));
+        size_ += text.size();
+        // Past Capacity the oldest chunks go whole.
+        while (size_ > Capacity && chunks_.size() > 1) {
+            size_ -= chunks_.front()->size();
+            chunks_.erase(chunks_.begin());
+            ++first_;
+        }
+        if (size_ > Capacity) {
+            // One chunk past it is trimmed to 7/8 of Capacity, from a line's
+            // start where there is one, and numbered as a new chunk.
+            const auto whole = chunks_.front();
+            size_t cut = whole->size() - (Capacity - Capacity / 8);
+            const auto newline = whole->find('\n', cut);
+            if (newline != std::string::npos && newline + 1 < whole->size()) cut = newline + 1;
+            while (cut < whole->size() && (static_cast<unsigned char>((*whole)[cut]) & 0xc0) == 0x80) ++cut;
+            chunks_.front() = std::make_shared<const std::string>(whole->substr(cut));
+            size_ = chunks_.front()->size();
+            ++first_;
         }
         cached_.reset();
     }
-    void Clear() { std::lock_guard lock(mutex_); text_.clear(); cached_.reset(); }
-    std::shared_ptr<const std::string> Snapshot() {
+    void Clear() {
         std::lock_guard lock(mutex_);
-        if (!cached_) cached_ = std::make_shared<const std::string>(text_);
+        first_ += chunks_.size();
+        chunks_.clear();
+        size_ = 0;
+        cached_.reset();
+    }
+    std::shared_ptr<const LogView> Snapshot() {
+        std::lock_guard lock(mutex_);
+        if (!cached_) cached_ = std::make_shared<const LogView>(LogView{chunks_, first_});
         return cached_;
     }
 private:
@@ -82,8 +128,10 @@ private:
         fileSize_ += written;
     }
     std::mutex mutex_;
-    std::string text_;
-    std::shared_ptr<const std::string> cached_;
+    std::vector<std::shared_ptr<const std::string>> chunks_;
+    uint64_t first_ = 0;
+    size_t size_ = 0;
+    std::shared_ptr<const LogView> cached_;
     std::filesystem::path path_;
     HANDLE file_ = INVALID_HANDLE_VALUE;
     uint64_t fileSize_ = 0;

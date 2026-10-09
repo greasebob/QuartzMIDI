@@ -20,6 +20,7 @@
 #include "MidiOutput.hpp"
 #include "RtMidi.h"
 #include "WootingAnalog.hpp"
+#include "QwertyInput.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -323,6 +324,7 @@ std::unique_ptr<IMidiInput> CreateMidiInput(MidiBackend backend) {
         if (auto substituted = g_factory(backend)) return substituted;
     }
     if (backend == MidiBackend::WootingAnalog) return CreateWootingAnalogInput();
+    if (backend == MidiBackend::Qwerty) return CreateQwertyInput();
     if (backend == MidiBackend::WinMM) return std::make_unique<WinMMMidiInput>();
     if (backend == MidiBackend::KernelStreaming) return CreateKernelStreamingInput();
     return std::make_unique<WinRTMidiInput>();
@@ -380,6 +382,8 @@ std::vector<MidiInputDevice> EnumerateMidiInputs() {
             devices.push_back(std::move(device));
         }
     }
+    // Every computer has a keyboard to type notes on.
+    for (auto& device : CreateQwertyInput()->enumerate()) devices.push_back(std::move(device));
     return devices;
 }
 
@@ -422,6 +426,10 @@ MidiBackend BackendForDeviceId(const std::wstring& deviceId) {
     const size_t wootingPrefix = wcslen(kWootingPrefix);
     if (deviceId.size() >= wootingPrefix && deviceId.compare(0, wootingPrefix, kWootingPrefix) == 0) {
         return MidiBackend::WootingAnalog;
+    }
+    const size_t qwertyPrefix = wcslen(kQwertyPrefix);
+    if (deviceId.size() >= qwertyPrefix && deviceId.compare(0, qwertyPrefix, kQwertyPrefix) == 0) {
+        return MidiBackend::Qwerty;
     }
     return MidiBackend::WinRT;
 }

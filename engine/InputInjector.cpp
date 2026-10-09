@@ -57,10 +57,51 @@ bool IsShellWindow(HWND window) noexcept
     return false;
 }
 
+namespace {
+
+Elevation ProcessElevation(HANDLE process) noexcept
+{
+    HANDLE token = nullptr;
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const bool opened = OpenProcessToken(process, TOKEN_QUERY, &token) != FALSE;
+    const bool denied = !opened && GetLastError() == ERROR_ACCESS_DENIED;
+    const bool read = opened && GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    if (token) CloseHandle(token);
+    return ReadElevation(true, read, read && elevation.TokenIsElevated, denied);
+}
+
+Elevation ElevationOf(DWORD process) noexcept
+{
+    const HANDLE handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process);
+    if (!handle) return ReadElevation(false, false, false, false);
+    const Elevation elevation = ProcessElevation(handle);
+    CloseHandle(handle);
+    return elevation;
+}
+
+// The note thread and the window's thread both read the foreground.
+SRWLOCK elevationLock = SRWLOCK_INIT;
+ElevationCache elevations;
+
+bool DroppedBy(DWORD process) noexcept
+{
+    static const Elevation self = ProcessElevation(GetCurrentProcess());
+    if (!process || process == GetCurrentProcessId() || self == Elevation::Administrator) return false;
+    AcquireSRWLockExclusive(&elevationLock);
+    const Elevation target = elevations.Of(process, ElevationOf);
+    ReleaseSRWLockExclusive(&elevationLock);
+    return KeysDropped(target, self);
+}
+
+} // namespace
+
+std::atomic<DWORD> KeysDroppedBy{0};
+
 Foreground ForegroundNow() noexcept
 {
     constexpr uintptr_t IsRoblox = uintptr_t{1} << 63, IsOwn = uintptr_t{1} << 62, IsShell = uintptr_t{1} << 61,
-                        Flags = IsRoblox | IsOwn | IsShell;
+                        IsElevated = uintptr_t{1} << 60, Flags = IsRoblox | IsOwn | IsShell | IsElevated;
     static std::atomic<uintptr_t> front{0};
     const auto window = reinterpret_cast<uintptr_t>(GetForegroundWindow()) & ~Flags;
     uintptr_t known = front.load(std::memory_order_relaxed);
@@ -69,10 +110,12 @@ Foreground ForegroundNow() noexcept
         GetWindowThreadProcessId(reinterpret_cast<HWND>(window), &process);
         known = window | (IsRobloxWindow(reinterpret_cast<HWND>(window)) ? IsRoblox : 0) |
                 (window && process == GetCurrentProcessId() ? IsOwn : 0) |
-                (window && IsShellWindow(reinterpret_cast<HWND>(window)) ? IsShell : 0);
+                (window && IsShellWindow(reinterpret_cast<HWND>(window)) ? IsShell : 0) |
+                (window && DroppedBy(process) ? IsElevated : 0);
         front.store(known, std::memory_order_relaxed);
     }
-    Foreground result{ reinterpret_cast<HWND>(known & ~Flags), (known & IsRoblox) != 0, (known & IsOwn) != 0, (known & IsShell) != 0, true };
+    Foreground result{ reinterpret_cast<HWND>(known & ~Flags), (known & IsRoblox) != 0, (known & IsOwn) != 0, (known & IsShell) != 0, true,
+                       (known & IsElevated) != 0 };
     if (result.roblox) return result;
 
     static std::atomic<ULONGLONG> checked{0};
@@ -94,10 +137,21 @@ Foreground (*ForegroundProbe)() noexcept = ForegroundNow;
 
 namespace {
 
+// Keys typed into a process that drops them are reported, once for it, and
+// still sent: playback goes on either way.
 bool KeysMayBeTyped() noexcept
 {
     const Foreground front = ForegroundNow();
-    return front.roblox || !front.robloxRunning;
+    const bool typed = front.roblox || !front.robloxRunning;
+    if (typed && front.elevated) {
+        DWORD process = 0;
+        GetWindowThreadProcessId(front.window, &process);
+        AcquireSRWLockExclusive(&elevationLock);
+        const bool first = elevations.FirstReport(process);
+        ReleaseSRWLockExclusive(&elevationLock);
+        if (first) KeysDroppedBy.store(process, std::memory_order_release);
+    }
+    return typed;
 }
 
 } // namespace

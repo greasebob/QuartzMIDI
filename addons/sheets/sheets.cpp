@@ -20,6 +20,8 @@ std::string Utf8(const std::filesystem::path& path) {
 // Parsed from the page's <script id="sheet-data"> JSON: "options", "page" and "look".
 struct SheetStyle { sheet::StyleOptions options; sheet::Look look; sheet::Header header; };
 
+SheetStyle StyleFromData(const Json& data);
+
 SheetStyle StyleFromPage(const std::filesystem::path& page) {
     std::ifstream file(page, std::ios::binary);
     if (!file) throw std::runtime_error("Cannot read the style page " + Utf8(page) + ".");
@@ -32,6 +34,21 @@ SheetStyle StyleFromPage(const std::filesystem::path& page) {
     try { data = Json::parse(html.substr(start + open.size(), end - start - open.size())); }
     catch (const std::exception&) { throw std::runtime_error(Utf8(page.filename()) + " is not a page saved from the sheet editor."); }
     if (!data.is_object()) throw std::runtime_error(Utf8(page.filename()) + " is not a page saved from the sheet editor.");
+    return StyleFromData(data);
+}
+
+// The style the editor last showed, as the app kept it: {options, page, look, header}.
+// Missing or unreadable, there is none.
+bool StyleFromKept(const std::filesystem::path& kept, SheetStyle& style) {
+    std::ifstream file(kept, std::ios::binary);
+    if (!file) return false;
+    const auto data = Json::parse(std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>()), nullptr, false);
+    if (!data.is_object()) return false;
+    style = StyleFromData(data);
+    return true;
+}
+
+SheetStyle StyleFromData(const Json& data) {
     SheetStyle style;
     auto& s = style.options;
     auto o = data.value("options", Json::object());
@@ -126,6 +143,41 @@ void ApplyStyle(sheet::PageInput& page, const SheetStyle& style) {
     page.header = style.header;
 }
 
+// The style a sheet is drawn with: the style page's when one is set, else the
+// one the app kept from the editor ("kept", a file), else the defaults.
+// Answers whether the defaults were left.
+bool ApplyStyleOf(sheet::PageInput& page, const Json& request) {
+    const auto stylePage = request.value("style", "");
+    if (!stylePage.empty()) { ApplyStyle(page, StyleFromPage(PathOf(stylePage))); page.styled = true; return true; }
+    const auto kept = request.value("kept", "");
+    SheetStyle style;
+    if (kept.empty() || !StyleFromKept(PathOf(kept), style)) return false;
+    ApplyStyle(page, style);
+    page.styled = true;
+    return true;
+}
+
+// Writes the editor's style, read as a style page's would be, where "kept" names.
+void KeepStyle(const std::string& text, const std::filesystem::path& kept) {
+    const auto data = Json::parse(text, nullptr, false);
+    if (!data.is_object()) throw std::runtime_error("The sheet editor sent a style that is not one.");
+    const auto style = StyleFromData(data);
+    using namespace sheet::detail;
+    const auto json = "{\"options\":" + JsonOptions(style.options) + ",\"page\":{\"fontSize\":" + JsonNumber(style.look.fontSizePt) +
+                      ",\"lineHeight\":" + JsonNumber(style.look.lineHeightPercent) + "},\"look\":" + JsonLook(style.look) +
+                      ",\"header\":" + JsonHeader(style.header) + "}";
+    std::error_code ignored;
+    std::filesystem::create_directories(kept.parent_path(), ignored);
+    auto part = kept; part += L".part";
+    {
+        std::ofstream output(part, std::ios::binary);
+        output << json;
+        output.flush();
+        if (!output) throw std::runtime_error("Cannot write " + Utf8(part) + ".");
+    }
+    std::filesystem::rename(part, kept);
+}
+
 // The sheet's text with the header the style asks for.
 std::string TextOf(const sheet::PageInput& page, const sheet::StyledResult& result) {
     return sheet::SheetText(result, page.header, sheet::FileSongText(page), sheet::FactsOf(page), page.title);
@@ -174,11 +226,12 @@ Json Answer(const Json& request) {
         return Counts(result, result.text);
     }
     if (what == "page") {
-        // Drawn with the style page the files are saved with, so the editor
-        // opens on what Save sheet files writes.
+        // Drawn with the style the files are saved with, so the editor opens
+        // on what Save sheet files writes; it sends its changes to "keepUrl".
         auto page = PageFrom(request.at("page"));
-        const auto stylePage = request.value("style", "");
-        if (!stylePage.empty()) { ApplyStyle(page, StyleFromPage(PathOf(stylePage))); page.styled = true; }
+        const bool styled = ApplyStyleOf(page, request);
+        page.keepUrl = request.value("keepUrl", "");
+        page.keepFirst = !styled;
         sheet::StyledResult result;
         const auto html = sheet::ToEditorHtml(page, &result);
         auto reply = Counts(result, TextOf(page, result));
@@ -187,11 +240,12 @@ Json Answer(const Json& request) {
         return reply;
     }
     if (what == "style") { StyleFromPage(PathOf(request.value("style", ""))); return Json::object(); }
+    if (what == "keep") { KeepStyle(request.value("style", ""), PathOf(request.at("kept").get<std::string>())); return Json::object(); }
     if (what == "files") {
         // Writes <stem>.html/.txt/.png; the page is rendered once and supplies the text.
         auto page = PageFrom(request.at("page"));
-        const auto stylePage = request.value("style", "");
-        if (!stylePage.empty()) ApplyStyle(page, StyleFromPage(PathOf(stylePage)));
+        ApplyStyleOf(page, request);
+        page.styled = false;
         const auto stem = PathOf(request.at("stem").get<std::string>());
         const auto outputs = request.value("outputs", Json::object());
         std::error_code ignored;

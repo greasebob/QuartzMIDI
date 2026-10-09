@@ -9,6 +9,7 @@
 //
 // Header only, no project dependencies.
 
+#include "MidiTiming.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -233,23 +234,23 @@ struct StyledResult {
 };
 // Invariant: notes + merged + unmapped + hidden == number of input notes.
 
-// Convert tick-timed tempo and meter events to seconds for a ticks-per-quarter
-// division. SMPTE division is not supported.
+// Convert tick-timed tempo and meter events to seconds, for a ticks-per-quarter
+// or an SMPTE division.
 struct TickTempo { uint64_t tick = 0; uint32_t microsecondsPerQuarter = 500000; };
 struct TickMeter { uint64_t tick = 0; int numerator = 4; };
 
-// tempos must be sorted by tick.
+// tempos must be sorted by tick. A tempo of 0 is ignored.
 inline double SecondsAtTick(uint64_t tick, const std::vector<TickTempo>& tempos, uint16_t division) {
-    if (division == 0) return 0;
-    double seconds = 0, microseconds = 500000;
+    double seconds = 0, perTick = midi_timing::SecondsPerTick(division, 500000);
     uint64_t from = 0;
     for (const auto& tempo : tempos) {
         if (tempo.tick >= tick) break;
-        seconds += static_cast<double>(tempo.tick - from) * microseconds / division / 1e6;
+        if (tempo.microsecondsPerQuarter == 0) continue;
+        seconds += static_cast<double>(tempo.tick - from) * perTick;
         from = tempo.tick;
-        microseconds = tempo.microsecondsPerQuarter;
+        perTick = midi_timing::SecondsPerTick(division, tempo.microsecondsPerQuarter);
     }
-    return seconds + static_cast<double>(tick - from) * microseconds / division / 1e6;
+    return seconds + static_cast<double>(tick - from) * perTick;
 }
 
 inline std::vector<TempoMark> TempoMarksFromTicks(std::vector<TickTempo> tempos, uint16_t division) {

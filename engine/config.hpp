@@ -111,6 +111,8 @@ namespace midi {
         // Empty means unbound; so may the four above be.
         std::string PREVIOUS_SONG_KEY;
         std::string NEXT_SONG_KEY;
+        // The game's Sostenuto Pedal bind; ] as in ArijanJ's miditoqwerty.
+        std::string SOSTENUTO_KEY = "VK_OEM_6";
         void validate() const;
     };
 

@@ -49,6 +49,9 @@ private:
     // Rebuilds the Wooting scancode-to-note map from whichever layout is
     // active, 88-key or 61-key. Does nothing for any other backend.
     void ApplyWootingLayout(const std::wstring& deviceId);
+    // The same for the QWERTY keyboard, whose map is disarmed while live play
+    // is off so typing reaches the game.
+    void ApplyQwertyLayout(const std::wstring& deviceId, bool armed);
 
     // Transport, chosen per device id
     std::unique_ptr<IMidiInput> m_input;
@@ -59,6 +62,8 @@ private:
     bool m_timerHeld = false;
     // Whether the sustain pedal last read as down, for the cutoff's hysteresis.
     std::atomic<bool> m_pedalDown{false};
+    // The same for the sostenuto pedal.
+    std::atomic<bool> m_sostenutoDown{false};
 
     // Active Sensing: set once the device sends it, with when it was last
     // heard from, in steady_clock ticks. m_sensingWatch lets go of every key
@@ -92,5 +97,16 @@ private:
 
     // For each note [0..127], track if it is pressed
     alignas(64) std::array<std::atomic<bool>, 128> pressed;
+    // Octaves: the player's octave doubles, copied while the path is armed so
+    // a change never reaches a callback mid-read; then, for each note played,
+    // the doubles it struck, so its note-off lets go of those same keys; and
+    // how many played notes hold each note as a double. A key comes up when
+    // neither its own note nor any double holds it.
+    std::array<std::array<int8_t, 4>, 128> m_doubles{};
+    std::array<std::array<int8_t, 4>, 128> m_struck{};
+    std::array<std::atomic<uint8_t>, 128> m_doubleHolds{};
+    // Notes typed from a QWERTY keyboard carry no velocity of their own, so
+    // they send no velocity taps or volume steps. Set when the device opens.
+    bool m_typed = false;
 };
 

@@ -1,0 +1,6 @@
+# The DirectML engine: ONNX Runtime on any DirectX 12 GPU, NVIDIA, AMD or
+# Intel, and on the CPU when there is none. Installed with --no-deps beside
+# requirements.txt; tools\pin-hashes.py writes the hashes.
+
+onnxruntime-directml==1.24.4 \
+    --hash=sha256:f2ecb68b7b7b259d2ef3112ae760149f9b5a1e7c0fbb73d539da6250a648a614

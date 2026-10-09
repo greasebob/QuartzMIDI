@@ -54,10 +54,14 @@ bool MidiParser::readChunk(char* buffer, size_t size) {
 // Bounds-checked readers over an in-memory track buffer
 //==========================================================================
 namespace {
+    // A track whose bytes run out partway through an event: it ends there and
+    // keeps the events before it.
+    struct TrackCut : std::runtime_error { using std::runtime_error::runtime_error; };
+
     // Reads one byte from the buffer; throws if out-of-range.
     inline uint8_t readByte(const char*& ptr, const char* end) {
         if (ptr >= end)
-            throw std::runtime_error("Unexpected end of track data while reading a byte");
+            throw TrackCut("Unexpected end of track data while reading a byte");
         return static_cast<uint8_t>(*ptr++);
     }
     inline void readVarLenFromBuffer(const char*& ptr, const char* end, uint32_t& value) {
@@ -132,7 +136,7 @@ bool hasPathTraversal(const std::string& path) {
     return false;
 }
 
-void MidiParser::parseMetaEvent(MidiEvent& event, MidiFile& midiFile, uint32_t absoluteTick,
+bool MidiParser::parseMetaEvent(MidiEvent& event, MidiFile& midiFile, uint32_t absoluteTick,
     const char* trackEnd, const char*& ptr) {
     uint8_t metaType = readByte(ptr, trackEnd);
     uint32_t length = 0;
@@ -140,7 +144,7 @@ void MidiParser::parseMetaEvent(MidiEvent& event, MidiFile& midiFile, uint32_t a
     if (length > MAX_EVENT_LENGTH)
         throw std::runtime_error("Meta event length exceeds maximum allowed value");
     if (static_cast<size_t>(trackEnd - ptr) < length)
-        throw std::runtime_error("Meta event data length exceeds track data");
+        throw TrackCut("Meta event data length exceeds track data");
 
     event.metaData.resize(length);
     std::memcpy(event.metaData.data(), ptr, length);
@@ -155,14 +159,19 @@ void MidiParser::parseMetaEvent(MidiEvent& event, MidiFile& midiFile, uint32_t a
             uint32_t microsecondsPerQuarter = (static_cast<uint8_t>(event.metaData[0]) << 16) |
                 (static_cast<uint8_t>(event.metaData[1]) << 8) |
                 (static_cast<uint8_t>(event.metaData[2]));
+            // A tempo of 0 would put every later note at this instant; the
+            // previous tempo goes on.
+            if (microsecondsPerQuarter == 0)
+                return false;
             midiFile.tempoChanges.push_back({ absoluteTick, microsecondsPerQuarter });
         }
         break;
     }
     case 0x58: { // Time Signature
         if (length == 4) {
-            if (event.metaData[1] >= 8)
-                throw std::runtime_error("Invalid time signature denominator");
+            // A denominator past 2^7 is no meter; the song plays without it.
+            if (static_cast<uint8_t>(event.metaData[1]) >= 8)
+                return false;
             midiFile.timeSignatures.push_back({
                 absoluteTick,
                 static_cast<uint8_t>(event.metaData[0]),
@@ -187,6 +196,7 @@ void MidiParser::parseMetaEvent(MidiEvent& event, MidiFile& midiFile, uint32_t a
         // Other meta events keep their raw data.
         break;
     }
+    return true;
 }
 
 //==========================================================================
@@ -214,12 +224,31 @@ MidiFile MidiParser::parse(const std::string& filename) {
     if (!readChunk(headerChunk, 4) || std::string(headerChunk, 4) != "MThd")
         throw std::runtime_error("Invalid MIDI file: Missing MThd header");
 
+    // Bytes from the read position to the end of the file.
+    file.seekg(0, std::ios::end);
+    const std::streamoff fileSize = file.tellg();
+    if (fileSize > static_cast<std::streamoff>(kMaxFileBytes))
+        throw std::runtime_error("The song is too large to play.");
+    file.seekg(4);
+    auto left = [&]() -> uint64_t {
+        const std::streamoff here = file.tellg();
+        return here < 0 || here > fileSize ? 0 : static_cast<uint64_t>(fileSize - here);
+    };
+
     uint32_t headerLength;
-    if (!readInt32(headerLength) || headerLength != 6)
+    if (!readInt32(headerLength) || headerLength < 6)
         throw std::runtime_error("Invalid MIDI header length");
 
     if (!readInt16(midiFile.format) || !readInt16(midiFile.numTracks) || !readInt16(midiFile.division))
         throw std::runtime_error("Error reading MIDI header fields");
+
+    // A longer header carries fields of a later version; the first six bytes
+    // are the ones read.
+    if (headerLength > 6) {
+        if (left() < headerLength - 6)
+            throw std::runtime_error("Invalid MIDI header length");
+        file.seekg(headerLength - 6, std::ios::cur);
+    }
 
     if (midiFile.division == 0)
         throw std::runtime_error("Invalid MIDI time division: 0");
@@ -227,29 +256,28 @@ MidiFile MidiParser::parse(const std::string& filename) {
     if (midiFile.format > 2)
         throw std::runtime_error("Invalid MIDI format");
 
-    if (midiFile.numTracks == 0)
-        throw std::runtime_error("Invalid number of tracks");
+    // The tracks are the MTrk chunks the file holds, whatever count the header
+    // gives. Other chunks are skipped, and a track that runs past the end of
+    // the file or stops partway through an event keeps what was read of it.
+    size_t events = 0;
+    for (;;) {
+        char chunkId[4];
+        uint32_t chunkLength;
+        if (!readChunk(chunkId, 4) || !readInt32(chunkLength))
+            break;
+        if (std::string(chunkId, 4) != "MTrk") {
+            if (left() < chunkLength)
+                break;
+            file.seekg(chunkLength, std::ios::cur);
+            continue;
+        }
+        if (midiFile.tracks.size() >= kMaxTracks)
+            throw std::runtime_error("The song is too large to play.");
 
-    for (int i = 0; i < midiFile.numTracks; ++i) {
-        char trackChunk[4];
-        if (!readChunk(trackChunk, 4) || std::string(trackChunk, 4) != "MTrk")
-            throw std::runtime_error("Invalid MIDI file: Missing MTrk header for track " + std::to_string(i));
-
-        uint32_t trackLength;
-        if (!readInt32(trackLength))
-            throw std::runtime_error("Error reading track length for track " + std::to_string(i));
-
-        // Reject a chunk length larger than the rest of the file before allocating.
-        const auto here = file.tellg();
-        file.seekg(0, std::ios::end);
-        const auto left = file.tellg() - here;
-        file.seekg(here);
-        if (left < 0 || static_cast<uint64_t>(left) < trackLength)
-            throw std::runtime_error("Track " + std::to_string(i) + " is longer than the file");
-
+        const auto trackLength = static_cast<uint32_t>(std::min<uint64_t>(chunkLength, left()));
         std::vector<char> trackData(trackLength);
-        if (!file.read(trackData.data(), trackLength))
-            throw std::runtime_error("Error reading track data for track " + std::to_string(i));
+        if (trackLength != 0 && !file.read(trackData.data(), trackLength))
+            throw std::runtime_error("Error reading track data for track " + std::to_string(midiFile.tracks.size()));
 
         const char* ptr = trackData.data();
         if (trackLength > std::numeric_limits<size_t>::max() - reinterpret_cast<size_t>(ptr))
@@ -258,107 +286,119 @@ MidiFile MidiParser::parse(const std::string& filename) {
         MidiTrack track;
         uint32_t absoluteTick = 0;
         uint8_t lastStatus = 0;
-        track.events.reserve(1000);
+        // An event takes at least two bytes.
+        track.events.reserve((std::min)(size_t{1000}, size_t{trackLength} / 2));
 
-        while (ptr < trackEnd) {
-            uint32_t deltaTime = 0;
-            readVarLenFromBuffer(ptr, trackEnd, deltaTime);
-            if (UINT32_MAX - absoluteTick < deltaTime)
-                throw std::runtime_error("Absolute tick counter overflow");
-            absoluteTick += deltaTime;
+        try {
+            while (ptr < trackEnd) {
+                if (events + track.events.size() >= kMaxEvents)
+                    throw std::runtime_error("The song is too large to play.");
+                uint32_t deltaTime = 0;
+                readVarLenFromBuffer(ptr, trackEnd, deltaTime);
+                if (UINT32_MAX - absoluteTick < deltaTime)
+                    throw std::runtime_error("Absolute tick counter overflow");
+                absoluteTick += deltaTime;
 
-            uint8_t status = readByte(ptr, trackEnd);
-            // Running status: a data byte (< 0x80) reuses the previous status.
-            // Only channel messages set it. Some files continue a run of notes
-            // after a meta or SysEx event, and 0xFF as the running status would
-            // read the next note as a meta event.
-            if (status < 0x80) {
-                if (lastStatus == 0)
-                    throw std::runtime_error("Running status encountered with no previous status");
-                status = lastStatus;
-                ptr--;
-            }
-            else if (status < 0xF0) {
-                lastStatus = status;
-            }
-
-            MidiEvent event;
-            event.absoluteTick = absoluteTick;
-            event.status = status;
-
-            // Channel voice messages with two data bytes
-            if ((status & 0xF0) == 0x80 || (status & 0xF0) == 0x90 ||
-                (status & 0xF0) == 0xA0 || (status & 0xF0) == 0xB0 ||
-                (status & 0xF0) == 0xE0) {
-                if (static_cast<size_t>(trackEnd - ptr) < 2)
-                    throw std::runtime_error("Unexpected end of track data reading channel event");
-                event.data1 = readByte(ptr, trackEnd);
-                event.data2 = readByte(ptr, trackEnd);
-                event.data1 = std::min(event.data1, static_cast<uint8_t>(127));
-                event.data2 = std::min(event.data2, static_cast<uint8_t>(127));
-                track.events.push_back(std::move(event));
-            }
-            // Channel voice messages with one data byte
-            else if ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0) {
-                if (static_cast<size_t>(trackEnd - ptr) < 1)
-                    throw std::runtime_error("Unexpected end of track data reading channel event (1 data byte)");
-                event.data1 = readByte(ptr, trackEnd);
-                event.data2 = 0;
-                event.data1 = std::min(event.data1, static_cast<uint8_t>(127));
-                track.events.push_back(std::move(event));
-            }
-            // System Exclusive events (F0 and F7)
-            else if (status == 0xF0 || status == 0xF7) {
-                uint32_t length = 0;
-                readVarLenFromBuffer(ptr, trackEnd, length);
-                if (length > MAX_EVENT_LENGTH)
-                    throw std::runtime_error("SysEx event length exceeds maximum allowed value");
-                if (static_cast<size_t>(trackEnd - ptr) < length)
-                    throw std::runtime_error("SysEx event length exceeds track data");
-                event.metaData.resize(length);
-                std::copy_n(ptr, length, event.metaData.begin());
-                ptr += length;
-                track.events.push_back(std::move(event));
-            }
-            // Meta events (FF)
-            else if (status == 0xFF) {
-                parseMetaEvent(event, midiFile, absoluteTick, trackEnd, ptr);
-                track.events.push_back(std::move(event));
-            }
-            // System common and realtime events (F1, F2, F3, F6, F8, FA, FB, FC, FE)
-            else if (status >= 0xF0) {
-                uint8_t dataCount = 0;
-                switch (status) {
-                case 0xF1: dataCount = 1; break; // MIDI Time Code Quarter Frame
-                case 0xF2: dataCount = 2; break; // Song Position Pointer
-                case 0xF3: dataCount = 1; break; // Song Select
-                case 0xF6: dataCount = 0; break; // Tune Request
-                    // Real-time messages (F8, FA, FB, FC, FE) have no data bytes.
-                case 0xF8:
-                case 0xFA:
-                case 0xFB:
-                case 0xFC:
-                case 0xFE:
-                    dataCount = 0;
-                    break;
-                default:
-                    dataCount = 0;
-                    break;
+                uint8_t status = readByte(ptr, trackEnd);
+                // Running status: a data byte (< 0x80) reuses the previous status.
+                // Only channel messages set it. Some files continue a run of notes
+                // after a meta or SysEx event, and 0xFF as the running status would
+                // read the next note as a meta event.
+                if (status < 0x80) {
+                    if (lastStatus == 0)
+                        throw std::runtime_error("Running status encountered with no previous status");
+                    status = lastStatus;
+                    ptr--;
                 }
-                for (uint8_t j = 0; j < dataCount; ++j) {
-                    if (ptr >= trackEnd) break;
+                else if (status < 0xF0) {
+                    lastStatus = status;
+                }
+
+                MidiEvent event;
+                event.absoluteTick = absoluteTick;
+                event.status = status;
+
+                // Channel voice messages with two data bytes
+                if ((status & 0xF0) == 0x80 || (status & 0xF0) == 0x90 ||
+                    (status & 0xF0) == 0xA0 || (status & 0xF0) == 0xB0 ||
+                    (status & 0xF0) == 0xE0) {
+                    if (static_cast<size_t>(trackEnd - ptr) < 2)
+                        throw TrackCut("Unexpected end of track data reading channel event");
+                    event.data1 = readByte(ptr, trackEnd);
+                    event.data2 = readByte(ptr, trackEnd);
+                    event.data1 = std::min(event.data1, static_cast<uint8_t>(127));
+                    event.data2 = std::min(event.data2, static_cast<uint8_t>(127));
+                    track.events.push_back(std::move(event));
+                }
+                // Channel voice messages with one data byte
+                else if ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0) {
+                    if (static_cast<size_t>(trackEnd - ptr) < 1)
+                        throw TrackCut("Unexpected end of track data reading channel event (1 data byte)");
+                    event.data1 = readByte(ptr, trackEnd);
+                    event.data2 = 0;
+                    event.data1 = std::min(event.data1, static_cast<uint8_t>(127));
+                    track.events.push_back(std::move(event));
+                }
+                // System Exclusive events (F0 and F7)
+                else if (status == 0xF0 || status == 0xF7) {
+                    uint32_t length = 0;
+                    readVarLenFromBuffer(ptr, trackEnd, length);
+                    if (length > MAX_EVENT_LENGTH)
+                        throw std::runtime_error("SysEx event length exceeds maximum allowed value");
+                    if (static_cast<size_t>(trackEnd - ptr) < length)
+                        throw TrackCut("SysEx event length exceeds track data");
+                    event.metaData.resize(length);
+                    std::copy_n(ptr, length, event.metaData.begin());
+                    ptr += length;
+                    track.events.push_back(std::move(event));
+                }
+                // Meta events (FF)
+                else if (status == 0xFF) {
+                    if (parseMetaEvent(event, midiFile, absoluteTick, trackEnd, ptr))
+                        track.events.push_back(std::move(event));
+                }
+                // System common and realtime events (F1, F2, F3, F6, F8, FA, FB, FC, FE)
+                else if (status >= 0xF0) {
+                    uint8_t dataCount = 0;
+                    switch (status) {
+                    case 0xF1: dataCount = 1; break; // MIDI Time Code Quarter Frame
+                    case 0xF2: dataCount = 2; break; // Song Position Pointer
+                    case 0xF3: dataCount = 1; break; // Song Select
+                    case 0xF6: dataCount = 0; break; // Tune Request
+                        // Real-time messages (F8, FA, FB, FC, FE) have no data bytes.
+                    case 0xF8:
+                    case 0xFA:
+                    case 0xFB:
+                    case 0xFC:
+                    case 0xFE:
+                        dataCount = 0;
+                        break;
+                    default:
+                        dataCount = 0;
+                        break;
+                    }
+                    for (uint8_t j = 0; j < dataCount; ++j) {
+                        if (ptr >= trackEnd) break;
+                        readByte(ptr, trackEnd);
+                    }
+                    continue;
+                }
+                else {
+                    // Unreachable; skip a byte defensively.
                     readByte(ptr, trackEnd);
+                    continue;
                 }
-                continue;
-            }
-            else {
-                // Unreachable; skip a byte defensively.
-                readByte(ptr, trackEnd);
-                continue;
             }
         }
+        catch (const TrackCut&) {
+            // The events before the cut stay.
+        }
+        events += track.events.size();
         midiFile.tracks.push_back(std::move(track));
     }
+    if (midiFile.tracks.empty())
+        throw std::runtime_error("Invalid MIDI file: no tracks");
+    midiFile.numTracks = static_cast<uint16_t>(midiFile.tracks.size());
     file.close();
     return midiFile;
 }

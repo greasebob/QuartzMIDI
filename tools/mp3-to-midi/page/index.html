@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YouTube for QuartzMIDI</title>
+<link rel="icon" href="/quartzmidi/QuartzMIDI.ico">
+<link rel="stylesheet" href="/quartzmidi/app.css">
+<script src="/quartzmidi/parse.js" defer></script>
+<script src="/quartzmidi/app.js" defer></script>
+</head>
+<body>
+<header id="bar" class="bar">
+  <button id="back" class="icon" type="button" title="Back" aria-label="Back"><svg aria-hidden="true"><use href="#i-arrow-left"/></svg></button>
+  <button id="forward" class="icon" type="button" title="Forward" aria-label="Forward"><svg aria-hidden="true"><use href="#i-arrow-right"/></svg></button>
+  <button id="home" class="icon" type="button" title="Home" aria-label="Home"><svg aria-hidden="true"><use href="#i-house"/></svg></button>
+  <form id="search" class="field search" role="search" autocomplete="off">
+    <svg aria-hidden="true"><use href="#i-search"/></svg>
+    <input id="q" type="search" name="q" placeholder="Search YouTube" aria-label="Search YouTube" spellcheck="false" enterkeyhint="search">
+    <button id="clear" class="icon inside" type="button" title="Clear" aria-label="Clear" hidden><svg aria-hidden="true"><use href="#i-x"/></svg></button>
+    <div id="suggest" class="menu suggest" role="listbox" hidden></div>
+  </form>
+  <button id="piano" class="pill" type="button" title="Piano: On" aria-pressed="true"><svg aria-hidden="true"><use href="#i-piano"/></svg><span>Piano</span></button>
+  <button id="signin" class="secondary" type="button"><svg aria-hidden="true"><use href="#i-log-in"/></svg><span>Sign in</span></button>
+  <button id="account" class="icon" type="button" title="Account" aria-label="Account" aria-haspopup="menu" hidden><svg aria-hidden="true"><use href="#i-user"/></svg></button>
+  <button id="app" class="secondary end" type="button"><img src="/quartzmidi/QuartzMIDI.ico" alt="" width="16" height="16"><span>QuartzMIDI</span></button>
+</header>
+
+<nav id="filters" class="bar filters">
+  <div id="type" class="seg" role="radiogroup">
+    <button type="button" role="radio" data-type="videos" aria-checked="true"><svg aria-hidden="true"><use href="#i-list-video"/></svg><span>Videos</span></button>
+    <button type="button" role="radio" data-type="playlists" aria-checked="false"><svg aria-hidden="true"><use href="#i-list-music"/></svg><span>Playlists</span></button>
+    <button type="button" role="radio" data-type="channels" aria-checked="false"><svg aria-hidden="true"><use href="#i-user"/></svg><span>Channels</span></button>
+  </div>
+  <button id="duration" class="secondary" type="button" aria-haspopup="menu"><svg aria-hidden="true"><use href="#i-clock"/></svg><span>Any length</span><svg class="chevron" aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+  <button id="sort" class="icon" type="button" title="Sort" aria-label="Sort" aria-haspopup="menu"><svg aria-hidden="true"><use href="#i-arrow-up-down"/></svg></button>
+  <div id="loading" class="loading" hidden></div>
+</nav>
+
+<nav id="genres" class="bar genres" hidden>
+  <div id="pills" class="pills" role="radiogroup"></div>
+  <button id="genre-sort" class="icon" type="button" title="Sort" aria-label="Sort" aria-haspopup="menu"><svg aria-hidden="true"><use href="#i-arrow-up-down"/></svg></button>
+</nav>
+
+<div id="listbar" class="bar listbar" hidden></div>
+
+<div id="columns" class="columns">
+  <main id="list" class="list">
+    <div id="banners" class="banners" hidden></div>
+    <div id="scroll" class="scroll">
+      <div id="strip" class="strip" role="toolbar" hidden></div>
+      <div id="listhead" class="listhead" hidden>
+        <span class="tick"><button id="all" class="check" type="button" role="checkbox" aria-checked="false" aria-labelledby="counted"><svg aria-hidden="true"><use href="#i-check"/></svg></button></span>
+        <span id="counted" class="counted">Piano videos <span id="count" class="num">0</span></span>
+        <span class="grow"></span>
+        <button id="head-state" class="convert" type="button" hidden></button>
+        <button id="save-ticked" class="secondary save" type="button" aria-haspopup="menu" hidden></button>
+        <button id="convert-ticked" class="primary" type="button" hidden><svg aria-hidden="true"><use href="#i-audio-lines"/></svg><span>Convert <span id="ticked" class="num">0</span></span></button>
+        <button id="untick" class="icon" type="button" title="Clear" aria-label="Clear" hidden><svg aria-hidden="true"><use href="#i-x"/></svg></button>
+      </div>
+      <div id="rows"></div>
+    </div>
+  </main>
+
+  <aside id="side" class="side">
+    <button id="collapse" class="icon" type="button" title="Collapse" aria-label="Collapse" hidden><svg aria-hidden="true"><use href="#i-chevron-down"/></svg></button>
+    <section id="dock" class="dock">
+      <div id="slot" class="slot">
+        <div id="frame" class="frame"><iframe id="player" tabindex="-1" style="pointer-events:none"></iframe><img id="poster" class="poster" alt="" hidden><div id="ad" class="ad" hidden><svg aria-hidden="true"><use href="#i-skip-forward"/></svg></div><span id="frame-word" class="word" hidden></span></div>
+      </div>
+      <div id="dock-title" class="titlerow">
+        <div class="titles">
+          <div id="dock-name" class="name"></div>
+          <button id="dock-channel" class="meta" type="button" hidden><svg aria-hidden="true"><use href="#i-user"/></svg><span></span></button>
+        </div>
+        <button id="copy" class="icon" type="button" title="Copy link" aria-label="Copy link"><svg aria-hidden="true"><use href="#i-copy"/></svg></button>
+        <button id="youtube" class="icon" type="button" title="Open on YouTube" aria-label="Open on YouTube"><svg aria-hidden="true"><use href="#i-external-link"/></svg></button>
+      </div>
+      <div id="transport" class="transport">
+        <button id="play" class="icon" type="button" title="Play" aria-label="Play"><svg aria-hidden="true"><use href="#i-play"/></svg></button>
+        <div id="seek" class="seek" role="slider" tabindex="0" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div class="groove"><div class="fill"></div></div><div class="knob"></div></div>
+        <span id="time" class="time num"></span>
+        <button id="volume" class="icon" type="button" title="Volume" aria-label="Volume" aria-haspopup="dialog"><svg aria-hidden="true"><use href="#i-volume-2"/></svg></button>
+        <button id="enlarge" class="icon" type="button" title="Enlarge" aria-label="Enlarge"><svg aria-hidden="true"><use href="#i-maximize-2"/></svg></button>
+      </div>
+      <div id="actions" class="actions">
+        <button id="dock-convert" class="primary" type="button"><svg aria-hidden="true"><use href="#i-audio-lines"/></svg><span>Convert</span></button>
+        <button id="dock-save" class="secondary save" type="button" aria-haspopup="menu" hidden></button>
+        <button id="mix" class="secondary" type="button"><svg aria-hidden="true"><use href="#i-radio"/></svg><span>Mix</span></button>
+      </div>
+    </section>
+    <section id="tray" class="tray" hidden>
+      <h2 id="queue-head">Queue</h2>
+      <div id="queue" class="entries" role="list"></div>
+      <h2 id="converted-head" hidden>Converted</h2>
+      <div id="converted" class="entries" role="list"></div>
+    </section>
+    <button id="queue-button" class="secondary" type="button" title="Queue" hidden><svg aria-hidden="true"><use href="#i-list-video"/></svg><span id="queue-count" class="num">0</span></button>
+  </aside>
+</div>
+
+<div id="menu" class="menu" role="menu" hidden></div>
+</body>
+</html>

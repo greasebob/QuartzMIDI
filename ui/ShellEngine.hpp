@@ -8,22 +8,29 @@
 #include "DeviceModel.hpp"
 #include "HotkeyNames.hpp"
 #include "../engine/VelocityTelemetry.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace shell {
+
+// The bar holding `at` and the point `bars` bars after its start, in seconds.
+std::pair<double, double> BarsFrom(const MidiFile& file, double at, int bars);
 
 // A performer add-on control as declared in engine/Performer.hpp, plus the
 // value the engine stores for it by id. The app attaches no meaning to it.
@@ -45,9 +52,18 @@ struct PerformerControl {
     std::string estimateName;   // slider or choice: label of the add-on's estimate
     double estimate = 0;
     std::string estimates;      // switch: id of the slider whose estimate it disables
-    bool remembers = false;     // switch: sliders are stored per song
+    bool remembers = false;     // switch: song controls per song; a song can be pinned
     bool holds = false;         // switch: a tap key holds what it played
+    bool perSong = false;       // section choice or slider: kept per song while remembers is on
+    // What a song without a value of its own starts at: the declared value, or
+    // -1 for a slider with an estimate.
+    double rest = 0;
     int trigger = -1;           // owning trigger, or -1 for the section
+};
+// A row's own amounts on a preset's habits, kept while a preset is in use.
+struct PerformerCustom {
+    int preset = 0;
+    std::map<std::string, double> values;
 };
 struct PerformerTrigger {
     std::string name;
@@ -69,10 +85,28 @@ struct PerformerSection {
     std::string presetId, presetField, presetName;
     std::vector<std::string> presets;
     std::vector<std::map<std::string, double>> presetValues;
+    // What each preset is saved and sent as: the value its choice declares, or its index.
+    std::vector<int> presetNumbers;
+    // Each preset's values from before; a set that sits on one reads as the preset.
+    std::vector<std::vector<std::map<std::string, double>>> presetEarlier;
+    // The row's sliders: those a preset sets, in draw order.
+    std::vector<std::string> rowIds;
+    // The Player row: a preset, or Custom (the row's own amounts on the
+    // preset's habits). customSaved is the Custom kept while a preset is lit.
     int preset = 0;
+    bool custom = false;
+    std::optional<PerformerCustom> customSaved;
+    // The open song plays its own row.
+    bool pinned = false;
     std::vector<PerformerControl> controls;
     std::vector<PerformerTrigger> triggers;
     std::vector<PerformerAction> actions;
+    int PresetNumber() const { return presetNumbers.empty() ? preset : presetNumbers[static_cast<size_t>(preset)]; }
+    // The preset saved as `number`, or -1.
+    int PresetOf(int number) const {
+        for (size_t i = 0; i < presetNumbers.size(); ++i) if (presetNumbers[i] == number) return static_cast<int>(i);
+        return -1;
+    }
     // Index of the action owning a hotkey index, or -1.
     int ActionOfKey(size_t hotkey) const {
         for (size_t i = 0; i < actions.size(); ++i) if (actions[i].key == hotkey) return static_cast<int>(i);
@@ -90,6 +124,41 @@ struct PerformerSection {
         return true;
     }
     double Shown(const PerformerControl& slider) const { return slider.value < 0 ? slider.estimate : slider.value; }
+    bool InRow(const std::string& id) const { return std::find(rowIds.begin(), rowIds.end(), id) != rowIds.end(); }
+    // Kept per song while remembers is on: a section choice or slider declared
+    // per song or with an estimate.
+    bool PerSong(const PerformerControl& control) const {
+        return !control.isSwitch && control.trigger < 0 && (control.perSong || !control.estimateName.empty());
+    }
+    // The value preset `index` sets a row slider to: its own, or the slider's declared value.
+    double Target(int index, const std::string& id) const {
+        const auto& values = presetValues[static_cast<size_t>(index)];
+        if (const auto found = values.find(id); found != values.end()) return std::clamp(found->second, 0.0, 1.0);
+        const auto* control = Find(id);
+        return control ? control->rest : 0;
+    }
+    // True when every row slider equals, to the whole percent, the values of
+    // preset `index` or one of its earlier sets; an id an earlier set leaves
+    // out takes the preset's value.
+    bool OnPreset(int index, const std::map<std::string, double>& values) const {
+        const auto percent = [](double value) { return std::lround(value * 100); };
+        const auto sits = [&](const std::map<std::string, double>& set) {
+            for (const auto& id : rowIds) {
+                const double target = Target(index, id);
+                const auto have = values.find(id), earlier = set.find(id);
+                if (percent(have == values.end() ? target : have->second) != percent(earlier == set.end() ? target : earlier->second)) return false;
+            }
+            return true;
+        };
+        if (sits({})) return true;
+        for (const auto& set : presetEarlier[static_cast<size_t>(index)]) if (sits(set)) return true;
+        return false;
+    }
+    // The remembers switch is on.
+    bool Remembers() const {
+        for (const auto& control : controls) if (control.remembers) return control.value != 0;
+        return false;
+    }
     bool Drawn(const PerformerControl& control) const {
         if (control.noEstimate) return false;
         const auto* with = control.shownWith.empty() ? nullptr : Find(control.shownWith);
@@ -105,11 +174,14 @@ struct PerformerSection {
 
 struct EngineSnapshot {
     std::shared_ptr<const std::vector<MidiEntry>> files = std::make_shared<const std::vector<MidiEntry>>();
+    // The songs playlists and the queue list from outside the library, each
+    // named by its full path, with its size and length once the worker has read them.
+    std::shared_ptr<const std::vector<MidiEntry>> outside = std::make_shared<const std::vector<MidiEntry>>();
     std::vector<TrackRow> rows;
     std::filesystem::path folder;
     std::filesystem::path loaded;
     std::string error;
-    std::shared_ptr<const std::string> log = std::make_shared<const std::string>();
+    std::shared_ptr<const LogView> log = std::make_shared<const LogView>();
     uint64_t generation = 0;
     bool busy = false;
     bool playing = false;
@@ -128,8 +200,9 @@ struct EngineSnapshot {
     bool typingAcknowledged = true;
     // Drawn only when performer.loaded is set.
     PerformerSection performer;
-    // Store performer choices and sliders per song; a performer switch can clear it.
-    bool rememberPerSong = true;
+    // Keep the performer's song controls per song and let a song be pinned to
+    // its own Player row: the section's remembers switch, off without one.
+    bool rememberPerSong = false;
     // Active performer trigger; 0 is the clock. A "plays" trigger runs the song
     // while its key is held; a "steps" trigger advances once per press.
     int trigger = 0;
@@ -159,8 +232,22 @@ struct EngineSnapshot {
     GameWindow volumeTarget;
     std::string volumeDownKey;
     std::string volumeUpKey;
+    // The keys the app holds for the sustain and sostenuto pedals, VK_ names.
+    std::string sustainKey = "VK_SPACE";
+    std::string sostenutoKey = "VK_OEM_6";
+    // Whether `vk` cannot be the sostenuto key: a mouse button, which the app
+    // cannot type, a note key, or a key it types for sustain or volume.
+    bool SostenutoKeyRefused(int vk) const {
+        return vk == 0 || IsMouseHotkey(vk) || IsNoteKey(vk, keyMappings) ||
+               vk == NameToVK(sustainKey) || vk == NameToVK(volumeDownKey) || vk == NameToVK(volumeUpKey);
+    }
     int volumeInitial = 100;
     double position = 0;
+    // While a song plays, the worker moves its position here between
+    // publishes rather than copying the whole state; NaN until it does. Every
+    // copy shares it, so read Position().
+    std::shared_ptr<std::atomic<double>> clock = std::make_shared<std::atomic<double>>(std::numeric_limits<double>::quiet_NaN());
+    double Position() const { const double live = clock->load(std::memory_order_relaxed); return live == live ? live : position; }
     double duration = 0;
     // Live MIDI input. Devices are opaque backend-specific ids, never indices
     // (see engine/MidiInput.hpp).
@@ -240,6 +327,23 @@ struct EngineSnapshot {
     bool converterInstalled = false;
     bool converterCanSetUp = false;
     bool settingUp = false;
+    // The installed converter's engine and the ones this PC can run, best
+    // first; see audio_to_midi::Install.
+    std::string converterEngine;
+    std::vector<std::string> converterEngines;
+    // The YouTube window (browse.py) runs beside the converter. A video picked
+    // there while a conversion runs waits its turn; conversionsWaiting counts them.
+    bool browsingYouTube = false;
+    // The open YouTube window reads the app's messages (protocol 2), so Sign in goes to it.
+    bool youtubeWindowSignsIn = false;
+    size_t conversionsWaiting = 0;
+    // The window asked for the MIDI folder picker; the panel opens it and
+    // answers FolderAsked.
+    bool folderWanted = false;
+    // The queue waits for a sign-in or a folder: pausedReason is "signin" or
+    // "folder".
+    bool conversionsPaused = false;
+    std::string pausedReason;
     // Loop: 0 off, 1 the song, 2 the section from loopStart to loopEnd, in
     // seconds of the song. The mode is kept; the section is the song's own.
     int loop = 0;
@@ -300,6 +404,9 @@ public:
                         // its key's set 1 scancode or 0 to unbind. A key another
                         // pedal has is moved.
                         WootingPedalKey,
+                        // key is the name of the key held for the sostenuto
+                        // pedal. A hotkey on that key is unbound.
+                        SostenutoKey,
                         EightyEightKeys,
                         AutoVolumeScan, AutoVolumeCalibrate, AutoVolumeOff, AutoVolumeCancel, ClearLog,
                         PlayCountdown, PlaybackDelay, AcknowledgeTyping,
@@ -315,13 +422,19 @@ public:
                         // value enables it. SaveLibrarySheets exports the whole
                         // list on a worker thread; SheetBatchProgress is its
                         // report (track done, amount failed, key status, value finished).
-                        SheetsFolder, SheetStylePage, SheetFiles, SaveLibrarySheets, SheetBatchCancel, SheetBatchProgress,
+                        // KeepSheetStyle: key is the style the open editor page sent,
+                        // kept for the sheets drawn with no style page.
+                        SheetsFolder, SheetStylePage, SheetFiles, SaveLibrarySheets, SheetBatchCancel, SheetBatchProgress, KeepSheetStyle,
                         // ConvertAudio: path is an audio file or key a URL.
                         // ConvertProgress comes from the converter thread: key is
                         // the text, track an audio_to_midi::Status::Kind.
                         ConvertAudio, ConvertCancel, ConvertProgress,
                         // Opens tools/mp3-to-midi/signin.py; ConvertCancel closes it.
                         YouTubeSignIn,
+                        // Opens tools/mp3-to-midi/browse.py, or brings it to the
+                        // front; key is words to search for, if any.
+                        // BrowseProgress is its report, as ConvertProgress is.
+                        YouTubeBrowse, BrowseProgress,
                         // Runs the add-on's setup.ps1; ConvertCancel stops it.
                         ConverterSetUp,
                         // track is the hotkey index (kHotkeyFields, then the
@@ -329,10 +442,12 @@ public:
                         // A key bound elsewhere is moved and the other unbound.
                         Hotkey,
                         // Performer: value is the section switch. PerformerPreset:
-                        // track is the preset index. PerformerValue: key is the
-                        // control id, amount its value (negative returns a slider
-                        // to its estimate). Trigger: track is the trigger index.
-                        PerformerPreset, PerformerValue, Trigger,
+                        // track is the preset index, or the number of presets for
+                        // Custom. PerformerValue: key is the control id, amount its
+                        // value (negative returns a slider to its estimate).
+                        // Trigger: track is the trigger index. PerformerPin: value
+                        // pins the open song to its own Player row.
+                        PerformerPreset, PerformerValue, Trigger, PerformerPin,
                         // track indexes kGameKeyMaps; replaces every bind in both layouts.
                         GameKeyMap,
                         // Loop: track is the mode (EngineSnapshot::loop); a
@@ -354,9 +469,23 @@ public:
                         // MoveInList: track is the row it goes before.
                         AddToList, RemoveFromList, MoveInList,
                         // path is a song, sent to the Recycle Bin and taken out of every list.
-                        DeleteSong,
+                        // SongRecycled is the report from the thread that sends it.
+                        DeleteSong, SongRecycled,
                         // amount is the octaves each note sounds in, 1 to 5; saved.
-                        Octaves };
+                        Octaves,
+                        // From the thread reading song lengths: files are the songs
+                        // read, each with its size, time and seconds; value marks
+                        // the last batch of the run numbered generation.
+                        Lengths,
+                        // key is the skin as the YouTube window's theme message.
+                        BrowseTheme,
+                        // amount is the converter's CPU limit, 25 to 100.
+                        ConverterCpu,
+                        // The panel opened the folder picker folderWanted asked for.
+                        FolderAsked,
+                        // key is the converter engine to switch to: "cuda13",
+                        // "cuda12" or "directml". setup.ps1 installs it.
+                        ConverterEngine };
     struct Command {
         Action action;
         std::filesystem::path path;
@@ -368,8 +497,11 @@ public:
         std::wstring device;
         std::vector<VelocityPoint> anchors;
         GameWindow window;
-        // Scan: what the folder watcher's own walk found, so the worker does not walk again.
+        // Scan: what the folder watcher's own walk found, so the worker does not
+        // walk again. Lengths: the songs read.
         std::shared_ptr<std::vector<MidiEntry>> files;
+        // Scan: the folders that walk found, for the YouTube window's Save to.
+        std::shared_ptr<std::vector<std::string>> folders;
         // A reopen a device scan sends for a device that came back. It runs
         // whenever a device comes or goes, so it cancels no calibration, and
         // when it fails the song plays on and the device stays saved.
@@ -380,7 +512,8 @@ public:
     ~ShellEngine();
     void Send(Command command);
     std::shared_ptr<const EngineSnapshot> Snapshot() const;
-    // HWND posted WM_NULL on each publish; the shell renders on demand.
+    // HWND posted WM_NULL on each publish, and on a moved position while it
+    // is shown; the shell renders on demand.
     void SetWakeWindow(void* window);
     // Key-state probe for the Hold and Tap keys (GetAsyncKeyState by default).
     // Set before the first command.
@@ -398,6 +531,7 @@ private:
     std::mutex keyProbeMutex_;
     void Run(std::stop_token stop);
     void Publish(const EngineSnapshot& state);
+    void PublishPosition(const EngineSnapshot& state);
     std::filesystem::path config_;
     std::shared_ptr<AutoVolumeHost> volumeHost_;
     bool requireTypingAcknowledgement_;
@@ -411,6 +545,9 @@ private:
 };
 
 std::string Utf8(const std::filesystem::path& path);
+// The song's length in seconds, to its last note, through its tempo changes
+// as playback times them; below 0 when the file cannot be read.
+double SongSeconds(const std::filesystem::path& song);
 // Where sheet files go when no sheets folder has been chosen.
 std::filesystem::path DefaultSheetsFolder(const std::filesystem::path& midiFolder);
 std::string NoteName(int note);

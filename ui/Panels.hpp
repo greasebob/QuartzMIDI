@@ -52,9 +52,9 @@ struct Preferences {
     // The height is derived from which panels are open. Mini shares the place:
     // it opens on the full window's top-right corner, and moving it moves this.
     int windowX = 0, windowY = 0, windowWidth = 0;
-    // Any height the full window was dragged beyond that, in dp, and whether it
-    // was maximized.
-    float windowExtra = 0;
+    // Any height the full window was dragged beyond that and any width beyond its
+    // narrowest, in dp, and whether it was maximized.
+    float windowExtra = 0, windowWider = 0;
     bool maximized = false;
     // Restore mini mode at startup. The shell switches after placing the full
     // window, because mini records the full window's position to return to.
@@ -87,6 +87,9 @@ public:
     // in mini, which a borderless game would otherwise cover. Leaving mini goes
     // back to the switch, which mini never changes.
     bool Topmost() const { return preferences.alwaysOnTop || miniMode; }
+    // Set on opening a window outside the app (the YouTube window, the sheet
+    // editor), which the shell then lets come in front of a topmost main window.
+    bool yieldTopmost = false;
     // Class for a separate OS window. It must carry TopMost while the main window
     // is topmost, or it opens behind the main window and cannot be raised.
     ImGuiWindowClass OwnWindowClass() const {
@@ -103,6 +106,8 @@ public:
     // Hotkey being rebound in Settings, or -1. The shell unregisters the hotkeys,
     // polls for the key and sends the rebind.
     int hotkeyCapture = -1;
+    // The sostenuto pedal's key is being rebound, the same way.
+    bool sostenutoCapture = false;
     // Set when the greyed Hide from taskbar switch arms the Show/hide window
     // capture, so the key it takes turns the switch on. The shell clears it
     // once that capture ends.
@@ -114,6 +119,12 @@ public:
     // note key, or -1; its button flashes in the warning colour for a moment.
     double captureRefusedAt = -1;
     static constexpr double kRefusedFlash = .4;
+    // The greyed Hide from taskbar switch clicked: an unbound Show/hide window key
+    // arms its capture; a bound one another program holds would only be taken
+    // again, so its cap flashes as a refused key's does, from showHideTakenAt
+    // (ImGui time, or -1).
+    void HideSwitchClicked(const EngineSnapshot& state);
+    double showHideTakenAt = -1;
     // Wooting pedal whose key is being learnt, or -1. The shell listens to the
     // Wooting for the key and sends it.
     int wootingPedalCapture = -1;
@@ -129,11 +140,17 @@ public:
     bool miniAutoplay = false;
     bool autoVolumeOpen = false;
     bool logOpen = false;
-    // The log's rows wrapped to the panel, rebuilt when the log text, the width
-    // or the font size changes, so a full log isn't re-measured every frame.
-    std::shared_ptr<const std::string> logWrappedText;
+    // The log's rows wrapped to the panel: each new line as it comes, and all
+    // again only when the width or the font size changes, so a full log isn't
+    // re-measured every frame or every line. A row is a range of a chunk
+    // (LogView), by the chunk's number; logWrapFrom is where the last chunk
+    // wrapped's unfinished line starts.
+    struct LogRow { uint64_t chunk; size_t begin, end; };
+    std::shared_ptr<const LogView> logWrapped;
     float logWrappedWidth = 0, logWrappedFont = 0;
-    std::vector<std::pair<size_t, size_t>> logRows;
+    uint64_t logWrapChunk = 0;
+    size_t logWrapFrom = 0;
+    std::vector<LogRow> logRows;
     // One-frame request to open the Convert audio popover, set by the Files
     // header button or a render test; Draw clears it.
     bool openConvert = false;
@@ -148,6 +165,13 @@ public:
     int tourStop = -1;
     // Space between the tour text and the buttons, for the render tests.
     float tourTextRoom = 0;
+    // Render-test hooks for the performer's Player row in Settings: a section
+    // drawn in place of the engine's, and the room left at the right of the
+    // preset row and of the line above it, its word, pin and Custom, as last
+    // drawn.
+    const PerformerSection* settingsPerformer = nullptr;
+    float playerRowRoom = 0, playerLabelRoom = 0;
+    bool playerRowDrawn = false;
     void StartTour(int stop = 0);
     // Ends the tour and marks it seen.
     void EndTour();
@@ -183,7 +207,7 @@ public:
               float dpi, ShellEngine& engine);
     // True while something changes with time alone (a control's transition
     // moves), so the on-demand renderer keeps drawing.
-    bool Animating() const { return hotkeyCapture >= 0 || wootingPedalCapture >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
+    bool Animating() const { return hotkeyCapture >= 0 || sostenutoCapture || wootingPedalCapture >= 0 || showHideTakenAt >= 0 || convertBarDrawn_ || (tourStop >= 0 && (tourGlide_ < 1 || tourFade_ < 1 || tourText_ < 1 || tourTextStop_ != tourStop || tourClosing_)) || MotionPending(); }
 private:
     float HeightGrowth(bool tracksOpen, bool velocityOpen) const;
     void DrawHelp(const Fonts&, const skin::Skin&, float, const EngineSnapshot&);
@@ -241,6 +265,15 @@ private:
     bool filteredFolders_ = true;
     std::shared_ptr<const LibraryLists> filteredLibrary_;
     int filteredList_ = kFolderList;
+    std::shared_ptr<const std::vector<MidiEntry>> filteredOutside_;
+    // Lookups over the library, built when a scan or the lists change rather
+    // than searched per row and frame: each file's place by path, the
+    // favourites, and each row's place in listEntries_.
+    void IndexLibrary(const EngineSnapshot& state);
+    PathMap<size_t> fileIndex_, listIndex_;
+    PathSet favourites_;
+    std::shared_ptr<const std::vector<MidiEntry>> indexedFiles_;
+    std::shared_ptr<const LibraryLists> indexedLibrary_;
     // The playlist or queue shown, as its rows draw: a library file's entry, or
     // one named by its full path for a file outside the library.
     std::vector<MidiEntry> listEntries_;
@@ -258,7 +291,7 @@ private:
     // Current folder, as a prefix of MidiEntry::name; search covers it and its
     // sub-folders.
     std::string browse_;
-    // Set by Open file location; the list scrolls to it once its folder is shown.
+    // The loaded song; the list scrolls to it once its folder is shown.
     std::filesystem::path revealFile_;
     // Loaded file the list last saw, and the file a row click loaded, so a song
     // that Next, a hotkey or shuffle loads is revealed once and a clicked one isn't.
@@ -309,6 +342,8 @@ private:
     bool volumeWasOpen_ = false;
     GameWindow volumeWindow_;
     void SettingsControl(const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, float, bool bare = false);
+    // The window opacity button and the slider it opens under it, in both modes' strips.
+    void OpacityControl(const skin::Skin&, float);
     void DrawMini(HWND, const Fonts&, const skin::Skin&, float, ShellEngine&, ImVec2, ImVec2);
     void DrawStatus(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, float, float);
     // A newer release as a card in the window's bottom-right corner, above the
@@ -318,9 +353,16 @@ private:
     bool updateDismissed_ = false;
     float updateFade_ = 0;
     // Mini has no status bar: a failure or a running conversion shows as a toast
-    // over its bottom edge, above the update toast, until closed or replaced.
+    // at its bottom edge, above the update toast, until closed or replaced. Mini
+    // grows by the toasts while they show, so they cover none of its rows.
     // Returns the update toast's height when it shows, so the notice can sit on it.
     float UpdateToastHeight(const skin::Skin&, float) const;
+    // The room the toasts showing take below mini's last row, 0 for none.
+    float MiniToastsHeight(const skin::Skin&, float) const;
+    // What the notice says, empty for nothing; miniNotice_ is whether it shows,
+    // set by SyncLayout so the size is right before mini is drawn.
+    std::string MiniNoticeText(const EngineSnapshot&) const;
+    bool miniNotice_ = false;
     void DrawMiniNotice(const Fonts&, const skin::Skin&, float, const EngineSnapshot&, ImVec2, ImVec2);
     std::string noticeClosed_;
     float noticeFade_ = 0;

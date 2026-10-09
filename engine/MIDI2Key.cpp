@@ -5,6 +5,7 @@
 #include "InputLatency.hpp"
 #include "VelocityTelemetry.hpp"
 #include "WootingAnalog.hpp"
+#include "QwertyInput.hpp"
 #include <chrono>
 #include <mutex>
 #include <utility>
@@ -127,6 +128,16 @@ static const auto CHAR_INFO_TABLE = initCharInfoTable();
 static WORD SustainScan(const VirtualPianoPlayer& player) {
     const UINT scan = player.sustain_key_code ? MapVirtualKeyW(player.sustain_key_code, MAPVK_VK_TO_VSC) : 0;
     return scan ? static_cast<WORD>(scan) : WORD{0x39};
+}
+
+// Scancode of SOSTENUTO_KEY; ] if unset.
+static WORD SostenutoScan(const VirtualPianoPlayer& player) {
+    const UINT scan = player.sostenuto_key_code ? MapVirtualKeyW(player.sostenuto_key_code, MAPVK_VK_TO_VSC) : 0;
+    return scan ? static_cast<WORD>(scan) : WORD{0x1B};
+}
+// KEYEVENTF_EXTENDEDKEY for a sostenuto key in the arrows or the Insert block.
+static DWORD SostenutoExtended(const VirtualPianoPlayer& player) {
+    return VirtualPianoPlayer::isExtendedVK(player.sostenuto_key_code) ? KEYEVENTF_EXTENDEDKEY : 0;
 }
 
 // Modifier press/release sequences, indexed by alt | ctrl << 1 | shift << 2.
@@ -327,6 +338,8 @@ MIDI2Key::MIDI2Key(VirtualPianoPlayer* player)
     for (auto& b : pressed) {
         b.store(false, std::memory_order_relaxed);
     }
+    for (auto& doubles : m_doubles) doubles.fill(-1);
+    for (auto& doubles : m_struck) doubles.fill(-1);
     // Lets the player release this path's keys when it changes output target.
     if (m_player) m_player->set_live_release_hook([this] { ReleaseHeldKeys(); });
 }
@@ -338,8 +351,11 @@ MIDI2Key::~MIDI2Key() {
 }
 
 void MIDI2Key::ReleaseHeldKeys() {
+    for (auto& doubles : m_struck) doubles.fill(-1);
     for (int note = 0; note < 128; ++note) {
-        if (!pressed[note].exchange(false, std::memory_order_relaxed)) continue;
+        // Held by its own note, by doubles, or both: one release.
+        const bool own = pressed[note].exchange(false, std::memory_order_relaxed);
+        if (m_doubleHolds[note].exchange(0, std::memory_order_relaxed) == 0 && !own) continue;
         PrecomputedKeyEvents* evPtr = m_player && m_player->eightyEightKeyModeActive
             ? g_fullKeyEvents[note] : g_limitedKeyEvents[note];
         if (!evPtr) continue;
@@ -359,8 +375,14 @@ void MIDI2Key::ReleaseHeldKeys() {
         input_latency::send(1, &sustain, sizeof(INPUT));
         m_player->isSustainPressed = false;
     }
+    if (m_player && m_player->isSostenutoPressed) {
+        INPUT sostenuto = makeKeybdInput(SostenutoScan(*m_player), KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP | SostenutoExtended(*m_player));
+        input_latency::send(1, &sostenuto, sizeof(INPUT));
+        m_player->isSostenutoPressed = false;
+    }
     if (m_player) m_player->sent_velocity = 0;
     m_pedalDown.store(false, std::memory_order_relaxed);
+    m_sostenutoDown.store(false, std::memory_order_relaxed);
 }
 
 // An analog key plays whatever note the active layout maps to it, so the
@@ -380,6 +402,19 @@ void MIDI2Key::ApplyWootingLayout(const std::wstring& deviceId) {
     SetWootingAnalogSettings(WootingAnalogSettingsFromConfig());
 }
 
+// Typed keys play the notes the active layout maps them to, so the QWERTY map
+// follows the layout as the Wooting map does. While live play is off the map
+// is disarmed and every key reaches the game as typed.
+void MIDI2Key::ApplyQwertyLayout(const std::wstring& deviceId, bool armed) {
+    if (!m_player || deviceId.empty()) return;
+    if (BackendForDeviceId(deviceId) != MidiBackend::Qwerty) return;
+    if (!armed) { SetQwertyNoteMap({}); return; }
+    const bool full = m_player->eightyEightKeyModeActive.load(std::memory_order_relaxed);
+    QwertyNoteMap map = QwertyNoteMapFrom(full ? m_player->full_key_mappings : m_player->limited_key_mappings);
+    map.armed = true;
+    SetQwertyNoteMap(map);
+}
+
 void MIDI2Key::OpenDevice(const std::wstring& deviceId) {
     CloseDevice();
     m_busy = false;
@@ -393,6 +428,7 @@ void MIDI2Key::OpenDevice(const std::wstring& deviceId) {
     // A Wooting types its pedal keys itself, so its pedals reach only the MIDI
     // target; on keystrokes the app would press the sustain key a second time.
     const bool wooting = BackendForDeviceId(deviceId) == MidiBackend::WootingAnalog;
+    m_typed = BackendForDeviceId(deviceId) == MidiBackend::Qwerty;
     const bool opened = m_input->open(deviceId,
         [this, wooting](uint64_t timestampQpc, const uint8_t* data, size_t length) {
             if (wooting && data && length >= 1 && (data[0] & 0xF0) == 0xB0 &&
@@ -499,7 +535,7 @@ void MIDI2Key::SetActive(bool active) {
     // Callers sweep the held keys next, and a transport's close does not
     // always wait for a callback already past the active check, so wait for
     // it here or its key-down lands after the sweep.
-    if (!active) { Quiesce(); return; }
+    if (!active) { Quiesce(); ApplyQwertyLayout(m_selectedDevice, false); return; }
     // Re-arming rebuilds the tables callbacks read and resets scancode
     // ownership, so drain the callbacks and release held keys with the old
     // tables first.
@@ -507,10 +543,12 @@ void MIDI2Key::SetActive(bool active) {
     if (rearm) { Quiesce(); ReleaseHeldKeys(); }
     if (active && m_player) {
         precomputeAllMappings(*m_player);
+        m_doubles = m_player->octave_doubles;
     }
     m_isActive.store(active, std::memory_order_release);
     // The layout may have changed since the device was opened.
     if (active) ApplyWootingLayout(m_selectedDevice);
+    if (active) ApplyQwertyLayout(m_selectedDevice, true);
 }
 
 const std::wstring& MIDI2Key::GetSelectedDevice() const {
@@ -545,7 +583,8 @@ void MIDI2Key::ProcessMidiMessage(uint64_t timestampQpc, const uint8_t* bytes, s
     uint8_t cmd = status & 0xF0;
     uint8_t channel = status & 0x0F;
     const int selectedChannel = m_selectedChannel.load(std::memory_order_relaxed);
-    if (selectedChannel >= 0 && channel != (uint8_t)selectedChannel) return;
+    // Typed notes come on the first channel, whichever one the keyboard is set to.
+    if (selectedChannel >= 0 && !m_typed && channel != (uint8_t)selectedChannel) return;
     // All Sound Off and All Notes Off let go of every key live play holds; on
     // the MIDI target they go out as they came.
     if (cmd == 0xB0 && (bytes[1] == 120 || bytes[1] == 123)) {
@@ -588,19 +627,27 @@ void MIDI2Key::ProcessMidiMessage(uint64_t timestampQpc, const uint8_t* bytes, s
         uint8_t note = bytes[1];
         uint8_t velocity = bytes[2];
 
-        // The velocity tap goes out in the same SendInput batch as the note
-        // press. The buffer must be local: several input threads can be in
-        // here at once.
-        INPUT batch[24];
+        // The velocity tap and the octave doubles go out in the same SendInput
+        // batch as the note press. The buffer must be local: several input
+        // threads can be in here at once.
+        INPUT batch[112];
         size_t batchCount = 0;
-        bool batchSent = false;
+        // Unreachable with any accepted mapping: a batch that would overflow
+        // goes out in several calls so no key is left down.
+        const auto append = [&](const INPUT* inputs, size_t count) {
+            if (batchCount + count > std::size(batch)) {
+                if (batchCount) input_latency::send((UINT)batchCount, batch, sizeof(INPUT));
+                batchCount = 0;
+            }
+            for (size_t i = 0; i < count; ++i) batch[batchCount++] = inputs[i];
+        };
         // While Left Shift is held for the Wooting shift amount the game sees
         // it down, so the note would read as its sharp and the velocity tap as
         // a note. Lift it in the same batch so the keyboard's Shift repeat
         // cannot land in between. Mappings that need Shift press it themselves.
         const bool lifted = WootingShiftHeld();
         if (lifted) batch[batchCount++] = makeKeybdInput(SHIFT_SCAN, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP);
-        if (p.enable_velocity_keypress.load(std::memory_order_relaxed)) {
+        if (!m_typed && p.enable_velocity_keypress.load(std::memory_order_relaxed)) {
             char newVelKey = g_velocityMapping[velocity];
             // Substitute a free key only when a tap is actually needed.
             if (newVelKey != p.sent_velocity)
@@ -620,7 +667,7 @@ void MIDI2Key::ProcessMidiMessage(uint64_t timestampQpc, const uint8_t* bytes, s
                 batch[batchCount++] = makeKeybdInput(mod, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP); // modifier up
             }
         }
-        if (p.enable_volume_adjustment.load(std::memory_order_relaxed)) {
+        if (!m_typed && p.enable_volume_adjustment.load(std::memory_order_relaxed)) {
             int target_vol = p.volume_lookup[velocity];
             int curr_vol = p.current_volume.load(std::memory_order_relaxed);
             int diff = target_vol - curr_vol;
@@ -644,19 +691,21 @@ void MIDI2Key::ProcessMidiMessage(uint64_t timestampQpc, const uint8_t* bytes, s
         // shares it, is let go and struck again in the same batch, as autoplay
         // does, so the repeat sounds; the count keeps it down until every
         // note holding it has ended.
+        const bool full = p.eightyEightKeyModeActive;
         int midi_n = g_adjustedNote[note];
-        PrecomputedKeyEvents* evPtr = p.eightyEightKeyModeActive ? g_fullKeyEvents[midi_n] : g_limitedKeyEvents[midi_n];
+        PrecomputedKeyEvents* evPtr = full ? g_fullKeyEvents[midi_n] : g_limitedKeyEvents[midi_n];
+        bool pressing = false;
         if (evPtr) {
-            const bool again = pressed[midi_n].exchange(true, std::memory_order_relaxed);
+            // A key held only as another note's double counts as down.
+            const bool again = pressed[midi_n].exchange(true, std::memory_order_relaxed) ||
+                               m_doubleHolds[midi_n].load(std::memory_order_relaxed) > 0;
             WORD sc = evPtr->mainScan & 0xFF;
             _mm_prefetch((const char*)&scancodeOwner[sc], _MM_HINT_T0);
             _mm_prefetch((const char*)&scancodeCount[sc], _MM_HINT_T0);
             PrecomputedKeyEvents* ownerPtr = scancodeOwner[sc];
             if (ownerPtr && ownerPtr != evPtr) {
                 short oldCount = scancodeCount[sc].exchange(0, std::memory_order_relaxed);
-                if (oldCount > 0) {
-                    input_latency::send((UINT)ownerPtr->releaseCount, ownerPtr->release.data(), sizeof(INPUT));
-                }
+                if (oldCount > 0) append(ownerPtr->release.data(), ownerPtr->releaseCount);
                 scancodeOwner[sc] = nullptr;
             }
             const short held = scancodeCount[sc].load(std::memory_order_relaxed);
@@ -664,46 +713,70 @@ void MIDI2Key::ProcessMidiMessage(uint64_t timestampQpc, const uint8_t* bytes, s
             // another mapping took holds it anew.
             if (!again || held == 0) scancodeCount[sc].fetch_add(1, std::memory_order_relaxed);
             scancodeOwner[sc] = evPtr;
-            const size_t lift = held > 0 ? evPtr->releaseCount : 0;
-            if (batchCount + lift + evPtr->pressCount <= std::size(batch)) {
-                for (size_t i = 0; i < lift; ++i) batch[batchCount++] = evPtr->release[i];
-                for (size_t i = 0; i < evPtr->pressCount; ++i) batch[batchCount++] = evPtr->press[i];
-                input_latency::send((UINT)batchCount, batch, sizeof(INPUT));
-                batchSent = true;
-            }
-            else {
-                // Unreachable with any accepted mapping. Send in several
-                // calls so no key is left down.
-                if (batchCount) input_latency::send((UINT)batchCount, batch, sizeof(INPUT));
-                if (lift) input_latency::send((UINT)lift, evPtr->release.data(), sizeof(INPUT));
-                input_latency::send((UINT)evPtr->pressCount, evPtr->press.data(), sizeof(INPUT));
-                batchSent = true;
+            if (held > 0) append(evPtr->release.data(), evPtr->releaseCount);
+            append(evPtr->press.data(), evPtr->pressCount);
+            pressing = true;
+        }
+        // Octaves: each double is held with the note. A double never strikes
+        // a key already down, as autoplay's never does; it joins its hold.
+        // A note struck again before its note-off keeps the doubles it has.
+        auto& struck = m_struck[note];
+        if (struck[0] < 0) {
+            size_t count = 0;
+            for (const int8_t doubled : m_doubles[note]) {
+                if (doubled < 0) break;
+                const int slot = g_adjustedNote[doubled];
+                PrecomputedKeyEvents* dPtr = full ? g_fullKeyEvents[slot] : g_limitedKeyEvents[slot];
+                if (!dPtr) continue;
+                struck[count++] = static_cast<int8_t>(slot);
+                if (m_doubleHolds[slot].fetch_add(1, std::memory_order_relaxed) > 0 ||
+                    pressed[slot].load(std::memory_order_relaxed)) continue;
+                const WORD sc = dPtr->mainScan & 0xFF;
+                if (scancodeCount[sc].load(std::memory_order_relaxed) > 0) {
+                    if (scancodeOwner[sc] == dPtr) scancodeCount[sc].fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                scancodeOwner[sc] = dPtr;
+                scancodeCount[sc].fetch_add(1, std::memory_order_relaxed);
+                append(dPtr->press.data(), dPtr->pressCount);
+                pressing = true;
             }
         }
         // Send the velocity tap even when the note sent no press, or
         // sent_velocity would claim a velocity the game never received.
         // A Shift lift on its own is not sent.
-        if (batchCount > (lifted ? 1u : 0u) && !batchSent) input_latency::send((UINT)batchCount, batch, sizeof(INPUT));
+        if (batchCount > (lifted && !pressing ? 1u : 0u)) input_latency::send((UINT)batchCount, batch, sizeof(INPUT));
     }
     // Handle Note Off (0x80 or 0x90 with velocity == 0)
     else if ((cmd == 0x90 && bytes[2] == 0) || cmd == 0x80) {
         uint8_t note = bytes[1];
-        int midi_n = g_adjustedNote[note];
-        PrecomputedKeyEvents* evPtr = p.eightyEightKeyModeActive ? g_fullKeyEvents[midi_n] : g_limitedKeyEvents[midi_n];
-        if (evPtr) {
-            bool wasPressed = pressed[midi_n].exchange(false, std::memory_order_relaxed);
-            if (wasPressed) {
-                WORD sc = evPtr->mainScan & 0xFF;
-                PrecomputedKeyEvents* ownerPtr = scancodeOwner[sc];
-                if (ownerPtr == evPtr) {
-                    short c = scancodeCount[sc].fetch_sub(1, std::memory_order_relaxed);
-                    if (c == 1) {
-                        input_latency::send((UINT)evPtr->releaseCount, evPtr->release.data(), sizeof(INPUT));
-                        scancodeOwner[sc] = nullptr;
-                    }
-                }
+        const bool full = p.eightyEightKeyModeActive;
+        // The note and its doubles come up in one batch.
+        INPUT ups[5 * 16];
+        size_t upCount = 0;
+        const auto letGo = [&](int slot, bool doubled) {
+            PrecomputedKeyEvents* evPtr = full ? g_fullKeyEvents[slot] : g_limitedKeyEvents[slot];
+            if (!evPtr) return;
+            // A key comes up when neither its own note nor a double holds it.
+            if (doubled) {
+                if (m_doubleHolds[slot].load(std::memory_order_relaxed) == 0) return;
+                if (m_doubleHolds[slot].fetch_sub(1, std::memory_order_relaxed) != 1 ||
+                    pressed[slot].load(std::memory_order_relaxed)) return;
             }
+            else if (!pressed[slot].exchange(false, std::memory_order_relaxed) ||
+                     m_doubleHolds[slot].load(std::memory_order_relaxed) > 0) return;
+            WORD sc = evPtr->mainScan & 0xFF;
+            if (scancodeOwner[sc] != evPtr) return;
+            if (scancodeCount[sc].fetch_sub(1, std::memory_order_relaxed) != 1) return;
+            for (size_t i = 0; i < evPtr->releaseCount; ++i) ups[upCount++] = evPtr->release[i];
+            scancodeOwner[sc] = nullptr;
+        };
+        letGo(g_adjustedNote[note], false);
+        for (int8_t& slot : m_struck[note]) {
+            if (slot >= 0) letGo(slot, true);
+            slot = -1;
         }
+        if (upCount) input_latency::send((UINT)upCount, ups, sizeof(INPUT));
     }
     // Handle Control Change (sustain pedal, controller 64). A continuous pedal
     // resting at the cutoff would flutter the key, so a pedal that is down
@@ -724,6 +797,20 @@ void MIDI2Key::ProcessMidiMessage(uint64_t timestampQpc, const uint8_t* bytes, s
                 shouldPress ? KEYEVENTF_SCANCODE : (KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP));
             input_latency::send(1, &sustain, sizeof(INPUT));
             p.isSustainPressed = shouldPress;
+        }
+    }
+    // Sostenuto (controller 66): the same cutoff and hysteresis, never inverted.
+    else if (cmd == 0xB0 && bytes[1] == 66) {
+        constexpr int kSustainHysteresis = 4;
+        const int cutoff = g_sustainCutoff.load(std::memory_order_relaxed);
+        const int held = (std::min)(cutoff, (std::max)(cutoff - kSustainHysteresis, 1));
+        const bool pedal_on = bytes[2] >= (m_sostenutoDown.load(std::memory_order_relaxed) ? held : cutoff);
+        m_sostenutoDown.store(pedal_on, std::memory_order_relaxed);
+        if (pedal_on != p.isSostenutoPressed) {
+            INPUT sostenuto = makeKeybdInput(SostenutoScan(*m_player),
+                (pedal_on ? KEYEVENTF_SCANCODE : (KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP)) | SostenutoExtended(*m_player));
+            input_latency::send(1, &sostenuto, sizeof(INPUT));
+            p.isSostenutoPressed = pedal_on;
         }
     }
 }

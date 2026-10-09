@@ -1,0 +1,917 @@
+{
+ "normalize": "NFKC",
+ "lowercase": true,
+ "solo": [
+  {
+   "term": "solo piano",
+   "source": "(?<![\\p{L}\\p{N}])solo\\s+piano(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "piano solo",
+   "source": "(?<![\\p{L}\\p{N}])piano\\s+solo(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "ピアノソロ",
+   "source": "ピアノソロ",
+   "flags": "u"
+  },
+  {
+   "term": "피아노 솔로",
+   "source": "피아노\\s*솔로",
+   "flags": "u"
+  },
+  {
+   "term": "钢琴独奏",
+   "source": "钢琴独奏",
+   "flags": "u"
+  },
+  {
+   "term": "鋼琴獨奏",
+   "source": "鋼琴獨奏",
+   "flags": "u"
+  },
+  {
+   "term": "ピアノ独奏",
+   "source": "ピアノ独奏",
+   "flags": "u"
+  }
+ ],
+ "other": [
+  {
+   "term": "orchestra",
+   "source": "(?<![\\p{L}\\p{N}])orchestra(?![\\p{L}\\p{N}])",
+   "flags": "u",
+   "unless": [
+    {
+     "term": "without orchestra",
+     "source": "(?<![\\p{L}\\p{N}])without\\s+orchestra(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "minus orchestra",
+     "source": "(?<![\\p{L}\\p{N}])minus\\s+orchestra(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "no orchestra",
+     "source": "(?<![\\p{L}\\p{N}])no\\s+orchestra(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "sans orchestre",
+     "source": "(?<![\\p{L}\\p{N}])sans\\s+orchestre(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    }
+   ]
+  },
+  {
+   "term": "orchestral",
+   "source": "(?<![\\p{L}\\p{N}])orchestral(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "symphony",
+   "source": "(?<![\\p{L}\\p{N}])symphony(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "ensemble",
+   "source": "(?<![\\p{L}\\p{N}])ensemble(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "quartet",
+   "source": "(?<![\\p{L}\\p{N}])quartet(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "trio",
+   "source": "(?<![\\p{L}\\p{N}])trio(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "4 hands",
+   "source": "(?<![\\p{L}\\p{N}])4\\s+hands(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "4-hands",
+   "source": "(?<![\\p{L}\\p{N}])4-hands(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "four hands",
+   "source": "(?<![\\p{L}\\p{N}])four\\s+hands(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "two pianos",
+   "source": "(?<![\\p{L}\\p{N}])two\\s+pianos(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "2 pianos",
+   "source": "(?<![\\p{L}\\p{N}])2\\s+pianos(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "piano duo",
+   "source": "(?<![\\p{L}\\p{N}])piano\\s+duo(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "piano duet",
+   "source": "(?<![\\p{L}\\p{N}])piano\\s+duet(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "duet ver",
+   "source": "(?<![\\p{L}\\p{N}])duet\\s+ver(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "violin",
+   "source": "(?<![\\p{L}\\p{N}])violin(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "viola",
+   "source": "(?<![\\p{L}\\p{N}])viola(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "cello",
+   "source": "(?<![\\p{L}\\p{N}])cello(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "flute",
+   "source": "(?<![\\p{L}\\p{N}])flute(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "clarinet",
+   "source": "(?<![\\p{L}\\p{N}])clarinet(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "sax",
+   "source": "(?<![\\p{L}\\p{N}])sax(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "saxophone",
+   "source": "(?<![\\p{L}\\p{N}])saxophone(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "trumpet",
+   "source": "(?<![\\p{L}\\p{N}])trumpet(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "harp",
+   "source": "(?<![\\p{L}\\p{N}])harp(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "guitar",
+   "source": "(?<![\\p{L}\\p{N}])guitar(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "bass guitar",
+   "source": "(?<![\\p{L}\\p{N}])bass\\s+guitar(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "bass cover",
+   "source": "(?<![\\p{L}\\p{N}])bass\\s+cover(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "drum",
+   "source": "(?<![\\p{L}\\p{N}])drum(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "drums",
+   "source": "(?<![\\p{L}\\p{N}])drums(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "full band",
+   "source": "(?<![\\p{L}\\p{N}])full\\s+band(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "band cover",
+   "source": "(?<![\\p{L}\\p{N}])band\\s+cover(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "organ",
+   "source": "(?<![\\p{L}\\p{N}])organ(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "strings",
+   "source": "(?<![\\p{L}\\p{N}])strings(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "accordion",
+   "source": "(?<![\\p{L}\\p{N}])accordion(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "ukulele",
+   "source": "(?<![\\p{L}\\p{N}])ukulele(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "kalimba",
+   "source": "(?<![\\p{L}\\p{N}])kalimba(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "marimba",
+   "source": "(?<![\\p{L}\\p{N}])marimba(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "music box",
+   "source": "(?<![\\p{L}\\p{N}])music\\s+box(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "voice",
+   "source": "(?<![\\p{L}\\p{N}])voice(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "vocal",
+   "source": "(?<![\\p{L}\\p{N}])vocal(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "vocals",
+   "source": "(?<![\\p{L}\\p{N}])vocals(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "singing",
+   "source": "(?<![\\p{L}\\p{N}])singing(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "sings",
+   "source": "(?<![\\p{L}\\p{N}])sings(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "sing along",
+   "source": "(?<![\\p{L}\\p{N}])sing\\s+along(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "choir",
+   "source": "(?<![\\p{L}\\p{N}])choir(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "karaoke",
+   "source": "(?<![\\p{L}\\p{N}])karaoke(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "acapella",
+   "source": "(?<![\\p{L}\\p{N}])acapella(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "a cappella",
+   "source": "(?<![\\p{L}\\p{N}])a\\s+cappella(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "lyric video",
+   "source": "(?<![\\p{L}\\p{N}])lyric\\s+video(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "lyrics video",
+   "source": "(?<![\\p{L}\\p{N}])lyrics\\s+video(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "with lyrics",
+   "source": "(?<![\\p{L}\\p{N}])with\\s+lyrics(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "lofi",
+   "source": "(?<![\\p{L}\\p{N}])lofi(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "lo-fi",
+   "source": "(?<![\\p{L}\\p{N}])lo-fi(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "remix",
+   "source": "(?<![\\p{L}\\p{N}])remix(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "react",
+   "source": "(?<![\\p{L}\\p{N}])react(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "reacts",
+   "source": "(?<![\\p{L}\\p{N}])reacts(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "reaction",
+   "source": "(?<![\\p{L}\\p{N}])reaction(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "concerto",
+   "source": "(?<![\\p{L}\\p{N}])concerto(?![\\p{L}\\p{N}])",
+   "flags": "u",
+   "unless": [
+    {
+     "term": "italian concerto",
+     "source": "(?<![\\p{L}\\p{N}])italian\\s+concerto(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "concerto italien",
+     "source": "(?<![\\p{L}\\p{N}])concerto\\s+italien(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "concerto italiano",
+     "source": "(?<![\\p{L}\\p{N}])concerto\\s+italiano(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "italian style",
+     "source": "(?<![\\p{L}\\p{N}])italian\\s+style(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "italienischem gusto",
+     "source": "(?<![\\p{L}\\p{N}])italienischem\\s+gusto(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "alkan",
+     "source": "(?<![\\p{L}\\p{N}])alkan(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 971",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+971(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv971",
+     "source": "(?<![\\p{L}\\p{N}])bwv971(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 972",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+972(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv972",
+     "source": "(?<![\\p{L}\\p{N}])bwv972(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 973",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+973(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv973",
+     "source": "(?<![\\p{L}\\p{N}])bwv973(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 974",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+974(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv974",
+     "source": "(?<![\\p{L}\\p{N}])bwv974(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 975",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+975(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv975",
+     "source": "(?<![\\p{L}\\p{N}])bwv975(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 976",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+976(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv976",
+     "source": "(?<![\\p{L}\\p{N}])bwv976(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 977",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+977(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv977",
+     "source": "(?<![\\p{L}\\p{N}])bwv977(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 978",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+978(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv978",
+     "source": "(?<![\\p{L}\\p{N}])bwv978(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 979",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+979(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv979",
+     "source": "(?<![\\p{L}\\p{N}])bwv979(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 980",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+980(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv980",
+     "source": "(?<![\\p{L}\\p{N}])bwv980(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 981",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+981(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv981",
+     "source": "(?<![\\p{L}\\p{N}])bwv981(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 982",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+982(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv982",
+     "source": "(?<![\\p{L}\\p{N}])bwv982(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 983",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+983(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv983",
+     "source": "(?<![\\p{L}\\p{N}])bwv983(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 984",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+984(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv984",
+     "source": "(?<![\\p{L}\\p{N}])bwv984(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 985",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+985(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv985",
+     "source": "(?<![\\p{L}\\p{N}])bwv985(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 986",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+986(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv986",
+     "source": "(?<![\\p{L}\\p{N}])bwv986(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv 987",
+     "source": "(?<![\\p{L}\\p{N}])bwv\\s+987(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "bwv987",
+     "source": "(?<![\\p{L}\\p{N}])bwv987(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "solo",
+     "source": "(?<![\\p{L}\\p{N}])solo(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "piano seul",
+     "source": "(?<![\\p{L}\\p{N}])piano\\s+seul(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "piano alone",
+     "source": "(?<![\\p{L}\\p{N}])piano\\s+alone(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "without orchestra",
+     "source": "(?<![\\p{L}\\p{N}])without\\s+orchestra(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "minus orchestra",
+     "source": "(?<![\\p{L}\\p{N}])minus\\s+orchestra(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "no orchestra",
+     "source": "(?<![\\p{L}\\p{N}])no\\s+orchestra(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "sans orchestre",
+     "source": "(?<![\\p{L}\\p{N}])sans\\s+orchestre(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "piano cover",
+     "source": "(?<![\\p{L}\\p{N}])piano\\s+cover(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "piano version",
+     "source": "(?<![\\p{L}\\p{N}])piano\\s+version(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "piano arrangement",
+     "source": "(?<![\\p{L}\\p{N}])piano\\s+arrangement(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "arranged for piano",
+     "source": "(?<![\\p{L}\\p{N}])arranged\\s+for\\s+piano(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "arr. for piano",
+     "source": "(?<![\\p{L}\\p{N}])arr\\.\\s+for\\s+piano(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "piano transcription",
+     "source": "(?<![\\p{L}\\p{N}])piano\\s+transcription(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "transcribed for piano",
+     "source": "(?<![\\p{L}\\p{N}])transcribed\\s+for\\s+piano(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    },
+    {
+     "term": "stride",
+     "source": "(?<![\\p{L}\\p{N}])stride(?![\\p{L}\\p{N}])",
+     "flags": "u"
+    }
+   ]
+  },
+  {
+   "term": "concerto da camera",
+   "source": "(?<![\\p{L}\\p{N}])concerto\\s+da\\s+camera(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "連弾",
+   "source": "連弾",
+   "flags": "u"
+  },
+  {
+   "term": "四手",
+   "source": "四手",
+   "flags": "u"
+  },
+  {
+   "term": "연탄",
+   "source": "연탄",
+   "flags": "u"
+  },
+  {
+   "term": "合唱",
+   "source": "合唱",
+   "flags": "u"
+  },
+  {
+   "term": "歌ってみた",
+   "source": "歌ってみた",
+   "flags": "u"
+  },
+  {
+   "term": "弾き語り",
+   "source": "弾き語り",
+   "flags": "u"
+  },
+  {
+   "term": "歌詞",
+   "source": "歌詞",
+   "flags": "u"
+  },
+  {
+   "term": "バイオリン",
+   "source": "バイオリン",
+   "flags": "u"
+  },
+  {
+   "term": "ヴァイオリン",
+   "source": "ヴァイオリン",
+   "flags": "u"
+  },
+  {
+   "term": "바이올린",
+   "source": "바이올린",
+   "flags": "u"
+  },
+  {
+   "term": "小提琴",
+   "source": "小提琴",
+   "flags": "u"
+  },
+  {
+   "term": "チェロ",
+   "source": "チェロ",
+   "flags": "u"
+  },
+  {
+   "term": "大提琴",
+   "source": "大提琴",
+   "flags": "u"
+  },
+  {
+   "term": "ギター",
+   "source": "ギター",
+   "flags": "u"
+  },
+  {
+   "term": "吉他",
+   "source": "吉他",
+   "flags": "u"
+  },
+  {
+   "term": "オーケストラ",
+   "source": "オーケストラ",
+   "flags": "u"
+  },
+  {
+   "term": "管弦楽",
+   "source": "管弦楽",
+   "flags": "u"
+  },
+  {
+   "term": "交响",
+   "source": "交响",
+   "flags": "u"
+  },
+  {
+   "term": "오케스트라",
+   "source": "오케스트라",
+   "flags": "u"
+  },
+  {
+   "term": "二胡",
+   "source": "二胡",
+   "flags": "u"
+  },
+  {
+   "term": "古箏",
+   "source": "古箏",
+   "flags": "u"
+  }
+ ],
+ "lesson": [
+  {
+   "term": "tutorial",
+   "source": "(?<![\\p{L}\\p{N}])tutorial(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "how to play",
+   "source": "(?<![\\p{L}\\p{N}])how\\s+to\\s+play(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "lesson",
+   "source": "(?<![\\p{L}\\p{N}])lesson(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "lessons",
+   "source": "(?<![\\p{L}\\p{N}])lessons(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "for beginners",
+   "source": "(?<![\\p{L}\\p{N}])for\\s+beginners(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "beginner piano",
+   "source": "(?<![\\p{L}\\p{N}])beginner\\s+piano(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "easy piano",
+   "source": "(?<![\\p{L}\\p{N}])easy\\s+piano(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "piano easy",
+   "source": "(?<![\\p{L}\\p{N}])piano\\s+easy(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "easy version",
+   "source": "(?<![\\p{L}\\p{N}])easy\\s+version(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "easy ver",
+   "source": "(?<![\\p{L}\\p{N}])easy\\s+ver(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "slow version",
+   "source": "(?<![\\p{L}\\p{N}])slow\\s+version(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "learn to play",
+   "source": "(?<![\\p{L}\\p{N}])learn\\s+to\\s+play(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "play along",
+   "source": "(?<![\\p{L}\\p{N}])play\\s+along(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "quiz",
+   "source": "(?<![\\p{L}\\p{N}])quiz(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "interview",
+   "source": "(?<![\\p{L}\\p{N}])interview(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "evolution of",
+   "source": "(?<![\\p{L}\\p{N}])evolution\\s+of(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "easy to impossible",
+   "source": "(?<![\\p{L}\\p{N}])easy\\s+to\\s+impossible(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "levels of",
+   "source": "(?<![\\p{L}\\p{N}])levels\\s+of(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "technique",
+   "source": "(?<![\\p{L}\\p{N}])technique(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "techniques",
+   "source": "(?<![\\p{L}\\p{N}])techniques(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "masterclass",
+   "source": "(?<![\\p{L}\\p{N}])masterclass(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "master class",
+   "source": "(?<![\\p{L}\\p{N}])master\\s+class(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "crash course",
+   "source": "(?<![\\p{L}\\p{N}])crash\\s+course(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "explained",
+   "source": "(?<![\\p{L}\\p{N}])explained(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "piano 101",
+   "source": "(?<![\\p{L}\\p{N}])piano\\s+101(?![\\p{L}\\p{N}])",
+   "flags": "u"
+  },
+  {
+   "term": "弾き方",
+   "source": "弾き方",
+   "flags": "u"
+  },
+  {
+   "term": "初心者",
+   "source": "初心者",
+   "flags": "u"
+  },
+  {
+   "term": "簡単",
+   "source": "簡単",
+   "flags": "u"
+  },
+  {
+   "term": "講座",
+   "source": "講座",
+   "flags": "u"
+  },
+  {
+   "term": "강좌",
+   "source": "강좌",
+   "flags": "u"
+  },
+  {
+   "term": "레슨",
+   "source": "레슨",
+   "flags": "u"
+  },
+  {
+   "term": "쉬운",
+   "source": "쉬운",
+   "flags": "u"
+  },
+  {
+   "term": "教学",
+   "source": "教学",
+   "flags": "u"
+  },
+  {
+   "term": "教程",
+   "source": "教程",
+   "flags": "u"
+  }
+ ],
+ "piano": [
+  "piano",
+  "pianist",
+  "ピアノ",
+  "피아노",
+  "钢琴",
+  "鋼琴"
+ ]
+}

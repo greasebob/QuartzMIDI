@@ -1,0 +1,12 @@
+{
+  "lock": false,
+  "exclude": ["browser/", "python/", "deno/", "ffmpeg/", "cookies.txt"],
+  "lint": {
+    "include": ["page/", "tests/"],
+    "rules": { "exclude": ["no-window", "no-window-prefix"] }
+  },
+  "test": {
+    "include": ["tests/"],
+    "permissions": { "read": true }
+  }
+}

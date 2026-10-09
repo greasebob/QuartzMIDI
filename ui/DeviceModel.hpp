@@ -43,7 +43,7 @@ inline const DeviceGroup* SelectedGroup(const std::vector<DeviceGroup>& groups, 
 inline std::wstring PreferredInput(const DeviceGroup& group, const std::wstring& selected) {
     for (const auto& input : group.inputs) if (input.id == selected) return selected;
     for (const auto backend : {MidiBackend::KernelStreaming, MidiBackend::WinRT, MidiBackend::WinMM, MidiBackend::WootingAnalog,
-                               MidiBackend::NamedPort})
+                               MidiBackend::NamedPort, MidiBackend::Qwerty})
         for (const auto& input : group.inputs) if (input.backend == backend) return input.id;
     return {};
 }

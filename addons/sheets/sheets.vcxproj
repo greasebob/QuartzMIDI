@@ -6,7 +6,7 @@
   <!-- Same toolset selection as ui\QuartzMIDI.vcxproj. -->
   <PropertyGroup Label="Configuration"><ConfigurationType>DynamicLibrary</ConfigurationType><PlatformToolset>v143</PlatformToolset><PlatformToolset Condition="!Exists('$(VCTargetsPath)\Platforms\x64\PlatformToolsets\v143\Toolset.props') And '$(DefaultPlatformToolset)' != ''">$(DefaultPlatformToolset)</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
-  <PropertyGroup><LinkIncremental>false</LinkIncremental><TargetName>sheets</TargetName><OutDir>$(MSBuildThisFileDirectory)..\..\build\addons\sheets\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\..\build\addons\sheets-obj\</IntDir></PropertyGroup>
+  <PropertyGroup><RepoRoot>$(MSBuildThisFileDirectory)..\..\</RepoRoot><LinkIncremental>false</LinkIncremental><TargetName>sheets</TargetName><OutDir>$(MSBuildThisFileDirectory)..\..\build\addons\sheets\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\..\build\addons\sheets-obj\</IntDir></PropertyGroup>
   <ItemDefinitionGroup>
     <!-- json.hpp comes from engine. Static CRT, matching the app, so no redistributable is needed. -->
     <ClCompile><AdditionalOptions>/d1trimfile:"$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..'))" %(AdditionalOptions)</AdditionalOptions><WarningLevel>Level4</WarningLevel><LanguageStandard>stdcpp20</LanguageStandard><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreaded</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\engine;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
@@ -18,6 +18,10 @@
     <ClInclude Include="SheetImage.hpp" />
     <ClInclude Include="SheetPage.hpp" />
   </ItemGroup>
+  <!-- Fetch the bundled fonts from their publishers and check them against fonts.psd1 before the resources compile. -->
+  <Target Name="FetchFonts" BeforeTargets="ResourceCompile">
+    <Exec Command="&quot;%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(RepoRoot)tools\fetch-fonts.ps1&quot;" />
+  </Target>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <!-- Stage next to the built app and sign with the key embedded by ui\QuartzMIDI.vcxproj. -->
   <PropertyGroup>

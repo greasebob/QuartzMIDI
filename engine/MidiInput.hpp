@@ -17,7 +17,8 @@ enum class MidiBackend {
     WinMM,   // legacy midiIn*, through the vendored RtMidi
     KernelStreaming, // KS MIDI capture pin, which WinRT and WinMM sit on
     WootingAnalog, // analog key depth from the Wooting SDK
-    NamedPort // output only: a port this app creates (see MidiOutput.hpp)
+    NamedPort, // output only: a port this app creates (see MidiOutput.hpp)
+    Qwerty   // the computer keyboard's mapped keys, read through a keyboard hook
 };
 
 struct MidiInputDevice {

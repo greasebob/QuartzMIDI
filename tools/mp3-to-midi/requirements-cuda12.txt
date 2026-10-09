@@ -1,0 +1,25 @@
+# The CUDA 12 engine, for NVIDIA cards from the GTX 10 series (compute
+# capability 6.1) on, with driver 528 or later. Installed with --no-deps beside
+# requirements.txt; tools\pin-hashes.py writes the hashes.
+#
+# onnxruntime-gpu 1.26 is the last built with CUDA 12.8, and its Windows build
+# holds code for 6.1, 7.5, 8.6 and 8.9 plus PTX for 9.0, which newer cards
+# compile on first use. cuDNN stays on 9.10, the last to support Pascal and
+# Volta. The NVIDIA wheels are the libraries onnxruntime.preload_dlls() loads.
+
+onnxruntime-gpu==1.26.0 \
+    --hash=sha256:5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491
+nvidia-cuda-runtime-cu12==12.9.79 \
+    --hash=sha256:8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891
+nvidia-cuda-nvrtc-cu12==12.9.86 \
+    --hash=sha256:72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349
+nvidia-cublas-cu12==12.9.2.10 \
+    --hash=sha256:623f43027d40d44ceadf0043f002bd25cf353e8f13ce90b9a87057019f560661
+nvidia-cufft-cu12==11.4.1.4 \
+    --hash=sha256:8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80
+nvidia-curand-cu12==10.3.10.19 \
+    --hash=sha256:e8129e6ac40dc123bd948e33d3e11b4aa617d87a583fa2f21b3210e90c743cde
+nvidia-nvjitlink-cu12==12.9.86 \
+    --hash=sha256:cc6fcec260ca843c10e34c936921a1c426b351753587fdd638e8cff7b16bb9db
+nvidia-cudnn-cu12==9.10.2.21 \
+    --hash=sha256:c6288de7d63e6cf62988f0923f96dc339cea362decb1bf5b3141883392a7d65e
