@@ -1,18 +1,19 @@
 # QuartzMIDI
 
-QuartzMIDI plays MIDI files on a game's piano by typing the notes into the active window, and plays that piano live from a MIDI keyboard.
+QuartzMIDI is a MIDI app for Roblox pianos. It plays your MIDI keyboard on any game piano, with a sheet editor, audio to MIDI and a song library.
 
 By BobGrease. Based on [MIDI++](https://github.com/Zephkek/MIDIPlusPlus) by Zephkek.
 
 ## Features
 
-- Autoplay on 61 or 88 keys, with velocity, sustain, speed, transpose, fold, octaves and loop.
-- Pauses when the game loses focus and picks up where it left off.
+- Live play from a MIDI keyboard or a Wooting analog keyboard, over Kernel Streaming or WinMM.
+- A sheet editor and audio to MIDI, as add-ons.
 - A MIDI library with folders, search, favourites, playlists and a queue.
+- MIDI files played on 61 or 88 keys, with velocity, sustain, speed, transpose, fold, octaves and loop.
+- Pauses when the game loses focus and picks up where it left off.
 - Hotkeys that work from inside the game, for the transport and the window, on keys or mouse buttons.
 - Tracks with mute, solo and Solo Piano.
 - The game's key maps: Major, Dorian, Lydian, Locrian, Mixolydian, Minor, Phrygian and Phrygian Dom.
-- Live play from a MIDI keyboard or a Wooting analog keyboard, over Kernel Streaming or WinMM.
 - MIDI output to a port instead of typed keys.
 - A velocity curve editor and AutoVol.
 - Themes with light and dark palettes, an editor, Import and Export.
